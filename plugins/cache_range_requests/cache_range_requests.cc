@@ -187,7 +187,7 @@ range_header_check(TSHttpTxn txnp, pluginconfig *const pc)
 {
   char cache_key_url[8192] = {0};
   char *req_url;
-  int length, url_length, cache_key_url_length;
+  int length, url_length, cache_key_url_length = 0;
   txndata *txn_state;
   TSMBuffer hdr_buf;
   TSMLoc hdr_loc = nullptr;
