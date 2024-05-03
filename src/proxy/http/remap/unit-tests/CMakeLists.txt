@@ -27,35 +27,34 @@ function(add_plugin_ut_lib name)
   )
 endfunction()
 
-# Test plugins will not build on OSX
 #
-# add_plugin_ut_lib(plugin_v1 plugin_misc_cb.cc)
-# target_compile_definitions(plugin_v1 PRIVATE PLUGINDSOVER=1)
+add_plugin_ut_lib(plugin_v1 plugin_misc_cb.cc)
+target_compile_definitions(plugin_v1 PRIVATE PLUGINDSOVER=1)
 #
-# add_plugin_ut_lib(plugin_v2 plugin_misc_cb.cc)
-# target_compile_definitions(plugin_v2 PRIVATE PLUGINDSOVER=2)
+add_plugin_ut_lib(plugin_v2 plugin_misc_cb.cc)
+target_compile_definitions(plugin_v2 PRIVATE PLUGINDSOVER=2)
 #
-# add_plugin_ut_lib(plugin_init_fail plugin_init_fail.cc)
+add_plugin_ut_lib(plugin_init_fail plugin_init_fail.cc)
 #
-# add_plugin_ut_lib(plugin_instinit_fail plugin_instinit_fail.cc)
+add_plugin_ut_lib(plugin_instinit_fail plugin_instinit_fail.cc)
 #
-# add_plugin_ut_lib(plugin_required_cb plugin_required_cb.cc)
-# target_compile_definitions(plugin_required_cb PRIVATE PLUGINDSOVER=1)
+add_plugin_ut_lib(plugin_required_cb plugin_required_cb.cc)
+target_compile_definitions(plugin_required_cb PRIVATE PLUGINDSOVER=1)
 #
-# add_plugin_ut_lib(plugin_missing_deleteinstance plugin_missing_deleteinstance.cc)
-# target_compile_definitions(plugin_missing_deleteinstance PRIVATE PLUGINDSOVER=1)
+add_plugin_ut_lib(plugin_missing_deleteinstance plugin_missing_deleteinstance.cc)
+target_compile_definitions(plugin_missing_deleteinstance PRIVATE PLUGINDSOVER=1)
 #
-# add_plugin_ut_lib(plugin_missing_doremap plugin_missing_doremap.cc)
-# target_compile_definitions(plugin_missing_doremap PRIVATE PLUGINDSOVER=1)
+add_plugin_ut_lib(plugin_missing_doremap plugin_missing_doremap.cc)
+target_compile_definitions(plugin_missing_doremap PRIVATE PLUGINDSOVER=1)
 #
-# add_plugin_ut_lib(plugin_missing_init plugin_missing_init.cc)
-# target_compile_definitions(plugin_missing_init PRIVATE PLUGINDSOVER=1)
+add_plugin_ut_lib(plugin_missing_init plugin_missing_init.cc)
+target_compile_definitions(plugin_missing_init PRIVATE PLUGINDSOVER=1)
 #
-# add_plugin_ut_lib(plugin_missing_newinstance plugin_missing_newinstance.cc)
-# target_compile_definitions(plugin_missing_newinstance PRIVATE PLUGINDSOVER=1)
+add_plugin_ut_lib(plugin_missing_newinstance plugin_missing_newinstance.cc)
+target_compile_definitions(plugin_missing_newinstance PRIVATE PLUGINDSOVER=1)
 #
-# add_plugin_ut_lib(plugin_testing_calls plugin_testing_calls.cc plugin_testing_common.cc)
-# target_compile_definitions(plugin_testing_calls PRIVATE PLUGINDSOVER=1)
+add_plugin_ut_lib(plugin_testing_calls plugin_testing_calls.cc plugin_testing_common.cc)
+target_compile_definitions(plugin_testing_calls PRIVATE PLUGINDSOVER=1)
 
 ### test_PluginDso ########################################################################
 
