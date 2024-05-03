@@ -32,7 +32,8 @@
 #include "ts/ts.h"
 #include "ts/remap.h"
 
-PluginDebugObject debugObject;
+PluginDebugObject                        debugObject;
+extern thread_local PluginThreadContext *pluginThreadContext;
 
 TSReturnCode
 TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
