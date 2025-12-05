@@ -2,10 +2,10 @@
 rules:
   - name: "xxe_add_header"
     direction: request
-    action: [log, add_header]
-    add_header:
-      name: "X-Security-Match"
-      value: "xxe-detected"
+    action:
+      - log
+      - add_header:
+          X-Security-Match: "<rule_name>"
     methods: [POST]
     headers:
       - name: "Content-Type"
@@ -13,4 +13,3 @@ rules:
           - "application/xml"
     body_patterns:
       - "<!ENTITY"
-

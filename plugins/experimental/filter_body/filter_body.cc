@@ -57,13 +57,18 @@ struct HeaderCondition {
   std::vector<std::string> patterns; // case-insensitive match
 };
 
+// Header to add when action triggers
+struct AddHeader {
+  std::string name;
+  std::string value; // supports <rule_name> substitution
+};
+
 // A single filtering rule
 struct Rule {
   std::string                  name;
   Direction                    direction = Direction::REQUEST;
-  unsigned                     actions   = ACTION_LOG; // default: log only
-  std::string                  add_header_name;
-  std::string                  add_header_value;
+  unsigned                     actions   = ACTION_LOG;  // default: log only
+  std::vector<AddHeader>       add_headers;             // headers to add on match
   std::vector<std::string>     methods;                 // for request rules
   std::vector<int>             status_codes;            // for response rules
   int64_t                      max_content_length = -1; // -1 means no limit
@@ -382,6 +387,26 @@ add_header_to_message(TSMBuffer bufp, TSMLoc hdr_loc, std::string const &name, s
  * @param[in]     rule            The matched rule containing actions to execute.
  * @param[in]     matched_pattern The pattern that triggered the match (for logging).
  */
+/**
+ * @brief Substitute <rule_name> placeholder in header value.
+ *
+ * @param[in] value     The header value that may contain <rule_name>.
+ * @param[in] rule_name The rule name to substitute.
+ * @return The value with <rule_name> replaced by the actual rule name.
+ */
+std::string
+substitute_rule_name(std::string const &value, std::string const &rule_name)
+{
+  std::string       result      = value;
+  std::string const placeholder = "<rule_name>";
+  size_t            pos         = 0;
+  while ((pos = result.find(placeholder, pos)) != std::string::npos) {
+    result.replace(pos, placeholder.length(), rule_name);
+    pos += rule_name.length();
+  }
+  return result;
+}
+
 void
 execute_actions(TransformData *data, Rule const *rule, std::string const *matched_pattern)
 {
@@ -394,26 +419,32 @@ execute_actions(TransformData *data, Rule const *rule, std::string const *matche
            matched_pattern ? matched_pattern->c_str() : "unknown");
   }
 
-  if ((rule->actions & ACTION_ADD_HEADER) && !data->headers_added) {
+  if ((rule->actions & ACTION_ADD_HEADER) && !data->headers_added && !rule->add_headers.empty()) {
     TSMBuffer bufp;
     TSMLoc    hdr_loc;
     bool      success = false;
 
     if (data->direction == Direction::REQUEST) {
-      // For request rules: add header to server request (proxy request going to origin)
+      // For request rules: add headers to server request (proxy request going to origin)
       if (TSHttpTxnServerReqGet(data->txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
-        add_header_to_message(bufp, hdr_loc, rule->add_header_name, rule->add_header_value);
+        for (auto const &hdr : rule->add_headers) {
+          std::string value = substitute_rule_name(hdr.value, rule->name);
+          add_header_to_message(bufp, hdr_loc, hdr.name, value);
+          Dbg(dbg_ctl, "Added header %s: %s to server request", hdr.name.c_str(), value.c_str());
+        }
         TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
         success = true;
-        Dbg(dbg_ctl, "Added header %s: %s to server request", rule->add_header_name.c_str(), rule->add_header_value.c_str());
       }
     } else {
-      // For response rules: add header to client response
+      // For response rules: add headers to client response
       if (TSHttpTxnClientRespGet(data->txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
-        add_header_to_message(bufp, hdr_loc, rule->add_header_name, rule->add_header_value);
+        for (auto const &hdr : rule->add_headers) {
+          std::string value = substitute_rule_name(hdr.value, rule->name);
+          add_header_to_message(bufp, hdr_loc, hdr.name, value);
+          Dbg(dbg_ctl, "Added header %s: %s to client response", hdr.name.c_str(), value.c_str());
+        }
         TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
         success = true;
-        Dbg(dbg_ctl, "Added header %s: %s to client response", rule->add_header_name.c_str(), rule->add_header_value.c_str());
       }
     }
 
@@ -778,31 +809,35 @@ parse_config(const char *filename)
       }
 
       // Actions (default: [log])
+      // Supports string actions: "log", "block"
+      // Supports map actions with add_header:
+      //   - add_header:
+      //       X-Header-Name: header-value
+      //       X-Another: <rule_name>
       rule.actions = 0;
       if (rule_node["action"]) {
         for (auto const &action_node : rule_node["action"]) {
-          std::string action = action_node.as<std::string>();
-          if (action == "log") {
-            rule.actions |= ACTION_LOG;
-          } else if (action == "block") {
-            rule.actions |= ACTION_BLOCK;
-          } else if (action == "add_header") {
-            rule.actions |= ACTION_ADD_HEADER;
+          if (action_node.IsScalar()) {
+            std::string action = action_node.as<std::string>();
+            if (action == "log") {
+              rule.actions |= ACTION_LOG;
+            } else if (action == "block") {
+              rule.actions |= ACTION_BLOCK;
+            }
+          } else if (action_node.IsMap() && action_node["add_header"]) {
+            rule.actions             |= ACTION_ADD_HEADER;
+            auto const &headers_node  = action_node["add_header"];
+            for (auto const &hdr : headers_node) {
+              AddHeader add_hdr;
+              add_hdr.name  = hdr.first.as<std::string>();
+              add_hdr.value = hdr.second.as<std::string>();
+              rule.add_headers.push_back(add_hdr);
+            }
           }
         }
       }
       if (rule.actions == 0) {
         rule.actions = ACTION_LOG; // default
-      }
-
-      // Add header config
-      if (rule_node["add_header"]) {
-        if (rule_node["add_header"]["name"]) {
-          rule.add_header_name = rule_node["add_header"]["name"].as<std::string>();
-        }
-        if (rule_node["add_header"]["value"]) {
-          rule.add_header_value = rule_node["add_header"]["value"].as<std::string>();
-        }
       }
 
       // Methods (for request rules)

@@ -94,8 +94,9 @@ The configuration file uses YAML format with a list of rules::
         action:
           - log
           - block
-        add_header_name: X-Security-Match
-        add_header_value: "<rule_name>"
+          - add_header:
+              X-Security-Match: <rule_name>
+              X-Another-Header: some-value
 
 For response rules, use ``status`` instead of ``methods``::
 
@@ -151,15 +152,15 @@ Rule Options
 
     - ``log``: Log the match to the Traffic Server log.
     - ``block``: Block the request/response with a 403 Forbidden status.
-    - ``add_header``: Add a custom header to the request/response.
+    - ``add_header``: Add custom headers to the request/response. This action
+      takes a map of header names to values. Use ``<rule_name>`` in header
+      values to substitute the rule's name dynamically. Example::
 
-``add_header_name`` (optional)
-    Name of the header to add when ``add_header`` action is configured.
-
-``add_header_value`` (optional)
-    Value of the header to add. Defaults to the rule name if not specified.
-    Use the special value ``<rule_name>`` to substitute the rule's name
-    dynamically.
+          action:
+            - log
+            - add_header:
+                X-Security-Match: <rule_name>
+                X-Custom-Flag: matched
 
 Matching Logic
 ==============
@@ -245,19 +246,27 @@ When the ``block`` action is configured, the request or response is blocked:
 Add Header Action
 -----------------
 
-When the ``add_header`` action is configured, a custom header is added:
+When the ``add_header`` action is configured, custom headers are added:
 
-- For request rules: The header is added to the server request (proxy request
+- For request rules: Headers are added to the server request (proxy request
   going to the origin). This header modification occurs during body inspection,
   after the initial request headers have been read but before they are sent
   to the origin.
 
-- For response rules: The header is added to the client response. Since body
-  inspection occurs during response streaming, the header is added before the
+- For response rules: Headers are added to the client response. Since body
+  inspection occurs during response streaming, headers are added before the
   response body is sent to the client.
 
-The header name and value are specified using the ``add_header`` configuration
-block with ``name`` and ``value`` fields.
+The ``add_header`` action takes a map of header names and values::
+
+    action:
+      - add_header:
+          X-Security-Match: <rule_name>
+          X-Custom-Flag: detected
+
+Use the special placeholder ``<rule_name>`` in header values to substitute the
+rule's name dynamically. Multiple headers can be specified in a single
+``add_header`` action.
 
 .. note::
 
@@ -315,8 +324,8 @@ Log potential SQL injection attempts without blocking::
           - "1=1"
         action:
           - log
-        add_header_name: X-Security-Warning
-        add_header_value: sql-injection-detected
+          - add_header:
+              X-Security-Warning: sql-injection-detected
 
 Sensitive Data Detection in Responses
 -------------------------------------
@@ -337,9 +346,9 @@ Add a header when response contains sensitive patterns::
           - "credit_card"
         action:
           - log
-          - add_header
-        add_header_name: X-Data-Classification
-        add_header_value: sensitive
+          - add_header:
+              X-Data-Classification: sensitive
+              X-Rule-Matched: <rule_name>
 
 Metrics
 =======

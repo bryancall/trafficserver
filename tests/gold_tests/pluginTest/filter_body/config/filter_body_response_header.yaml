@@ -2,7 +2,11 @@
 rules:
   - name: "sensitive_response"
     direction: response
-    action: [log, add_header]
+    action:
+      - log
+      - add_header:
+          X-Data-Classification: "sensitive"
+          X-Rule-Name: "<rule_name>"
     status: [200]
     headers:
       - name: "Content-Type"
@@ -10,6 +14,3 @@ rules:
           - "application/json"
     body_patterns:
       - "secret_data"
-    add_header_name: "X-Data-Classification"
-    add_header_value: "sensitive"
-

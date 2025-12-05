@@ -52,8 +52,8 @@ autest:
     log_validation:
       traffic_out:
         contains:
-          - expression: "Added header X-Security-Match: xxe-detected"
-            description: "Verify that the header was added"
+          - expression: "Added header X-Security-Match: xxe_add_header"
+            description: "Verify that the header was added with rule name"
 
 sessions:
   - transactions:
@@ -76,7 +76,7 @@ sessions:
           url: /api/data
           headers:
             fields:
-              - [X-Security-Match, { value: "xxe-detected", as: equal }]
+              - [X-Security-Match, { value: "xxe_add_header", as: equal }]
 
         server-response:
           status: 200
