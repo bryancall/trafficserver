@@ -336,9 +336,9 @@ Limitations
    body pattern configured. Very long patterns may increase memory usage.
 
 4. **Cross-boundary pattern search**: When searching for patterns that may span
-   buffer block boundaries, the plugin must copy the lookback buffer contents
-   plus the current block into a temporary string. This copy is limited to
-   (max pattern length - 1) + (current block size) bytes.
+   buffer block boundaries, the plugin uses a two-phase search. The boundary
+   search copies only a small region (at most 2 * max pattern length bytes) to
+   detect patterns spanning boundaries. The main block search is zero-copy.
 
 5. **Performance**: Body inspection adds processing overhead. Use
    ``max_content_length`` to limit inspection to smaller bodies when appropriate.

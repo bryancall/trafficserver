@@ -479,33 +479,46 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
           const char *block_data  = TSIOBufferBlockReadStart(block, reader, &block_avail);
 
           if (block_data && block_avail > 0) {
-            // Search for patterns in lookback + current block.
-            // Note: When lookback is non-empty, we must copy data into a contiguous
-            // buffer to search for patterns that may span block boundaries. This is
-            // not truly zero-copy but is necessary for correctness. The lookback
-            // buffer is kept small (max pattern length - 1 bytes).
-            std::string search_window;
-            if (!data->lookback.empty()) {
-              search_window = data->lookback + std::string(block_data, block_avail);
+            // Two-phase search to minimize memory copying:
+            //
+            // Phase 1 (boundary search): When we have lookback data, create a small
+            // buffer containing the lookback + first few bytes of the current block.
+            // This catches patterns that span block boundaries. The copy is limited
+            // to at most (2 * max_lookback) bytes.
+            //
+            // Phase 2 (block search): Search the entire current block in-place
+            // (zero-copy). This catches patterns entirely within the block.
+
+            // Phase 1: Boundary search (only when we have lookback data)
+            if (!data->lookback.empty() && !data->blocked) {
+              // Create small boundary buffer: lookback + first (max_lookback) bytes of block
+              size_t      boundary_extent = std::min(static_cast<size_t>(block_avail), data->config->max_lookback);
+              std::string boundary_buffer;
+              boundary_buffer.reserve(data->lookback.length() + boundary_extent);
+              boundary_buffer = data->lookback;
+              boundary_buffer.append(block_data, boundary_extent);
+
+              // Search boundary for patterns spanning block boundaries
+              for (const Rule *rule : data->active_rules) {
+                const std::string *matched = search_body_patterns(*rule, boundary_buffer.c_str(), boundary_buffer.length());
+                if (matched) {
+                  execute_actions(data, rule, matched);
+                  if (data->blocked) {
+                    break;
+                  }
+                }
+              }
             }
 
-            const char *search_data;
-            size_t      search_len;
-            if (!data->lookback.empty()) {
-              search_data = search_window.c_str();
-              search_len  = search_window.length();
-            } else {
-              search_data = block_data;
-              search_len  = block_avail;
-            }
-
-            // Check each active rule
-            for (const Rule *rule : data->active_rules) {
-              const std::string *matched = search_body_patterns(*rule, search_data, search_len);
-              if (matched) {
-                execute_actions(data, rule, matched);
-                if (data->blocked) {
-                  break;
+            // Phase 2: Search entire block in-place (zero-copy)
+            if (!data->blocked) {
+              for (const Rule *rule : data->active_rules) {
+                const std::string *matched = search_body_patterns(*rule, block_data, block_avail);
+                if (matched) {
+                  execute_actions(data, rule, matched);
+                  if (data->blocked) {
+                    break;
+                  }
                 }
               }
             }
