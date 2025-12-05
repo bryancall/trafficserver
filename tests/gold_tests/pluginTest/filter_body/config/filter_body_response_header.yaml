@@ -1,0 +1,15 @@
+# Configuration for response body filtering with add_header action
+rules:
+  - name: "sensitive_response"
+    direction: response
+    action: [log, add_header]
+    status: [200]
+    headers:
+      - name: "Content-Type"
+        patterns:
+          - "application/json"
+    body_patterns:
+      - "secret_data"
+    add_header_name: "X-Data-Classification"
+    add_header_value: "sensitive"
+

@@ -15,28 +15,27 @@
 #  limitations under the License.
 
 #
-# Test filter_body plugin detecting sensitive data in responses.
-# Note: Blocking response transforms after streaming has started has limitations.
+# Test filter_body plugin adding header to client response on pattern match.
 #
 meta:
   version: "1.0"
 
 autest:
-  description: 'Verify filter_body detects sensitive data in responses'
+  description: 'Verify filter_body adds header to client response when pattern matches'
 
   server:
-    name: 'filter-server-resp'
+    name: 'filter-server-resp-header'
 
   client:
-    name: 'filter-client-resp'
+    name: 'filter-client-resp-header'
 
   ats:
-    name: 'ts-filter-resp'
+    name: 'ts-filter-resp-header'
     process_config:
       enable_cache: false
 
     copy_to_config_dir:
-      - config/filter_body_response.yaml
+      - config/filter_body_response_header.yaml
 
     records_config:
       proxy.config.diags.debug.enabled: 1
@@ -48,29 +47,29 @@ autest:
         plugins:
           - name: "filter_body.so"
             args:
-              - "filter_body_response.yaml"
+              - "filter_body_response_header.yaml"
 
     log_validation:
       diags_log:
         contains:
-          - expression: "Matched rule: sensitive_data_leak"
-            description: "Verify that the sensitive data rule matched"
+          - expression: "Matched rule: sensitive_response"
+            description: "Verify that the sensitive_response rule matched"
 
 sessions:
   - transactions:
-      # Request that gets response with sensitive data - rule should match and log
+      # Request that gets response with sensitive data - header should be added
       - client-request:
           method: "GET"
           version: "1.1"
-          url: /api/user
+          url: /api/data
           headers:
             fields:
               - [Host, www.example.com]
-              - [uuid, resp-filter-test]
+              - [uuid, resp-header-test]
 
         proxy-request:
           method: "GET"
-          url: /api/user
+          url: /api/data
 
         server-response:
           status: 200
@@ -78,10 +77,11 @@ sessions:
           headers:
             fields:
               - [Content-Type, "application/json"]
-              - [Content-Length, 36]
+              - [Content-Length, 25]
           content:
-            data: '{"name": "John", "SSN: 123-45-6789"}'
+            data: '{"data": "secret_data"}'
 
         proxy-response:
           status: 200
+
 

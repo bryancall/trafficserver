@@ -83,13 +83,14 @@ struct FilterConfig {
 // Per-transaction transform data
 struct TransformData {
   TSHttpTxn                 txnp;
-  const Rule               *matched_rule = nullptr;
-  const FilterConfig       *config       = nullptr;
-  std::vector<const Rule *> active_rules; // rules that passed header check
+  Rule const               *matched_rule = nullptr;
+  FilterConfig const       *config       = nullptr;
+  std::vector<Rule const *> active_rules; // rules that passed header check
   std::string               lookback;     // small buffer for cross-boundary patterns
   TSIOBuffer                output_buffer = nullptr;
   TSIOBufferReader          output_reader = nullptr;
   TSVIO                     output_vio    = nullptr;
+  Direction                 direction     = Direction::REQUEST; // direction of this transform
   bool                      blocked       = false;
   bool                      headers_added = false;
 };
@@ -170,7 +171,7 @@ strstr_local(const char *haystack, size_t haystack_len, const char *needle, size
  * @return true if the method matches or no method restriction exists, false otherwise.
  */
 bool
-method_matches(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
+method_matches(Rule const &rule, TSMBuffer bufp, TSMLoc hdr_loc)
 {
   if (rule.methods.empty()) {
     return true; // no method restriction
@@ -230,7 +231,7 @@ status_matches(Rule const &rule, TSMBuffer bufp, TSMLoc hdr_loc)
  * @return true if content length is within limit or no limit exists, false otherwise.
  */
 bool
-content_length_ok(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
+content_length_ok(Rule const &rule, TSMBuffer bufp, TSMLoc hdr_loc)
 {
   if (rule.max_content_length < 0) {
     return true; // no limit
@@ -259,7 +260,7 @@ content_length_ok(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
  * @return true if the header exists and any pattern matches, false otherwise.
  */
 bool
-header_condition_matches(const HeaderCondition &cond, TSMBuffer bufp, TSMLoc hdr_loc)
+header_condition_matches(HeaderCondition const &cond, TSMBuffer bufp, TSMLoc hdr_loc)
 {
   TSMLoc field_loc = TSMimeHdrFieldFind(bufp, hdr_loc, cond.name.c_str(), static_cast<int>(cond.name.length()));
   if (field_loc == TS_NULL_MLOC) {
@@ -277,7 +278,7 @@ header_condition_matches(const HeaderCondition &cond, TSMBuffer bufp, TSMLoc hdr
     }
 
     // Check if any pattern matches (OR logic within header)
-    for (const auto &pattern : cond.patterns) {
+    for (auto const &pattern : cond.patterns) {
       if (strcasestr_local(value, value_len, pattern.c_str(), pattern.length()) != nullptr) {
         matched = true;
         break;
@@ -301,9 +302,9 @@ header_condition_matches(const HeaderCondition &cond, TSMBuffer bufp, TSMLoc hdr
  * @return true if all header conditions match, false otherwise.
  */
 bool
-headers_match(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
+headers_match(Rule const &rule, TSMBuffer bufp, TSMLoc hdr_loc)
 {
-  for (const auto &cond : rule.headers) {
+  for (auto const &cond : rule.headers) {
     if (!header_condition_matches(cond, bufp, hdr_loc)) {
       return false;
     }
@@ -322,10 +323,10 @@ headers_match(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
  * @param[in] data_len Length of the data buffer in bytes.
  * @return Pointer to the matched pattern string, or nullptr if no match.
  */
-const std::string *
-search_body_patterns(const Rule &rule, const char *data, size_t data_len)
+std::string const *
+search_body_patterns(Rule const &rule, char const *data, size_t data_len)
 {
-  for (const auto &pattern : rule.body_patterns) {
+  for (auto const &pattern : rule.body_patterns) {
     if (strstr_local(data, data_len, pattern.c_str(), pattern.length()) != nullptr) {
       return &pattern;
     }
@@ -344,7 +345,7 @@ search_body_patterns(const Rule &rule, const char *data, size_t data_len)
  * @param[in] value   The header field value.
  */
 void
-add_header_to_message(TSMBuffer bufp, TSMLoc hdr_loc, const std::string &name, const std::string &value)
+add_header_to_message(TSMBuffer bufp, TSMLoc hdr_loc, std::string const &name, std::string const &value)
 {
   TSMLoc field_loc;
   if (TSMimeHdrFieldCreateNamed(bufp, hdr_loc, name.c_str(), static_cast<int>(name.length()), &field_loc) != TS_SUCCESS) {
@@ -382,7 +383,7 @@ add_header_to_message(TSMBuffer bufp, TSMLoc hdr_loc, const std::string &name, c
  * @param[in]     matched_pattern The pattern that triggered the match (for logging).
  */
 void
-execute_actions(TransformData *data, const Rule *rule, const std::string *matched_pattern)
+execute_actions(TransformData *data, Rule const *rule, std::string const *matched_pattern)
 {
   // Increment the metrics counter for this rule (stat_id is guaranteed valid at load time)
   TSStatIntIncrement(rule->stat_id, 1);
@@ -396,21 +397,28 @@ execute_actions(TransformData *data, const Rule *rule, const std::string *matche
   if ((rule->actions & ACTION_ADD_HEADER) && !data->headers_added) {
     TSMBuffer bufp;
     TSMLoc    hdr_loc;
+    bool      success = false;
 
-    // Add header to server request (proxy request going to origin)
-    if (TSHttpTxnServerReqGet(data->txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
-      add_header_to_message(bufp, hdr_loc, rule->add_header_name, rule->add_header_value);
-      TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
-      data->headers_added = true;
-      Dbg(dbg_ctl, "Added header %s: %s", rule->add_header_name.c_str(), rule->add_header_value.c_str());
-    } else {
-      // Fallback to client request if server request not available
-      if (TSHttpTxnClientReqGet(data->txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
+    if (data->direction == Direction::REQUEST) {
+      // For request rules: add header to server request (proxy request going to origin)
+      if (TSHttpTxnServerReqGet(data->txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
         add_header_to_message(bufp, hdr_loc, rule->add_header_name, rule->add_header_value);
         TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
-        data->headers_added = true;
-        Dbg(dbg_ctl, "Added header %s: %s (to client request)", rule->add_header_name.c_str(), rule->add_header_value.c_str());
+        success = true;
+        Dbg(dbg_ctl, "Added header %s: %s to server request", rule->add_header_name.c_str(), rule->add_header_value.c_str());
       }
+    } else {
+      // For response rules: add header to client response
+      if (TSHttpTxnClientRespGet(data->txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
+        add_header_to_message(bufp, hdr_loc, rule->add_header_name, rule->add_header_value);
+        TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
+        success = true;
+        Dbg(dbg_ctl, "Added header %s: %s to client response", rule->add_header_name.c_str(), rule->add_header_value.c_str());
+      }
+    }
+
+    if (success) {
+      data->headers_added = true;
     }
   }
 
@@ -418,7 +426,7 @@ execute_actions(TransformData *data, const Rule *rule, const std::string *matche
     data->blocked = true;
     TSHttpTxnStatusSet(data->txnp, TS_HTTP_STATUS_FORBIDDEN);
     // Set error body so client gets a proper response
-    static const char *error_body = "Blocked by content filter";
+    char const *error_body = "Blocked by content filter";
     TSHttpTxnErrorBodySet(data->txnp, TSstrdup(error_body), strlen(error_body), TSstrdup("text/plain"));
     Dbg(dbg_ctl, "Blocking request due to rule: %s", rule->name.c_str());
   }
@@ -531,8 +539,8 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
               boundary_buffer.append(block_data, boundary_extent);
 
               // Search boundary for patterns spanning block boundaries
-              for (const Rule *rule : data->active_rules) {
-                const std::string *matched = search_body_patterns(*rule, boundary_buffer.c_str(), boundary_buffer.length());
+              for (Rule const *rule : data->active_rules) {
+                std::string const *matched = search_body_patterns(*rule, boundary_buffer.c_str(), boundary_buffer.length());
                 if (matched) {
                   execute_actions(data, rule, matched);
                   if (data->blocked) {
@@ -544,8 +552,8 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
 
             // Phase 2: Search entire block in-place (zero-copy)
             if (!data->blocked) {
-              for (const Rule *rule : data->active_rules) {
-                const std::string *matched = search_body_patterns(*rule, block_data, block_avail);
+              for (Rule const *rule : data->active_rules) {
+                std::string const *matched = search_body_patterns(*rule, block_data, block_avail);
                 if (matched) {
                   execute_actions(data, rule, matched);
                   if (data->blocked) {
@@ -624,10 +632,11 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
  * @param[in] txnp         The HTTP transaction.
  * @param[in] config       The plugin configuration.
  * @param[in] active_rules The rules that passed header matching and should be checked.
+ * @param[in] dir          The direction (request or response) for this transform.
  * @return The transform virtual connection.
  */
 TSVConn
-create_transform(TSHttpTxn txnp, const FilterConfig *config, const std::vector<const Rule *> &active_rules)
+create_transform(TSHttpTxn txnp, FilterConfig const *config, std::vector<Rule const *> const &active_rules, Direction dir)
 {
   TSVConn connp = TSTransformCreate(transform_handler, txnp);
 
@@ -635,6 +644,7 @@ create_transform(TSHttpTxn txnp, const FilterConfig *config, const std::vector<c
   data->txnp         = txnp;
   data->config       = config;
   data->active_rules = active_rules;
+  data->direction    = dir;
 
   // Pre-allocate lookback buffer
   if (config->max_lookback > 0) {
@@ -646,22 +656,28 @@ create_transform(TSHttpTxn txnp, const FilterConfig *config, const std::vector<c
 }
 
 /**
- * @brief Hook handler for response rules.
+ * @brief Response handler for response rules.
  *
  * Called on TS_HTTP_READ_RESPONSE_HDR_HOOK to check response rules and add
- * a response transform if any rules match. Request rules are handled directly
- * in TSRemapDoRemap.
+ * a response transform if any rules match. Also handles TS_HTTP_TXN_CLOSE_HOOK
+ * to clean up the continuation. Request rules are handled directly in TSRemapDoRemap.
  *
  * @param[in] contp The continuation (contains FilterConfig pointer).
- * @param[in] event The event type (should be TS_EVENT_HTTP_READ_RESPONSE_HDR).
+ * @param[in] event The event type (READ_RESPONSE_HDR or TXN_CLOSE).
  * @param[in] edata The HTTP transaction.
  * @return Always returns 0.
  */
 int
-hook_handler(TSCont contp, TSEvent event, void *edata)
+response_handler(TSCont contp, TSEvent event, void *edata)
 {
   TSHttpTxn           txnp   = static_cast<TSHttpTxn>(edata);
-  const FilterConfig *config = static_cast<const FilterConfig *>(TSContDataGet(contp));
+  FilterConfig const *config = static_cast<FilterConfig const *>(TSContDataGet(contp));
+
+  // Handle transaction close - clean up continuation
+  if (event == TS_EVENT_HTTP_TXN_CLOSE) {
+    TSContDestroy(contp);
+    return 0;
+  }
 
   if (config == nullptr) {
     TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
@@ -671,7 +687,7 @@ hook_handler(TSCont contp, TSEvent event, void *edata)
   TSMBuffer bufp;
   TSMLoc    hdr_loc;
 
-  std::vector<const Rule *> active_rules;
+  std::vector<Rule const *> active_rules;
 
   if (event == TS_EVENT_HTTP_READ_RESPONSE_HDR) {
     // Check response rules
@@ -680,28 +696,18 @@ hook_handler(TSCont contp, TSEvent event, void *edata)
       return 0;
     }
 
-    // Need client request for method check
-    TSMBuffer req_bufp;
-    TSMLoc    req_hdr_loc;
-    if (TSHttpTxnClientReqGet(txnp, &req_bufp, &req_hdr_loc) != TS_SUCCESS) {
-      TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
-      TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
-      return 0;
-    }
-
     for (auto const &rule : config->response_rules) {
-      // For response rules: check status codes (on response), but method check is on request
+      // For response rules: check status codes and headers on response
       if (status_matches(rule, bufp, hdr_loc) && content_length_ok(rule, bufp, hdr_loc) && headers_match(rule, bufp, hdr_loc)) {
         Dbg(dbg_ctl, "Response rule '%s' header conditions matched, will inspect body", rule.name.c_str());
         active_rules.push_back(&rule);
       }
     }
 
-    TSHandleMLocRelease(req_bufp, TS_NULL_MLOC, req_hdr_loc);
     TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
 
     if (!active_rules.empty()) {
-      TSVConn transform = create_transform(txnp, config, active_rules);
+      TSVConn transform = create_transform(txnp, config, active_rules, Direction::RESPONSE);
       TSHttpTxnHookAdd(txnp, TS_HTTP_RESPONSE_TRANSFORM_HOOK, transform);
     }
   }
@@ -749,7 +755,7 @@ parse_config(const char *filename)
       return nullptr;
     }
 
-    for (const auto &rule_node : root["rules"]) {
+    for (auto const &rule_node : root["rules"]) {
       Rule rule;
 
       // Name (required)
@@ -774,7 +780,7 @@ parse_config(const char *filename)
       // Actions (default: [log])
       rule.actions = 0;
       if (rule_node["action"]) {
-        for (const auto &action_node : rule_node["action"]) {
+        for (auto const &action_node : rule_node["action"]) {
           std::string action = action_node.as<std::string>();
           if (action == "log") {
             rule.actions |= ACTION_LOG;
@@ -813,6 +819,18 @@ parse_config(const char *filename)
         }
       }
 
+      // Validate method/status usage
+      if (rule.direction == Direction::REQUEST && !rule.status_codes.empty()) {
+        TSError("[%s] Rule '%s': 'status' is only valid for response rules", PLUGIN_NAME, rule.name.c_str());
+        delete config;
+        return nullptr;
+      }
+      if (rule.direction == Direction::RESPONSE && !rule.methods.empty()) {
+        TSError("[%s] Rule '%s': 'methods' is only valid for request rules", PLUGIN_NAME, rule.name.c_str());
+        delete config;
+        return nullptr;
+      }
+
       // Max content length
       if (rule_node["max_content_length"]) {
         rule.max_content_length = rule_node["max_content_length"].as<int64_t>();
@@ -820,13 +838,13 @@ parse_config(const char *filename)
 
       // Header conditions
       if (rule_node["headers"]) {
-        for (const auto &header_node : rule_node["headers"]) {
+        for (auto const &header_node : rule_node["headers"]) {
           HeaderCondition cond;
           if (header_node["name"]) {
             cond.name = header_node["name"].as<std::string>();
           }
           if (header_node["patterns"]) {
-            for (const auto &pattern_node : header_node["patterns"]) {
+            for (auto const &pattern_node : header_node["patterns"]) {
               cond.patterns.push_back(pattern_node.as<std::string>());
             }
           }
@@ -836,7 +854,7 @@ parse_config(const char *filename)
 
       // Body patterns
       if (rule_node["body_patterns"]) {
-        for (const auto &pattern_node : rule_node["body_patterns"]) {
+        for (auto const &pattern_node : rule_node["body_patterns"]) {
           std::string pattern = pattern_node.as<std::string>();
           rule.body_patterns.push_back(pattern);
           if (pattern.length() > rule.max_pattern_len) {
@@ -947,9 +965,9 @@ TSRemapDoRemap(void *instance, TSHttpTxn txnp, TSRemapRequestInfo *rri ATS_UNUSE
     TSMLoc    hdr_loc;
 
     if (TSHttpTxnClientReqGet(txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
-      std::vector<const Rule *> active_rules;
+      std::vector<Rule const *> active_rules;
 
-      for (const auto &rule : config->request_rules) {
+      for (auto const &rule : config->request_rules) {
         if (method_matches(rule, bufp, hdr_loc) && content_length_ok(rule, bufp, hdr_loc) && headers_match(rule, bufp, hdr_loc)) {
           Dbg(dbg_ctl, "Request rule '%s' header conditions matched, will inspect body", rule.name.c_str());
           active_rules.push_back(&rule);
@@ -959,7 +977,7 @@ TSRemapDoRemap(void *instance, TSHttpTxn txnp, TSRemapRequestInfo *rri ATS_UNUSE
       TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
 
       if (!active_rules.empty()) {
-        TSVConn transform = create_transform(txnp, config, active_rules);
+        TSVConn transform = create_transform(txnp, config, active_rules, Direction::REQUEST);
         TSHttpTxnHookAdd(txnp, TS_HTTP_REQUEST_TRANSFORM_HOOK, transform);
       }
     }
@@ -967,9 +985,11 @@ TSRemapDoRemap(void *instance, TSHttpTxn txnp, TSRemapRequestInfo *rri ATS_UNUSE
 
   // For response rules, add a hook to check when response headers arrive
   if (!config->response_rules.empty()) {
-    TSCont contp = TSContCreate(hook_handler, nullptr);
+    TSCont contp = TSContCreate(response_handler, nullptr);
     TSContDataSet(contp, config);
     TSHttpTxnHookAdd(txnp, TS_HTTP_READ_RESPONSE_HDR_HOOK, contp);
+    // Add TXN_CLOSE_HOOK to clean up the continuation
+    TSHttpTxnHookAdd(txnp, TS_HTTP_TXN_CLOSE_HOOK, contp);
   }
 
   return TSREMAP_NO_REMAP;

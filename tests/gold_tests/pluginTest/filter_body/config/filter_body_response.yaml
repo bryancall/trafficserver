@@ -2,8 +2,8 @@
 rules:
   - name: "sensitive_data_leak"
     direction: response
-    action: [log, block]
-    methods: [GET, POST]
+    action: [log]
+    status: [200]
     headers:
       - name: "Content-Type"
         patterns:

@@ -15,28 +15,28 @@
 #  limitations under the License.
 
 #
-# Test filter_body plugin detecting sensitive data in responses.
-# Note: Blocking response transforms after streaming has started has limitations.
+# Test filter_body plugin status code filtering for response rules.
+# Only 200 OK responses should be inspected, not 404 errors.
 #
 meta:
   version: "1.0"
 
 autest:
-  description: 'Verify filter_body detects sensitive data in responses'
+  description: 'Verify filter_body status code filtering works correctly'
 
   server:
-    name: 'filter-server-resp'
+    name: 'filter-server-status'
 
   client:
-    name: 'filter-client-resp'
+    name: 'filter-client-status'
 
   ats:
-    name: 'ts-filter-resp'
+    name: 'ts-filter-status'
     process_config:
       enable_cache: false
 
     copy_to_config_dir:
-      - config/filter_body_response.yaml
+      - config/filter_body_status.yaml
 
     records_config:
       proxy.config.diags.debug.enabled: 1
@@ -48,40 +48,68 @@ autest:
         plugins:
           - name: "filter_body.so"
             args:
-              - "filter_body_response.yaml"
+              - "filter_body_status.yaml"
 
     log_validation:
       diags_log:
         contains:
-          - expression: "Matched rule: sensitive_data_leak"
-            description: "Verify that the sensitive data rule matched"
+          - expression: "Matched rule: status_filter_test"
+            description: "Verify that the 200 OK response was inspected and matched"
 
 sessions:
   - transactions:
-      # Request that gets response with sensitive data - rule should match and log
+      # First: 404 response with pattern - should NOT be logged (status filter excludes it)
       - client-request:
           method: "GET"
           version: "1.1"
-          url: /api/user
+          url: /not_found
           headers:
             fields:
               - [Host, www.example.com]
-              - [uuid, resp-filter-test]
+              - [uuid, status-404-test]
 
         proxy-request:
           method: "GET"
-          url: /api/user
+          url: /not_found
+
+        server-response:
+          status: 404
+          reason: Not Found
+          headers:
+            fields:
+              - [Content-Type, "text/plain"]
+              - [Content-Length, 35]
+          content:
+            data: 'Not found: test_pattern in error'
+
+        proxy-response:
+          status: 404
+
+      # Second: 200 response with pattern - SHOULD be logged
+      - client-request:
+          method: "GET"
+          version: "1.1"
+          url: /found
+          headers:
+            fields:
+              - [Host, www.example.com]
+              - [uuid, status-200-test]
+
+        proxy-request:
+          method: "GET"
+          url: /found
 
         server-response:
           status: 200
           reason: OK
           headers:
             fields:
-              - [Content-Type, "application/json"]
-              - [Content-Length, 36]
+              - [Content-Type, "text/plain"]
+              - [Content-Length, 20]
           content:
-            data: '{"name": "John", "SSN: 123-45-6789"}'
+            data: 'Found: test_pattern'
 
         proxy-response:
           status: 200
+
 
