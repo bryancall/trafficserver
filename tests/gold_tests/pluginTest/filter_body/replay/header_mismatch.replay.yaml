@@ -35,7 +35,7 @@ autest:
       enable_cache: false
 
     copy_to_config_dir:
-      - filter_body_block.yaml
+      - config/filter_body_block.yaml
 
     records_config:
       proxy.config.diags.debug.enabled: 1

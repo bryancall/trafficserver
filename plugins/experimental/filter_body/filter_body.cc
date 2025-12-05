@@ -69,6 +69,7 @@ struct Rule {
   std::vector<HeaderCondition> headers;
   std::vector<std::string>     body_patterns; // case-sensitive match
   size_t                       max_pattern_len = 0;
+  int                          stat_id         = -1; // metrics counter for matches (-1 = not created)
 };
 
 // Plugin configuration (per remap instance)
@@ -355,6 +356,9 @@ add_header_to_message(TSMBuffer bufp, TSMLoc hdr_loc, const std::string &name, c
 void
 execute_actions(TransformData *data, const Rule *rule, const std::string *matched_pattern)
 {
+  // Increment the metrics counter for this rule (stat_id is guaranteed valid at load time)
+  TSStatIntIncrement(rule->stat_id, 1);
+
   // Log action always writes to diags.log so it doesn't require debug tags
   if (rule->actions & ACTION_LOG) {
     TSNote("[%s] Matched rule: %s, pattern: %s", PLUGIN_NAME, rule->name.c_str(),
@@ -813,6 +817,16 @@ parse_config(const char *filename)
           config->max_lookback = lookback;
         }
       }
+
+      // Create a metrics counter for this rule
+      std::string stat_name = std::string("plugin.") + PLUGIN_NAME + ".rule." + rule.name + ".matches";
+      rule.stat_id          = TSStatCreate(stat_name.c_str(), TS_RECORDDATATYPE_INT, TS_STAT_NON_PERSISTENT, TS_STAT_SYNC_COUNT);
+      if (rule.stat_id == TS_ERROR) {
+        TSError("[%s] Failed to create stat '%s'", PLUGIN_NAME, stat_name.c_str());
+        delete config;
+        return nullptr;
+      }
+      Dbg(dbg_ctl, "Created stat '%s' with id %d", stat_name.c_str(), rule.stat_id);
 
       Dbg(dbg_ctl, "Loaded rule: %s (direction=%s, actions=%u)", rule.name.c_str(),
           rule.direction == Direction::REQUEST ? "request" : "response", rule.actions);

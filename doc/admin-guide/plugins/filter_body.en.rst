@@ -46,6 +46,7 @@ Features
 - Streaming transform with lookback buffer for cross-boundary pattern matching
 - Optional ``max_content_length`` to skip inspection of large bodies
 - Configurable HTTP methods to match (GET, POST, PUT, etc.)
+- Per-rule metrics counters for monitoring match activity
 
 Installation
 ============
@@ -305,6 +306,28 @@ Add a header when response contains sensitive patterns::
           - add_header
         add_header_name: X-Data-Classification
         add_header_value: sensitive
+
+Metrics
+=======
+
+The plugin creates a metrics counter for each configured rule. The counter is
+incremented each time the rule matches a pattern in a request or response body.
+
+Metric names follow this format::
+
+    plugin.filter_body.rule.<rule_name>.matches
+
+For example, a rule named ``xxe_detection`` would have a metric named::
+
+    plugin.filter_body.rule.xxe_detection.matches
+
+You can query these metrics using ``traffic_ctl``::
+
+    traffic_ctl metric get plugin.filter_body.rule.xxe_detection.matches
+
+Or list all filter_body metrics::
+
+    traffic_ctl metric match plugin.filter_body
 
 Debugging
 =========
