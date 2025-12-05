@@ -38,23 +38,28 @@ request or response body.
 Features
 --------
 
-- YAML-based configuration with flexible rule definitions
-- Header-based filtering with AND/OR logic
-- Case-insensitive header matching, case-sensitive body patterns
-- Configurable actions per rule: ``log``, ``block``, ``add_header``
-- Support for both request and response body inspection
-- Streaming transform with lookback buffer for cross-boundary pattern matching
-- Optional ``max_content_length`` to skip inspection of large bodies
-- Configurable HTTP methods to match (GET, POST, PUT, etc.)
-- Per-rule metrics counters for monitoring match activity
+- YAML-based configuration with flexible rule definitions.
+- Header-based filtering with AND/OR logic.
+- Case-insensitive header matching, case-sensitive body patterns.
+- Configurable actions per rule: ``log``, ``block``, ``add_header``.
+- Support for both request and response body inspection.
+- Streaming transform with lookback buffer for cross-boundary pattern matching.
+- Optional ``max_content_length`` to skip inspection of large bodies.
+- Configurable HTTP methods to match (GET, POST, PUT, etc.).
+- Optional ``status`` codes to match for response rules.
+- Per-rule metrics counters for monitoring match activity.
 
 Installation
 ============
 
-The ``filter_body`` plugin is an experimental plugin. To build it, pass
+The ``filter_body`` plugin is an experimental plugin. To build it, either pass
 ``-DENABLE_FILTER_BODY=ON`` to ``cmake`` when configuring the build::
 
     cmake -DENABLE_FILTER_BODY=ON ...
+
+Or enable all experimental plugins with ``-DENABLE_EXPERIMENTAL_PLUGINS=ON``::
+
+    cmake -DENABLE_EXPERIMENTAL_PLUGINS=ON ...
 
 Configuration
 =============
@@ -73,8 +78,8 @@ The configuration file uses YAML format with a list of rules::
 
     rules:
       - name: rule_name
-        direction: request|response
-        methods:
+        direction: request    # optional, defaults to request
+        methods:              # for request rules only
           - POST
           - PUT
         max_content_length: 1048576
@@ -90,7 +95,20 @@ The configuration file uses YAML format with a list of rules::
           - log
           - block
         add_header_name: X-Security-Match
-        add_header_value: "rule_name"
+        add_header_value: "<rule_name>"
+
+For response rules, use ``status`` instead of ``methods``::
+
+    rules:
+      - name: response_rule
+        direction: response
+        status:               # for response rules only
+          - 200
+          - 201
+        body_patterns:
+          - "sensitive_data"
+        action:
+          - log
 
 Rule Options
 ------------
@@ -98,13 +116,17 @@ Rule Options
 ``name`` (required)
     A unique name for the rule. Used in log messages when the rule matches.
 
-``direction`` (required)
+``direction`` (optional)
     Specifies whether to inspect request or response bodies.
-    Valid values: ``request``, ``response``
+    Valid values: ``request``, ``response``. Default: ``request``.
 
 ``methods`` (optional)
     List of HTTP methods to match. If not specified, all methods are matched.
-    Example: ``[GET, POST, PUT]``
+    Only valid for request rules. Example: ``[GET, POST, PUT]``
+
+``status`` (optional)
+    List of HTTP status codes to match. If not specified, all status codes are
+    matched. Only valid for response rules. Example: ``[200, 201]``
 
 ``max_content_length`` (optional)
     Maximum content length in bytes for body inspection. Bodies larger than
@@ -127,15 +149,17 @@ Rule Options
     List of actions to take when a pattern matches. Default is ``[log]``.
     Valid values:
 
-    - ``log``: Log the match to the debug log (requires debug tags enabled)
-    - ``block``: Block the request/response with a 403 Forbidden status
-    - ``add_header``: Add a custom header to the request/response
+    - ``log``: Log the match to the Traffic Server log.
+    - ``block``: Block the request/response with a 403 Forbidden status.
+    - ``add_header``: Add a custom header to the request/response.
 
 ``add_header_name`` (optional)
     Name of the header to add when ``add_header`` action is configured.
 
 ``add_header_value`` (optional)
     Value of the header to add. Defaults to the rule name if not specified.
+    Use the special value ``<rule_name>`` to substitute the rule's name
+    dynamically.
 
 Matching Logic
 ==============
@@ -199,8 +223,18 @@ Block Action
 
 When the ``block`` action is configured, the request or response is blocked:
 
-- For request transforms: The connection is closed without forwarding to origin
-- The HTTP status is set to 403 Forbidden
+- For request transforms: The connection to the origin is closed and no further
+  data is forwarded.
+- The HTTP status is set to 403 Forbidden.
+
+.. warning::
+
+    Because the plugin uses streaming body inspection, a malicious pattern may
+    not be detected until after some (or all) of the body has already been sent
+    to the origin. The ``block`` action stops further transmission but cannot
+    recall data already sent. For maximum protection, consider using
+    ``max_content_length`` to limit inspection to smaller bodies that can be
+    buffered, or use header-based filtering to reduce the attack surface.
 
 .. note::
 

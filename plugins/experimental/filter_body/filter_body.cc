@@ -64,7 +64,8 @@ struct Rule {
   unsigned                     actions   = ACTION_LOG; // default: log only
   std::string                  add_header_name;
   std::string                  add_header_value;
-  std::vector<std::string>     methods;
+  std::vector<std::string>     methods;                 // for request rules
+  std::vector<int>             status_codes;            // for response rules
   int64_t                      max_content_length = -1; // -1 means no limit
   std::vector<HeaderCondition> headers;
   std::vector<std::string>     body_patterns; // case-sensitive match
@@ -182,8 +183,35 @@ method_matches(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
   }
 
   std::string method_str(method, method_len);
-  for (const auto &m : rule.methods) {
+  for (auto const &m : rule.methods) {
     if (strcasecmp(method_str.c_str(), m.c_str()) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @brief Check if the HTTP status code matches the rule's status filter.
+ *
+ * For response rules, this checks if the response status code is in the rule's
+ * allowed status codes list.
+ *
+ * @param[in] rule    The rule containing the status code filter.
+ * @param[in] bufp    The message buffer containing the HTTP response.
+ * @param[in] hdr_loc The location of the HTTP response header.
+ * @return true if the status matches or no status restriction exists, false otherwise.
+ */
+bool
+status_matches(Rule const &rule, TSMBuffer bufp, TSMLoc hdr_loc)
+{
+  if (rule.status_codes.empty()) {
+    return true; // no status restriction
+  }
+
+  TSHttpStatus status = TSHttpHdrStatusGet(bufp, hdr_loc);
+  for (int const code : rule.status_codes) {
+    if (static_cast<int>(status) == code) {
       return true;
     }
   }
@@ -661,9 +689,9 @@ hook_handler(TSCont contp, TSEvent event, void *edata)
       return 0;
     }
 
-    for (const auto &rule : config->response_rules) {
-      if (method_matches(rule, req_bufp, req_hdr_loc) && content_length_ok(rule, bufp, hdr_loc) &&
-          headers_match(rule, bufp, hdr_loc)) {
+    for (auto const &rule : config->response_rules) {
+      // For response rules: check status codes (on response), but method check is on request
+      if (status_matches(rule, bufp, hdr_loc) && content_length_ok(rule, bufp, hdr_loc) && headers_match(rule, bufp, hdr_loc)) {
         Dbg(dbg_ctl, "Response rule '%s' header conditions matched, will inspect body", rule.name.c_str());
         active_rules.push_back(&rule);
       }
@@ -771,10 +799,17 @@ parse_config(const char *filename)
         }
       }
 
-      // Methods
+      // Methods (for request rules)
       if (rule_node["methods"]) {
-        for (const auto &method_node : rule_node["methods"]) {
+        for (auto const &method_node : rule_node["methods"]) {
           rule.methods.push_back(method_node.as<std::string>());
+        }
+      }
+
+      // Status codes (for response rules)
+      if (rule_node["status"]) {
+        for (auto const &status_node : rule_node["status"]) {
+          rule.status_codes.push_back(status_node.as<int>());
         }
       }
 
