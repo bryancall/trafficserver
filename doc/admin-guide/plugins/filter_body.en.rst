@@ -182,14 +182,16 @@ Log Action
 ----------
 
 When the ``log`` action is configured, pattern matches are logged to the
-Traffic Server debug log. To see these messages, enable debug logging with
-the ``filter_body`` tag::
+Traffic Server error log (``diags.log``). No special debug configuration is
+required - log messages are always written when a pattern matches.
 
-    records:
-      proxy.config.diags.debug.enabled: 1
-      proxy.config.diags.debug.tags: filter_body
+Log messages include the rule name and matched pattern in the format::
 
-Log messages include the rule name and matched pattern.
+    NOTE: [filter_body] Matched rule: <rule_name>, pattern: <pattern>
+
+To also log the headers for debugging, you can configure access logging to
+include request and response headers. See :ref:`admin-logging` for details
+on configuring access logs.
 
 Block Action
 ------------
@@ -210,11 +212,25 @@ Add Header Action
 
 When the ``add_header`` action is configured, a custom header is added:
 
-- For request rules: The header is added to the request sent to the origin
-- For response rules: The header is added to the response sent to the client
+- For request rules: The header is added to the server request (proxy request
+  going to the origin). This header modification occurs during body inspection,
+  after the initial request headers have been read but before they are sent
+  to the origin.
 
-The header name and value are specified by ``add_header_name`` and
-``add_header_value`` configuration options.
+- For response rules: The header is added to the client response. Since body
+  inspection occurs during response streaming, the header is added before the
+  response body is sent to the client.
+
+The header name and value are specified using the ``add_header`` configuration
+block with ``name`` and ``value`` fields.
+
+.. note::
+
+    To verify that headers are being added correctly, you can configure access
+    logging to include the server request headers (for request rules) or client
+    response headers (for response rules). Use log fields like ``{Server-Request}``
+    or ``{Client-Response}`` in your log format. See :ref:`admin-logging` for
+    details.
 
 Example Configurations
 ======================
@@ -319,7 +335,12 @@ Limitations
 3. **Memory usage**: The lookback buffer size is determined by the longest
    body pattern configured. Very long patterns may increase memory usage.
 
-4. **Performance**: Body inspection adds processing overhead. Use
+4. **Cross-boundary pattern search**: When searching for patterns that may span
+   buffer block boundaries, the plugin must copy the lookback buffer contents
+   plus the current block into a temporary string. This copy is limited to
+   (max pattern length - 1) + (current block size) bytes.
+
+5. **Performance**: Body inspection adds processing overhead. Use
    ``max_content_length`` to limit inspection to smaller bodies when appropriate.
 
 See Also

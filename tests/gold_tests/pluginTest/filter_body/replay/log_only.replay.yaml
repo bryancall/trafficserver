@@ -50,7 +50,7 @@ autest:
               - "filter_body_log.yaml"
 
     log_validation:
-      traffic_out:
+      diags_log:
         contains:
           - expression: "Matched rule: xxe_detection_log"
             description: "Verify that the rule matched and was logged"

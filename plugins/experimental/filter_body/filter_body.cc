@@ -92,7 +92,17 @@ struct TransformData {
   bool                      headers_added = false;
 };
 
-// Case-insensitive string search
+/**
+ * @brief Case-insensitive substring search.
+ *
+ * Searches for @a needle within @a haystack using case-insensitive comparison.
+ *
+ * @param[in] haystack     The string to search within.
+ * @param[in] haystack_len Length of haystack in bytes.
+ * @param[in] needle       The pattern to search for.
+ * @param[in] needle_len   Length of needle in bytes.
+ * @return Pointer to the first occurrence of needle in haystack, or nullptr if not found.
+ */
 const char *
 strcasestr_local(const char *haystack, size_t haystack_len, const char *needle, size_t needle_len)
 {
@@ -118,7 +128,17 @@ strcasestr_local(const char *haystack, size_t haystack_len, const char *needle, 
   return nullptr;
 }
 
-// Case-sensitive string search
+/**
+ * @brief Case-sensitive substring search.
+ *
+ * Searches for @a needle within @a haystack using exact (case-sensitive) comparison.
+ *
+ * @param[in] haystack     The string to search within.
+ * @param[in] haystack_len Length of haystack in bytes.
+ * @param[in] needle       The pattern to search for.
+ * @param[in] needle_len   Length of needle in bytes.
+ * @return Pointer to the first occurrence of needle in haystack, or nullptr if not found.
+ */
 const char *
 strstr_local(const char *haystack, size_t haystack_len, const char *needle, size_t needle_len)
 {
@@ -137,7 +157,16 @@ strstr_local(const char *haystack, size_t haystack_len, const char *needle, size
   return nullptr;
 }
 
-// Check if method matches
+/**
+ * @brief Check if the HTTP method matches the rule's method filter.
+ *
+ * If the rule has no method restrictions, all methods match.
+ *
+ * @param[in] rule    The rule containing method restrictions.
+ * @param[in] bufp    The message buffer containing the HTTP headers.
+ * @param[in] hdr_loc The location of the HTTP header.
+ * @return true if the method matches or no method restriction exists, false otherwise.
+ */
 bool
 method_matches(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
 {
@@ -160,7 +189,17 @@ method_matches(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
   return false;
 }
 
-// Check Content-Length against max
+/**
+ * @brief Check if Content-Length is within the rule's max_content_length limit.
+ *
+ * If the rule has no content length limit (max_content_length < 0), all sizes are allowed.
+ * If the Content-Length header is missing, the check passes.
+ *
+ * @param[in] rule    The rule containing the content length limit.
+ * @param[in] bufp    The message buffer containing the HTTP headers.
+ * @param[in] hdr_loc The location of the HTTP header.
+ * @return true if content length is within limit or no limit exists, false otherwise.
+ */
 bool
 content_length_ok(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
 {
@@ -179,7 +218,17 @@ content_length_ok(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
   return content_length <= rule.max_content_length;
 }
 
-// Check if a single header condition matches (case-insensitive pattern search)
+/**
+ * @brief Check if a single header condition matches.
+ *
+ * Uses case-insensitive pattern search. Returns true if any pattern in the
+ * condition matches any value of the specified header (OR logic within header).
+ *
+ * @param[in] cond    The header condition to check.
+ * @param[in] bufp    The message buffer containing the HTTP headers.
+ * @param[in] hdr_loc The location of the HTTP header.
+ * @return true if the header exists and any pattern matches, false otherwise.
+ */
 bool
 header_condition_matches(const HeaderCondition &cond, TSMBuffer bufp, TSMLoc hdr_loc)
 {
@@ -211,7 +260,17 @@ header_condition_matches(const HeaderCondition &cond, TSMBuffer bufp, TSMLoc hdr
   return matched;
 }
 
-// Check if ALL header conditions match (AND logic between headers)
+/**
+ * @brief Check if ALL header conditions in a rule match.
+ *
+ * Uses AND logic between headers - all header conditions must match for the
+ * rule to apply.
+ *
+ * @param[in] rule    The rule containing header conditions.
+ * @param[in] bufp    The message buffer containing the HTTP headers.
+ * @param[in] hdr_loc The location of the HTTP header.
+ * @return true if all header conditions match, false otherwise.
+ */
 bool
 headers_match(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
 {
@@ -223,8 +282,17 @@ headers_match(const Rule &rule, TSMBuffer bufp, TSMLoc hdr_loc)
   return true;
 }
 
-// Search for body patterns in data (case-sensitive)
-// Returns the matched pattern or nullptr
+/**
+ * @brief Search for body patterns in the given data.
+ *
+ * Searches for any of the rule's body patterns in the data using case-sensitive
+ * matching. Returns the first matched pattern.
+ *
+ * @param[in] rule     The rule containing body patterns to search for.
+ * @param[in] data     The data buffer to search within.
+ * @param[in] data_len Length of the data buffer in bytes.
+ * @return Pointer to the matched pattern string, or nullptr if no match.
+ */
 const std::string *
 search_body_patterns(const Rule &rule, const char *data, size_t data_len)
 {
@@ -236,7 +304,16 @@ search_body_patterns(const Rule &rule, const char *data, size_t data_len)
   return nullptr;
 }
 
-// Add header to the request/response
+/**
+ * @brief Add a header field to an HTTP message.
+ *
+ * Creates and appends a new header field with the given name and value.
+ *
+ * @param[in] bufp    The message buffer to add the header to.
+ * @param[in] hdr_loc The location of the HTTP header.
+ * @param[in] name    The header field name.
+ * @param[in] value   The header field value.
+ */
 void
 add_header_to_message(TSMBuffer bufp, TSMLoc hdr_loc, const std::string &name, const std::string &value)
 {
@@ -259,12 +336,29 @@ add_header_to_message(TSMBuffer bufp, TSMLoc hdr_loc, const std::string &name, c
   TSHandleMLocRelease(bufp, hdr_loc, field_loc);
 }
 
-// Execute actions for a matched rule
+/**
+ * @brief Execute the configured actions for a matched rule.
+ *
+ * Performs the actions specified in the rule: log, add_header, and/or block.
+ * For request rules, headers are added to the server request (proxy request to origin).
+ * For response rules, headers are added to the client response.
+ *
+ * @note Headers are added during body inspection, which occurs after headers may have
+ *       already been sent. For request transforms, the server request headers should
+ *       still be modifiable. For response transforms, headers are added before the
+ *       response is sent to the client.
+ *
+ * @param[in,out] data            The transform data containing transaction state.
+ * @param[in]     rule            The matched rule containing actions to execute.
+ * @param[in]     matched_pattern The pattern that triggered the match (for logging).
+ */
 void
 execute_actions(TransformData *data, const Rule *rule, const std::string *matched_pattern)
 {
+  // Log action always writes to diags.log so it doesn't require debug tags
   if (rule->actions & ACTION_LOG) {
-    Dbg(dbg_ctl, "Matched rule: %s, pattern: %s", rule->name.c_str(), matched_pattern ? matched_pattern->c_str() : "unknown");
+    TSNote("[%s] Matched rule: %s, pattern: %s", PLUGIN_NAME, rule->name.c_str(),
+           matched_pattern ? matched_pattern->c_str() : "unknown");
   }
 
   if ((rule->actions & ACTION_ADD_HEADER) && !data->headers_added) {
@@ -298,7 +392,22 @@ execute_actions(TransformData *data, const Rule *rule, const std::string *matche
   }
 }
 
-// Transform handler - processes streaming data
+/**
+ * @brief Transform continuation handler for streaming body inspection.
+ *
+ * Processes body data in a streaming fashion, searching for patterns across
+ * buffer blocks. Uses a lookback buffer to detect patterns that span block
+ * boundaries.
+ *
+ * @note The pattern search creates a temporary string when the lookback buffer
+ *       is non-empty, which involves a memory copy. This is necessary to handle
+ *       patterns spanning buffer boundaries.
+ *
+ * @param[in] contp The transform continuation.
+ * @param[in] event The event type (WRITE_READY, WRITE_COMPLETE, ERROR).
+ * @param[in] edata Event data (unused).
+ * @return Always returns 0.
+ */
 int
 transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
 {
@@ -370,7 +479,11 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
           const char *block_data  = TSIOBufferBlockReadStart(block, reader, &block_avail);
 
           if (block_data && block_avail > 0) {
-            // Search for patterns in lookback + current block
+            // Search for patterns in lookback + current block.
+            // Note: When lookback is non-empty, we must copy data into a contiguous
+            // buffer to search for patterns that may span block boundaries. This is
+            // not truly zero-copy but is necessary for correctness. The lookback
+            // buffer is kept small (max pattern length - 1 bytes).
             std::string search_window;
             if (!data->lookback.empty()) {
               search_window = data->lookback + std::string(block_data, block_avail);
@@ -421,7 +534,7 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
           TSVIOReenable(data->output_vio);
 
           // Consume all remaining input
-          int64_t remaining = TSIOBufferReaderAvail(reader);
+          int64_t const remaining = TSIOBufferReaderAvail(reader);
           if (remaining > 0) {
             TSIOBufferReaderConsume(reader, remaining);
           }
@@ -457,7 +570,17 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
   return 0;
 }
 
-// Create transform continuation
+/**
+ * @brief Create a transform continuation for body inspection.
+ *
+ * Allocates and initializes a TransformData structure and creates a transform
+ * continuation that will process the body data.
+ *
+ * @param[in] txnp         The HTTP transaction.
+ * @param[in] config       The plugin configuration.
+ * @param[in] active_rules The rules that passed header matching and should be checked.
+ * @return The transform virtual connection.
+ */
 TSVConn
 create_transform(TSHttpTxn txnp, const FilterConfig *config, const std::vector<const Rule *> &active_rules)
 {
@@ -477,7 +600,18 @@ create_transform(TSHttpTxn txnp, const FilterConfig *config, const std::vector<c
   return connp;
 }
 
-// Hook handler for response rules (request rules are handled directly in TSRemapDoRemap)
+/**
+ * @brief Hook handler for response rules.
+ *
+ * Called on TS_HTTP_READ_RESPONSE_HDR_HOOK to check response rules and add
+ * a response transform if any rules match. Request rules are handled directly
+ * in TSRemapDoRemap.
+ *
+ * @param[in] contp The continuation (contains FilterConfig pointer).
+ * @param[in] event The event type (should be TS_EVENT_HTTP_READ_RESPONSE_HDR).
+ * @param[in] edata The HTTP transaction.
+ * @return Always returns 0.
+ */
 int
 hook_handler(TSCont contp, TSEvent event, void *edata)
 {
@@ -531,7 +665,16 @@ hook_handler(TSCont contp, TSEvent event, void *edata)
   return 0;
 }
 
-// Parse YAML configuration
+/**
+ * @brief Parse the YAML configuration file.
+ *
+ * Loads and parses the YAML configuration file, creating Rule objects for each
+ * rule definition. Rules are separated into request_rules and response_rules
+ * based on their direction setting.
+ *
+ * @param[in] filename The configuration file path (absolute or relative to config dir).
+ * @return Pointer to the parsed FilterConfig, or nullptr on error.
+ */
 FilterConfig *
 parse_config(const char *filename)
 {
@@ -704,7 +847,7 @@ TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
 }
 
 TSReturnCode
-TSRemapNewInstance(int argc, char *argv[], void **ih, char *errbuf, int errbuf_size)
+TSRemapNewInstance(int argc, char *argv[], void **instance, char *errbuf, int errbuf_size)
 {
   if (argc < 3) {
     TSstrlcpy(errbuf, "[TSRemapNewInstance] Missing configuration file argument", errbuf_size);
@@ -717,21 +860,21 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char *errbuf, int errbuf_s
     return TS_ERROR;
   }
 
-  *ih = config;
+  *instance = config;
   return TS_SUCCESS;
 }
 
 void
-TSRemapDeleteInstance(void *ih)
+TSRemapDeleteInstance(void *instance)
 {
-  auto *config = static_cast<FilterConfig *>(ih);
+  auto *config = static_cast<FilterConfig *>(instance);
   delete config;
 }
 
 TSRemapStatus
-TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo *rri ATS_UNUSED)
+TSRemapDoRemap(void *instance, TSHttpTxn txnp, TSRemapRequestInfo *rri ATS_UNUSED)
 {
-  auto *config = static_cast<FilterConfig *>(ih);
+  auto *config = static_cast<FilterConfig *>(instance);
   if (config == nullptr) {
     return TSREMAP_NO_REMAP;
   }
