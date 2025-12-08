@@ -57,9 +57,9 @@ The ``filter_body`` plugin is an experimental plugin. To build it, either pass
 
     cmake -DENABLE_FILTER_BODY=ON ...
 
-Or enable all experimental plugins with ``-DENABLE_EXPERIMENTAL_PLUGINS=ON``::
+Or enable all experimental plugins with ``-DBUILD_EXPERIMENTAL_PLUGINS=ON``::
 
-    cmake -DENABLE_EXPERIMENTAL_PLUGINS=ON ...
+    cmake -DBUILD_EXPERIMENTAL_PLUGINS=ON ...
 
 Configuration
 =============
