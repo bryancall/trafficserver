@@ -398,8 +398,8 @@ execute_actions(TransformData *data, Rule const *rule, std::string const *matche
 
   // Log action always writes to diags.log so it doesn't require debug tags
   if (rule->actions & ACTION_LOG) {
-    TSNote("[%s] Matched rule: %s, pattern: %s", PLUGIN_NAME, rule->name.c_str(),
-           matched_pattern ? matched_pattern->c_str() : "unknown");
+    TSError("[%s] Matched rule: %s, pattern: %s", PLUGIN_NAME, rule->name.c_str(),
+            matched_pattern ? matched_pattern->c_str() : "unknown");
   }
 
   if ((rule->actions & ACTION_ADD_HEADER) && !data->headers_added && !rule->add_headers.empty()) {

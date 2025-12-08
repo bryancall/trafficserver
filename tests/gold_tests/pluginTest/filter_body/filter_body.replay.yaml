@@ -35,6 +35,9 @@ autest:
     name: 'ts'
     process_config:
       enable_cache: false
+      # The filtered requests produce an ERROR message, so we have to disable
+      # the default log checks of the trafficserver extension.
+      disable_log_checks: true
 
     copy_to_config_dir:
       - config
