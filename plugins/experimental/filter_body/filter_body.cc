@@ -33,6 +33,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include "swoc/TextView.h"
 #include "ts/ts.h"
 #include "ts/remap.h"
 #include "tscore/ink_defs.h"
@@ -105,32 +106,23 @@ struct TransformData {
  *
  * Searches for @a needle within @a haystack using case-insensitive comparison.
  *
- * @param[in] haystack     The string to search within.
- * @param[in] haystack_len Length of haystack in bytes.
- * @param[in] needle       The pattern to search for.
- * @param[in] needle_len   Length of needle in bytes.
+ * @param[in] haystack The string to search within.
+ * @param[in] needle   The pattern to search for.
  * @return Pointer to the first occurrence of needle in haystack, or nullptr if not found.
  */
 const char *
-strcasestr_local(const char *haystack, size_t haystack_len, const char *needle, size_t needle_len)
+strcasestr_local(swoc::TextView haystack, swoc::TextView needle)
 {
-  if (needle_len == 0) {
-    return haystack;
+  if (needle.empty()) {
+    return haystack.data();
   }
-  if (haystack_len < needle_len) {
+  if (haystack.size() < needle.size()) {
     return nullptr;
   }
 
-  for (size_t i = 0; i <= haystack_len - needle_len; ++i) {
-    bool match = true;
-    for (size_t j = 0; j < needle_len; ++j) {
-      if (std::tolower(static_cast<unsigned char>(haystack[i + j])) != std::tolower(static_cast<unsigned char>(needle[j]))) {
-        match = false;
-        break;
-      }
-    }
-    if (match) {
-      return haystack + i;
+  for (size_t i = 0; i <= haystack.size() - needle.size(); ++i) {
+    if (haystack.substr(i, needle.size()).starts_with_nocase(needle)) {
+      return haystack.data() + i;
     }
   }
   return nullptr;
@@ -141,25 +133,23 @@ strcasestr_local(const char *haystack, size_t haystack_len, const char *needle, 
  *
  * Searches for @a needle within @a haystack using exact (case-sensitive) comparison.
  *
- * @param[in] haystack     The string to search within.
- * @param[in] haystack_len Length of haystack in bytes.
- * @param[in] needle       The pattern to search for.
- * @param[in] needle_len   Length of needle in bytes.
+ * @param[in] haystack The string to search within.
+ * @param[in] needle   The pattern to search for.
  * @return Pointer to the first occurrence of needle in haystack, or nullptr if not found.
  */
 const char *
-strstr_local(const char *haystack, size_t haystack_len, const char *needle, size_t needle_len)
+strstr_local(swoc::TextView haystack, swoc::TextView needle)
 {
-  if (needle_len == 0) {
-    return haystack;
+  if (needle.empty()) {
+    return haystack.data();
   }
-  if (haystack_len < needle_len) {
+  if (haystack.size() < needle.size()) {
     return nullptr;
   }
 
-  for (size_t i = 0; i <= haystack_len - needle_len; ++i) {
-    if (memcmp(haystack + i, needle, needle_len) == 0) {
-      return haystack + i;
+  for (size_t i = 0; i <= haystack.size() - needle.size(); ++i) {
+    if (haystack.substr(i, needle.size()).starts_with(needle)) {
+      return haystack.data() + i;
     }
   }
   return nullptr;
@@ -179,7 +169,7 @@ bool
 method_matches(Rule const &rule, TSMBuffer bufp, TSMLoc hdr_loc)
 {
   if (rule.methods.empty()) {
-    return true; // no method restriction
+    return true;
   }
 
   int         method_len = 0;
@@ -188,9 +178,9 @@ method_matches(Rule const &rule, TSMBuffer bufp, TSMLoc hdr_loc)
     return false;
   }
 
-  std::string method_str(method, method_len);
+  swoc::TextView method_view(method, method_len);
   for (auto const &m : rule.methods) {
-    if (strcasecmp(method_str.c_str(), m.c_str()) == 0) {
+    if (0 == strcasecmp(method_view, swoc::TextView(m))) {
       return true;
     }
   }
@@ -272,9 +262,8 @@ header_condition_matches(HeaderCondition const &cond, TSMBuffer bufp, TSMLoc hdr
     return false;
   }
 
-  bool matched = false;
-  // Check all values of this header field
-  int num_values = TSMimeHdrFieldValuesCount(bufp, hdr_loc, field_loc);
+  bool matched    = false;
+  int  num_values = TSMimeHdrFieldValuesCount(bufp, hdr_loc, field_loc);
   for (int i = 0; i < num_values && !matched; ++i) {
     int         value_len = 0;
     const char *value     = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, field_loc, i, &value_len);
@@ -282,9 +271,9 @@ header_condition_matches(HeaderCondition const &cond, TSMBuffer bufp, TSMLoc hdr
       continue;
     }
 
-    // Check if any pattern matches (OR logic within header)
+    swoc::TextView value_view(value, value_len);
     for (auto const &pattern : cond.patterns) {
-      if (strcasestr_local(value, value_len, pattern.c_str(), pattern.length()) != nullptr) {
+      if (strcasestr_local(value_view, swoc::TextView(pattern)) != nullptr) {
         matched = true;
         break;
       }
@@ -323,16 +312,15 @@ headers_match(Rule const &rule, TSMBuffer bufp, TSMLoc hdr_loc)
  * Searches for any of the rule's body patterns in the data using case-sensitive
  * matching. Returns the first matched pattern.
  *
- * @param[in] rule     The rule containing body patterns to search for.
- * @param[in] data     The data buffer to search within.
- * @param[in] data_len Length of the data buffer in bytes.
+ * @param[in] rule The rule containing body patterns to search for.
+ * @param[in] data The data buffer to search within.
  * @return Pointer to the matched pattern string, or nullptr if no match.
  */
 std::string const *
-search_body_patterns(Rule const &rule, char const *data, size_t data_len)
+search_body_patterns(Rule const &rule, swoc::TextView data)
 {
   for (auto const &pattern : rule.body_patterns) {
-    if (strstr_local(data, data_len, pattern.c_str(), pattern.length()) != nullptr) {
+    if (strstr_local(data, swoc::TextView(pattern)) != nullptr) {
       return &pattern;
     }
   }
@@ -571,7 +559,7 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
 
               // Search boundary for patterns spanning block boundaries
               for (Rule const *rule : data->active_rules) {
-                std::string const *matched = search_body_patterns(*rule, boundary_buffer.c_str(), boundary_buffer.length());
+                std::string const *matched = search_body_patterns(*rule, swoc::TextView(boundary_buffer));
                 if (matched) {
                   execute_actions(data, rule, matched);
                   if (data->blocked) {
@@ -584,7 +572,7 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
             // Phase 2: Search entire block in-place (zero-copy)
             if (!data->blocked) {
               for (Rule const *rule : data->active_rules) {
-                std::string const *matched = search_body_patterns(*rule, block_data, block_avail);
+                std::string const *matched = search_body_patterns(*rule, swoc::TextView(block_data, block_avail));
                 if (matched) {
                   execute_actions(data, rule, matched);
                   if (data->blocked) {
