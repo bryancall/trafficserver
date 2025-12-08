@@ -695,6 +695,7 @@ response_handler(TSCont contp, TSEvent event, void *edata)
   // Handle transaction close - clean up continuation
   if (event == TS_EVENT_HTTP_TXN_CLOSE) {
     TSContDestroy(contp);
+    TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
     return 0;
   }
 
