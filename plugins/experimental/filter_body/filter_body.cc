@@ -527,8 +527,9 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
 
       if (avail > 0) {
         // Zero-copy: iterate through buffer blocks
+        // Stop iterating if we've already found a match (matched_rule != nullptr)
         TSIOBufferBlock block = TSIOBufferReaderStart(reader);
-        while (block != nullptr && !data->blocked) {
+        while (block != nullptr && !data->matched_rule) {
           int64_t     block_avail = 0;
           const char *block_data  = TSIOBufferBlockReadStart(block, reader, &block_avail);
 
@@ -547,7 +548,8 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
             size_t search_offset = 0; // Where to start Phase 2 search
 
             // Phase 1: Boundary search (only when we have lookback data)
-            if (!data->lookback.empty() && !data->blocked) {
+            // Skip if we've already found a match (matched_rule != nullptr)
+            if (!data->lookback.empty() && !data->matched_rule) {
               // Create boundary buffer: lookback + enough of block to fully contain any
               // pattern that starts within the first max_lookback bytes of the block.
               // We need 2*max_lookback bytes from the block to ensure a max-length pattern
@@ -562,10 +564,9 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
               for (Rule const *rule : data->active_rules) {
                 std::string const *matched = search_body_patterns(*rule, swoc::TextView(boundary_buffer));
                 if (matched) {
+                  data->matched_rule = rule;
                   execute_actions(data, rule, matched);
-                  if (data->blocked) {
-                    break;
-                  }
+                  break; // Stop searching after first match
                 }
               }
 
@@ -575,22 +576,22 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
             }
 
             // Phase 2: Search remainder of block in-place (zero-copy)
-            // Skip bytes already covered by Phase 1 to avoid duplicate detection
-            if (!data->blocked && search_offset < static_cast<size_t>(block_avail)) {
+            // Skip if we've already found a match or bytes already covered by Phase 1
+            if (!data->matched_rule && search_offset < static_cast<size_t>(block_avail)) {
               for (Rule const *rule : data->active_rules) {
                 std::string const *matched =
                   search_body_patterns(*rule, swoc::TextView(block_data + search_offset, block_avail - search_offset));
                 if (matched) {
+                  data->matched_rule = rule;
                   execute_actions(data, rule, matched);
-                  if (data->blocked) {
-                    break;
-                  }
+                  break; // Stop searching after first match
                 }
               }
             }
 
             // Update lookback buffer (only keep last max_lookback bytes)
-            if (data->config->max_lookback > 0 && !data->blocked) {
+            // Skip if we've found a match - no need to search further blocks
+            if (data->config->max_lookback > 0 && !data->matched_rule) {
               size_t lookback_size = data->config->max_lookback;
               if (static_cast<size_t>(block_avail) >= lookback_size) {
                 data->lookback.assign(block_data + block_avail - lookback_size, lookback_size);
@@ -607,8 +608,8 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
         }
 
         if (data->blocked) {
-          // Complete the transform with zero output - the 403 status we set
-          // will cause ATS to generate the error response
+          // Blocking action - complete the transform with zero output
+          // The 403 status we set will cause ATS to generate the error response
           TSVIONBytesSet(data->output_vio, 0);
           TSVIOReenable(data->output_vio);
 
