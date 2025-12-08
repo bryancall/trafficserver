@@ -545,8 +545,11 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
             // This catches patterns that span block boundaries. The copy is limited
             // to at most (2 * max_lookback) bytes.
             //
-            // Phase 2 (block search): Search the entire current block in-place
-            // (zero-copy). This catches patterns entirely within the block.
+            // Phase 2 (block search): Search the remainder of the current block
+            // in-place (zero-copy). This catches patterns entirely within the block
+            // that weren't already covered by Phase 1.
+
+            size_t search_offset = 0; // Where to start Phase 2 search
 
             // Phase 1: Boundary search (only when we have lookback data)
             if (!data->lookback.empty() && !data->blocked) {
@@ -567,12 +570,17 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
                   }
                 }
               }
+
+              // Phase 2 should skip the bytes already searched in boundary_buffer
+              search_offset = boundary_extent;
             }
 
-            // Phase 2: Search entire block in-place (zero-copy)
-            if (!data->blocked) {
+            // Phase 2: Search remainder of block in-place (zero-copy)
+            // Skip bytes already covered by Phase 1 to avoid duplicate detection
+            if (!data->blocked && search_offset < static_cast<size_t>(block_avail)) {
               for (Rule const *rule : data->active_rules) {
-                std::string const *matched = search_body_patterns(*rule, swoc::TextView(block_data, block_avail));
+                std::string const *matched =
+                  search_body_patterns(*rule, swoc::TextView(block_data + search_offset, block_avail - search_offset));
                 if (matched) {
                   execute_actions(data, rule, matched);
                   if (data->blocked) {
