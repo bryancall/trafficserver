@@ -548,14 +548,17 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
 
             // Phase 1: Boundary search (only when we have lookback data)
             if (!data->lookback.empty() && !data->blocked) {
-              // Create small boundary buffer: lookback + first (max_lookback) bytes of block
-              size_t      boundary_extent = std::min(static_cast<size_t>(block_avail), data->config->max_lookback);
+              // Create boundary buffer: lookback + enough of block to fully contain any
+              // pattern that starts within the first max_lookback bytes of the block.
+              // We need 2*max_lookback bytes from the block to ensure a max-length pattern
+              // starting at position (max_lookback-1) is fully contained.
+              size_t      boundary_extent = std::min(static_cast<size_t>(block_avail), 2 * data->config->max_lookback);
               std::string boundary_buffer;
               boundary_buffer.reserve(data->lookback.length() + boundary_extent);
               boundary_buffer = data->lookback;
               boundary_buffer.append(block_data, boundary_extent);
 
-              // Search boundary for patterns spanning block boundaries
+              // Search boundary for patterns spanning block boundaries or starting near boundary
               for (Rule const *rule : data->active_rules) {
                 std::string const *matched = search_body_patterns(*rule, swoc::TextView(boundary_buffer));
                 if (matched) {
@@ -566,8 +569,9 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
                 }
               }
 
-              // Phase 2 should skip the bytes already searched in boundary_buffer
-              search_offset = boundary_extent;
+              // Phase 2 starts after max_lookback bytes - these are guaranteed to be fully
+              // searchable in Phase 1's boundary_buffer, avoiding duplicate detection
+              search_offset = std::min(static_cast<size_t>(block_avail), data->config->max_lookback);
             }
 
             // Phase 2: Search remainder of block in-place (zero-copy)
