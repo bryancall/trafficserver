@@ -1,6 +1,6 @@
-# Configuration for response body filtering with add_header action.
+# Configuration for adding header on response match.
 rules:
-  - name: "sensitive_response"
+  - name: "sensitive_response_header"
     filter:
       direction: response
       status: [200]

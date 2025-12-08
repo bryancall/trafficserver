@@ -1,6 +1,6 @@
-# Configuration for log-only mode.
+# Configuration for blocking requests with XXE patterns.
 rules:
-  - name: "xxe_detection_log"
+  - name: "xxe_request_block"
     filter:
       direction: request
       methods: [POST]
@@ -8,6 +8,9 @@ rules:
         - name: "Content-Type"
           patterns:
             - "application/xml"
+            - "text/xml"
       body_patterns:
         - "<!ENTITY"
-    action: [log]
+        - "SYSTEM"
+    action: [log, block]
+

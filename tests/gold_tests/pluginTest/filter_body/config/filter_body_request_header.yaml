@@ -1,6 +1,6 @@
-# Configuration for adding header on match.
+# Configuration for adding header on request match.
 rules:
-  - name: "xxe_add_header"
+  - name: "xxe_request_header"
     filter:
       direction: request
       methods: [POST]
@@ -14,3 +14,4 @@ rules:
       - log
       - add_header:
           X-Security-Match: "<rule_name>"
+

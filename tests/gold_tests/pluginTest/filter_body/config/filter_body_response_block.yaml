@@ -1,6 +1,6 @@
-# Configuration for response body filtering.
+# Configuration for blocking responses with sensitive data.
 rules:
-  - name: "sensitive_data_leak"
+  - name: "sensitive_response_block"
     filter:
       direction: response
       status: [200]
@@ -12,4 +12,5 @@ rules:
       body_patterns:
         - "SSN:"
         - "password:"
-    action: [log]
+    action: [log, block]
+

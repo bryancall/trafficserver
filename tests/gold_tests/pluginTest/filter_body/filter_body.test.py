@@ -21,14 +21,4 @@ Test.Summary = 'Verify filter_body plugin for request/response body content filt
 
 Test.SkipUnless(Condition.PluginExists('filter_body.so'))
 
-# Test 1: Log only mode - request passes through, pattern logged
-Test.ATSReplayTest(replay_file="replay/log_only.replay.yaml")
-
-# Test 2: Add header action on request - request passes, header added to server request
-Test.ATSReplayTest(replay_file="replay/add_header.replay.yaml")
-
-# Test 3: Header mismatch - no body inspection, request passes
-Test.ATSReplayTest(replay_file="replay/header_mismatch.replay.yaml")
-
-# Test 4: Response filtering - detect sensitive data in responses
-Test.ATSReplayTest(replay_file="replay/response_filter.replay.yaml")
+Test.ATSReplayTest(replay_file="filter_body.replay.yaml")

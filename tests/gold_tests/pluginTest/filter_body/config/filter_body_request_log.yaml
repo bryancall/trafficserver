@@ -1,6 +1,6 @@
-# Configuration for blocking requests with XXE patterns.
+# Configuration for logging requests with XXE patterns (no blocking).
 rules:
-  - name: "xxe_detection"
+  - name: "xxe_request_log"
     filter:
       direction: request
       methods: [POST]
@@ -12,4 +12,5 @@ rules:
       body_patterns:
         - "<!ENTITY"
         - "SYSTEM"
-    action: [log, block]
+    action: [log]
+
