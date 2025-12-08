@@ -468,6 +468,9 @@ transform_handler(TSCont contp, TSEvent event, void *edata ATS_UNUSED)
   if (TSVConnClosedGet(contp)) {
     auto *data = static_cast<TransformData *>(TSContDataGet(contp));
     if (data) {
+      if (data->output_reader) {
+        TSIOBufferReaderFree(data->output_reader);
+      }
       if (data->output_buffer) {
         TSIOBufferDestroy(data->output_buffer);
       }
