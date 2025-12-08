@@ -113,10 +113,7 @@ struct TransformData {
 const char *
 strcasestr_local(swoc::TextView haystack, swoc::TextView needle)
 {
-  if (needle.empty()) {
-    return haystack.data();
-  }
-  if (haystack.size() < needle.size()) {
+  if (needle.empty() || haystack.size() < needle.size()) {
     return nullptr;
   }
 
@@ -140,17 +137,13 @@ strcasestr_local(swoc::TextView haystack, swoc::TextView needle)
 const char *
 strstr_local(swoc::TextView haystack, swoc::TextView needle)
 {
-  if (needle.empty()) {
-    return haystack.data();
-  }
-  if (haystack.size() < needle.size()) {
+  if (needle.empty() || haystack.size() < needle.size()) {
     return nullptr;
   }
 
-  for (size_t i = 0; i <= haystack.size() - needle.size(); ++i) {
-    if (haystack.substr(i, needle.size()).starts_with(needle)) {
-      return haystack.data() + i;
-    }
+  auto pos = haystack.find(needle);
+  if (pos != std::string::npos) {
+    return haystack.data() + pos;
   }
   return nullptr;
 }
@@ -179,6 +172,8 @@ method_matches(Rule const &rule, TSMBuffer bufp, TSMLoc hdr_loc)
   }
 
   swoc::TextView method_view(method, method_len);
+  method_view.trim_if(::isspace);
+
   for (auto const &m : rule.methods) {
     if (0 == strcasecmp(method_view, swoc::TextView(m))) {
       return true;
