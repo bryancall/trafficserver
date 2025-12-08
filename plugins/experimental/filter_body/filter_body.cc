@@ -752,7 +752,8 @@ response_handler(TSCont contp, TSEvent event, void *edata)
  *
  * Loads and parses the YAML configuration file, creating Rule objects for each
  * rule definition. Rules are separated into request_rules and response_rules
- * based on their direction setting.
+ * based on their direction setting. Filtering criteria are contained within a
+ * 'filter' node to separate them from actions.
  *
  * @param[in] filename The configuration file path (absolute or relative to config dir).
  * @return Pointer to the parsed FilterConfig, or nullptr on error.
@@ -798,9 +799,17 @@ parse_config(const char *filename)
         return nullptr;
       }
 
-      // Direction (default: request)
-      if (rule_node["direction"]) {
-        std::string dir = rule_node["direction"].as<std::string>();
+      // Filter node is required (contains all filtering criteria)
+      YAML::Node filter_node = rule_node["filter"];
+      if (!filter_node) {
+        TSError("[%s] Rule '%s' missing 'filter' node", PLUGIN_NAME, rule.name.c_str());
+        delete config;
+        return nullptr;
+      }
+
+      // Direction (default: request) - from filter node
+      if (filter_node["direction"]) {
+        std::string dir = filter_node["direction"].as<std::string>();
         if (dir == "response") {
           rule.direction = Direction::RESPONSE;
         } else {
@@ -840,16 +849,16 @@ parse_config(const char *filename)
         rule.actions = ACTION_LOG; // default
       }
 
-      // Methods (for request rules)
-      if (rule_node["methods"]) {
-        for (auto const &method_node : rule_node["methods"]) {
+      // Methods (for request rules) - from filter node
+      if (filter_node["methods"]) {
+        for (auto const &method_node : filter_node["methods"]) {
           rule.methods.push_back(method_node.as<std::string>());
         }
       }
 
-      // Status codes (for response rules)
-      if (rule_node["status"]) {
-        for (auto const &status_node : rule_node["status"]) {
+      // Status codes (for response rules) - from filter node
+      if (filter_node["status"]) {
+        for (auto const &status_node : filter_node["status"]) {
           rule.status_codes.push_back(status_node.as<int>());
         }
       }
@@ -866,14 +875,14 @@ parse_config(const char *filename)
         return nullptr;
       }
 
-      // Max content length
-      if (rule_node["max_content_length"]) {
-        rule.max_content_length = rule_node["max_content_length"].as<int64_t>();
+      // Max content length - from filter node
+      if (filter_node["max_content_length"]) {
+        rule.max_content_length = filter_node["max_content_length"].as<int64_t>();
       }
 
-      // Header conditions
-      if (rule_node["headers"]) {
-        for (auto const &header_node : rule_node["headers"]) {
+      // Header conditions - from filter node
+      if (filter_node["headers"]) {
+        for (auto const &header_node : filter_node["headers"]) {
           HeaderCondition cond;
           if (header_node["name"]) {
             cond.name = header_node["name"].as<std::string>();
@@ -887,9 +896,9 @@ parse_config(const char *filename)
         }
       }
 
-      // Body patterns
-      if (rule_node["body_patterns"]) {
-        for (auto const &pattern_node : rule_node["body_patterns"]) {
+      // Body patterns - from filter node
+      if (filter_node["body_patterns"]) {
+        for (auto const &pattern_node : filter_node["body_patterns"]) {
           std::string pattern = pattern_node.as<std::string>();
           rule.body_patterns.push_back(pattern);
           if (pattern.length() > rule.max_pattern_len) {

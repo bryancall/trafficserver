@@ -74,23 +74,26 @@ or an absolute path.
 Configuration File Format
 -------------------------
 
-The configuration file uses YAML format with a list of rules::
+The configuration file uses YAML format with a list of rules. Each rule has a
+``name``, a ``filter`` section containing all filtering criteria, and an
+``action`` section specifying what to do when a match occurs::
 
     rules:
       - name: rule_name
-        direction: request    # optional, defaults to request
-        methods:              # for request rules only
-          - POST
-          - PUT
-        max_content_length: 1048576
-        headers:
-          - name: Content-Type
-            patterns:
-              - "application/xml"
-              - "text/xml"
-        body_patterns:
-          - "<!ENTITY"
-          - "<!DOCTYPE"
+        filter:
+          direction: request    # optional, defaults to request
+          methods:              # for request rules only
+            - POST
+            - PUT
+          max_content_length: 1048576
+          headers:
+            - name: Content-Type
+              patterns:
+                - "application/xml"
+                - "text/xml"
+          body_patterns:
+            - "<!ENTITY"
+            - "<!DOCTYPE"
         action:
           - log
           - block
@@ -98,16 +101,18 @@ The configuration file uses YAML format with a list of rules::
               X-Security-Match: <rule_name>
               X-Another-Header: some-value
 
-For response rules, use ``status`` instead of ``methods``::
+For response rules, use ``status`` instead of ``methods`` within the ``filter``
+section::
 
     rules:
       - name: response_rule
-        direction: response
-        status:               # for response rules only
-          - 200
-          - 201
-        body_patterns:
-          - "sensitive_data"
+        filter:
+          direction: response
+          status:               # for response rules only
+            - 200
+            - 201
+          body_patterns:
+            - "sensitive_data"
         action:
           - log
 
@@ -115,7 +120,19 @@ Rule Options
 ------------
 
 ``name`` (required)
-    A unique name for the rule. Used in log messages when the rule matches.
+    A unique name for the rule. Used in log messages and metrics when the rule
+    matches. The special placeholder ``<rule_name>`` can be used in header values
+    to substitute the rule's name dynamically.
+
+``filter`` (required)
+    A section containing all filtering criteria that determine which requests or
+    responses the rule applies to. This section separates the "what to match"
+    from the "what to do" (action).
+
+Filter Options
+--------------
+
+The following options are valid within the ``filter`` section:
 
 ``direction`` (optional)
     Specifies whether to inspect request or response bodies.
@@ -123,11 +140,11 @@ Rule Options
 
 ``methods`` (optional)
     List of HTTP methods to match. If not specified, all methods are matched.
-    Only valid for request rules. Example: ``[GET, POST, PUT]``
+    Only valid for request rules. Example: ``[GET, POST, PUT]``.
 
 ``status`` (optional)
     List of HTTP status codes to match. If not specified, all status codes are
-    matched. Only valid for response rules. Example: ``[200, 201]``
+    matched. Only valid for response rules. Example: ``[200, 201]``.
 
 ``max_content_length`` (optional)
     Maximum content length in bytes for body inspection. Bodies larger than
@@ -139,12 +156,15 @@ Rule Options
     inspection to occur. Each header can have multiple patterns (OR logic
     within a single header).
 
-    - ``name``: Header name (case-insensitive matching)
-    - ``patterns``: List of patterns to match against the header value
+    - ``name``: Header name (case-insensitive matching).
+    - ``patterns``: List of patterns to match against the header value.
 
 ``body_patterns`` (required)
     List of patterns to search for in the body content. Pattern matching is
     case-sensitive. If any pattern matches, the configured actions are executed.
+
+Action Options
+--------------
 
 ``action`` (optional)
     List of actions to take when a pattern matches. Default is ``[log]``.
@@ -160,7 +180,7 @@ Rule Options
             - log
             - add_header:
                 X-Security-Match: <rule_name>
-                X-Custom-Flag: matched
+                X-Custom-Flag: detected
 
 Matching Logic
 ==============
@@ -170,36 +190,37 @@ Header Matching
 
 Headers are matched using the following logic:
 
-1. All configured headers must match (AND logic between headers)
-2. Within each header, any pattern can match (OR logic between patterns)
-3. Header name matching is case-insensitive
-4. Header value matching is case-insensitive
+1. All configured headers must match (AND logic between headers).
+2. Within each header, any pattern can match (OR logic between patterns).
+3. Header name matching is case-insensitive.
+4. Header value matching is case-insensitive.
 
 For example, with this configuration::
 
-    headers:
-      - name: Content-Type
-        patterns:
-          - "application/xml"
-          - "text/xml"
-      - name: X-Custom-Header
-        patterns:
-          - "value1"
+    filter:
+      headers:
+        - name: Content-Type
+          patterns:
+            - "application/xml"
+            - "text/xml"
+        - name: X-Custom-Header
+          patterns:
+            - "value1"
 
 A request must have:
 
 - A ``Content-Type`` header containing either "application/xml" OR "text/xml", AND
-- An ``X-Custom-Header`` header containing "value1"
+- An ``X-Custom-Header`` header containing "value1".
 
 Body Pattern Matching
 ---------------------
 
 Body patterns are matched using simple substring search:
 
-- Matching is case-sensitive
-- Any pattern match triggers the configured actions
+- Matching is case-sensitive.
+- Any pattern match triggers the configured actions.
 - The plugin uses a streaming approach with a lookback buffer to handle patterns
-  that may span buffer boundaries
+  that may span buffer boundaries.
 
 Actions
 =======
@@ -286,21 +307,22 @@ Block XML requests containing XXE patterns::
 
     rules:
       - name: xxe_detection
-        direction: request
-        methods:
-          - POST
-          - PUT
-        headers:
-          - name: Content-Type
-            patterns:
-              - "application/xml"
-              - "text/xml"
-              - "application/xhtml+xml"
-        body_patterns:
-          - "<!ENTITY"
-          - "<!DOCTYPE"
-          - "SYSTEM"
-          - "PUBLIC"
+        filter:
+          direction: request
+          methods:
+            - POST
+            - PUT
+          headers:
+            - name: Content-Type
+              patterns:
+                - "application/xml"
+                - "text/xml"
+                - "application/xhtml+xml"
+          body_patterns:
+            - "<!ENTITY"
+            - "<!DOCTYPE"
+            - "SYSTEM"
+            - "PUBLIC"
         action:
           - log
           - block
@@ -312,16 +334,17 @@ Log potential SQL injection attempts without blocking::
 
     rules:
       - name: sql_injection_detection
-        direction: request
-        methods:
-          - POST
-          - GET
-        max_content_length: 65536
-        body_patterns:
-          - "' OR '"
-          - "'; DROP"
-          - "UNION SELECT"
-          - "1=1"
+        filter:
+          direction: request
+          methods:
+            - POST
+            - GET
+          max_content_length: 65536
+          body_patterns:
+            - "' OR '"
+            - "'; DROP"
+            - "UNION SELECT"
+            - "1=1"
         action:
           - log
           - add_header:
@@ -334,16 +357,17 @@ Add a header when response contains sensitive patterns::
 
     rules:
       - name: sensitive_data_leak
-        direction: response
-        headers:
-          - name: Content-Type
-            patterns:
-              - "application/json"
-              - "text/html"
-        body_patterns:
-          - "password"
-          - "ssn"
-          - "credit_card"
+        filter:
+          direction: response
+          headers:
+            - name: Content-Type
+              patterns:
+                - "application/json"
+                - "text/html"
+          body_patterns:
+            - "password"
+            - "ssn"
+            - "credit_card"
         action:
           - log
           - add_header:
@@ -383,10 +407,10 @@ To enable debug output for the plugin, configure debug tags in records.yaml::
 
 Debug output includes:
 
-- Configuration loading and rule parsing
-- Header matching results
-- Pattern match notifications
-- Action execution
+- Configuration loading and rule parsing.
+- Header matching results.
+- Pattern match notifications.
+- Action execution.
 
 Limitations
 ===========
@@ -412,6 +436,5 @@ Limitations
 See Also
 ========
 
-- :doc:`header_rewrite.en` for header-based request/response modification
-- :doc:`access_control.en` for access control based on various criteria
-
+- :doc:`header_rewrite.en` for header-based request/response modification.
+- :doc:`access_control.en` for access control based on various criteria.

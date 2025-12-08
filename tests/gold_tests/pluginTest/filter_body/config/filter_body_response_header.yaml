@@ -1,16 +1,17 @@
-# Configuration for response body filtering with add_header action
+# Configuration for response body filtering with add_header action.
 rules:
   - name: "sensitive_response"
-    direction: response
+    filter:
+      direction: response
+      status: [200]
+      headers:
+        - name: "Content-Type"
+          patterns:
+            - "application/json"
+      body_patterns:
+        - "secret_data"
     action:
       - log
       - add_header:
           X-Data-Classification: "sensitive"
           X-Rule-Name: "<rule_name>"
-    status: [200]
-    headers:
-      - name: "Content-Type"
-        patterns:
-          - "application/json"
-    body_patterns:
-      - "secret_data"

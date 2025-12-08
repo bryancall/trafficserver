@@ -1,10 +1,10 @@
-# Configuration for response filtering with status code filter
-# Only inspect 200 OK responses, not 404 or other errors
+# Configuration for response filtering with status code filter.
+# Only inspect 200 OK responses, not 404 or other errors.
 rules:
   - name: "status_filter_test"
-    direction: response
+    filter:
+      direction: response
+      status: [200]
+      body_patterns:
+        - "test_pattern"
     action: [log]
-    status: [200]
-    body_patterns:
-      - "test_pattern"
-

@@ -1,13 +1,13 @@
-# Configuration for log-only mode
+# Configuration for log-only mode.
 rules:
   - name: "xxe_detection_log"
-    direction: request
+    filter:
+      direction: request
+      methods: [POST]
+      headers:
+        - name: "Content-Type"
+          patterns:
+            - "application/xml"
+      body_patterns:
+        - "<!ENTITY"
     action: [log]
-    methods: [POST]
-    headers:
-      - name: "Content-Type"
-        patterns:
-          - "application/xml"
-    body_patterns:
-      - "<!ENTITY"
-
