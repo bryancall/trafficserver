@@ -117,6 +117,23 @@
       "inherits": ["dev", "asan"]
     },
     {
+      "name": "coverage",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fprofile-arcs -ftest-coverage -g -O0",
+        "CMAKE_C_FLAGS": "-fprofile-arcs -ftest-coverage -g -O0",
+        "CMAKE_EXE_LINKER_FLAGS": "-lgcov --coverage",
+        "CMAKE_SHARED_LINKER_FLAGS": "-lgcov --coverage"
+      }
+    },
+    {
+      "name": "dev-coverage",
+      "displayName": "dev with coverage",
+      "description": "Development build with gcov code coverage instrumentation",
+      "inherits": ["dev", "coverage"],
+      "binaryDir": "${sourceDir}/build-coverage"
+    },
+    {
       "name": "ci",
       "displayName": "CI defaults",
       "description": "Defaults for CI Pipeline builds",
