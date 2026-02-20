@@ -58,46 +58,45 @@ def HasLegacyTLSSupport(self):
     Modern OpenSSL 3.x installations often disable these protocols entirely,
     even if the openssl binary still accepts the -tls1 flag and lists TLSv1 ciphers.
 
-    On Fedora/RHEL systems, the crypto-policies framework may disable legacy
-    TLS at runtime even when OpenSSL is compiled with support for it. This
-    causes 'openssl ciphers -v -tls1' to still list TLSv1 ciphers, but actual
-    TLS 1.0 connections will fail with "no protocols available".
+    On Fedora/RHEL systems, the crypto-policies framework sets
+    TLS.MinProtocol in /etc/crypto-policies/back-ends/opensslcnf.config.
+    When MinProtocol is TLSv1.2 or higher, the OpenSSL library refuses to
+    negotiate TLS 1.0/1.1 on the server side, even though 'openssl s_client
+    -tls1' to a closed port still gets "connection refused" (the explicit
+    flag overrides client-side policy but not server-side).
 
-    We only probe TLSv1.0 (not TLSv1.1 separately) because crypto-policies
-    always disable both legacy versions together. If TLSv1.0 is unavailable,
-    TLSv1.1 will be too.
-
-    The check connects to localhost on a closed port to avoid any external
-    network dependency. A "connection refused" error means the TLS protocol
-    was available but nothing was listening; "no protocols available" means
-    the crypto-policy blocked TLSv1.0 entirely.
+    We check two things:
+    1. The crypto-policy config file for MinProtocol (catches Fedora/RHEL)
+    2. An openssl s_client probe as a fallback for non-Fedora systems
     """
 
     def check_tls1_support():
+        # Check the system crypto-policy config if it exists.
+        # Fedora/RHEL use this to enforce TLS minimum versions at the
+        # library level, affecting server-side TLS negotiation in ATS.
+        crypto_policy_file = '/etc/crypto-policies/back-ends/opensslcnf.config'
         try:
-            # Connect to localhost on a port nothing is listening on.
-            # This avoids external network dependency while still detecting
-            # whether the crypto-policy allows TLSv1.0.
+            with open(crypto_policy_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('TLS.MinProtocol'):
+                        _, _, value = line.partition('=')
+                        min_proto = value.strip()
+                        if min_proto in ('TLSv1.2', 'TLSv1.3'):
+                            return False
+        except (IOError, OSError):
+            pass  # No crypto-policy file; fall through to openssl probe
+
+        try:
             result = subprocess.run(
-                ['openssl', 's_client', '-tls1', '-connect', '127.0.0.1:1'],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                input=''  # Don't wait for interactive input
-            )
+                ['openssl', 's_client', '-tls1', '-connect', '127.0.0.1:1'], capture_output=True, text=True, timeout=5, input='')
             output = result.stdout + result.stderr
-            # "no protocols available" means TLSv1 is disabled by crypto-policy
             if 'no protocols available' in output:
                 return False
-            # Connection refused or other errors mean TLSv1 was attempted
-            # (the protocol is available, just no server listening)
             return True
         except subprocess.TimeoutExpired:
-            # Timeout on localhost shouldn't happen, but if it does,
-            # assume TLSv1 is not available (safer than false positive)
             return False
         except Exception:
-            # If we can't determine, assume TLSv1 is not available (safer)
             return False
 
     return self.Condition(check_tls1_support, "System does not support legacy TLS protocols (TLSv1.0/TLSv1.1)")
