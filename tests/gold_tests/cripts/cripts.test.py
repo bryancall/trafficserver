@@ -26,6 +26,7 @@ Test.testName = "cripts: basic functions"
 Test.Summary = '''
 Simple cripts test that sets a response header back to the client
 '''
+Test.SkipUnless(Condition.HasATSFeature('TS_HAS_CRIPTS'))
 Test.ContinueOnFail = True
 
 

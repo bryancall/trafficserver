@@ -28,6 +28,8 @@ Test.Summary = '''
 Test crash log generation with backtrace.
 '''
 
+has_remote_unwinding = Condition.HasATSFeature('TS_USE_REMOTE_UNWINDING')
+
 # Create an origin server for the test.
 server = Test.MakeOriginServer("server")
 
@@ -90,12 +92,13 @@ tr.Processes.Default.ReturnCode = 0
 tr = Test.AddTestRun("Check crash log content")
 tr.Processes.Default.Command = (f'cat {ts.Variables.LOGDIR}/crash-*.log 2>&1')
 tr.Processes.Default.ReturnCode = 0
-# The crash log should contain signal information (always present).
 tr.Processes.Default.Streams.stdout += Testers.ContainsExpression(
     "Segmentation fault", "Expected crash log to show segmentation fault signal")
-# The crash log should contain the crashing thread information first.
-# The crashing thread should be listed first.
-tr.Processes.Default.Streams.stdout += Testers.ContainsExpression("Crashing Thread", "Expected crashing thread backtrace first")
-# The other threads should be listed after.
-tr.Processes.Default.Streams.stdout += Testers.ContainsExpression(
-    "Other Non-Crashing Threads:", "Expected other non-crashing threads section")
+
+# Thread backtraces require libunwind (TS_USE_REMOTE_UNWINDING). Without it,
+# traffic_crashlog cannot ptrace the crashed process and only outputs
+# "Unable to retrieve backtrace".
+if has_remote_unwinding:
+    tr.Processes.Default.Streams.stdout += Testers.ContainsExpression("Crashing Thread", "Expected crashing thread backtrace first")
+    tr.Processes.Default.Streams.stdout += Testers.ContainsExpression(
+        "Other Non-Crashing Threads:", "Expected other non-crashing threads section")

@@ -236,6 +236,9 @@ PerClientConnectionMaxTest(Protocol.HTTP, exempt_list='127.0.0.1,::1', exempt_li
 PerClientConnectionMaxTest(Protocol.HTTPS, exempt_list='1.2.3.4,5.6.0.0/16', exempt_list_applies=False)
 PerClientConnectionMaxTest(Protocol.HTTP2, exempt_list='0/0,::/0', exempt_list_applies=True)
 
-PerClientConnectionMaxTest(Protocol.HTTP, exempt_list_file='exempt_lists/exempt_localhost.yaml', exempt_list_applies=True)
-PerClientConnectionMaxTest(Protocol.HTTP, exempt_list_file='exempt_lists/no_localhost.yaml', exempt_list_applies=False)
-PerClientConnectionMaxTest(Protocol.HTTP, exempt_list_file='exempt_lists/exempt_all.yaml', exempt_list_applies=True)
+# The exempt_list_file tests use connection_exempt_list.so which is a cript
+# plugin. Only run these when the plugin is available.
+if os.path.isfile(os.path.join(Test.Variables.PLUGINDIR, 'connection_exempt_list.so')):
+    PerClientConnectionMaxTest(Protocol.HTTP, exempt_list_file='exempt_lists/exempt_localhost.yaml', exempt_list_applies=True)
+    PerClientConnectionMaxTest(Protocol.HTTP, exempt_list_file='exempt_lists/no_localhost.yaml', exempt_list_applies=False)
+    PerClientConnectionMaxTest(Protocol.HTTP, exempt_list_file='exempt_lists/exempt_all.yaml', exempt_list_applies=True)
