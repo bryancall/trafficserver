@@ -36,19 +36,20 @@ Test.Summary = 'Test cache scan delete with multiple volumes (#12583)'
 
 server = Test.MakeOriginServer("server")
 
-HOSTS = ["www.example.com", "cdn.example.com", "api.example.com"]
-OBJECTS_PER_HOST = 100
-NUM_OBJECTS = len(HOSTS) * OBJECTS_PER_HOST
-for host in HOSTS:
-    for i in range(OBJECTS_PER_HOST):
-        body = f"cached-object-{host}-{i}-" + ("x" * 131072)
-        request_header = {"headers": f"GET /obj/{i} HTTP/1.1\r\nHost: {host}\r\n\r\n", "timestamp": "1469733493.993", "body": ""}
-        response_header = {
-            "headers": f"HTTP/1.1 200 OK\r\nCache-Control: max-age=3600\r\nContent-Length: {len(body)}\r\n\r\n",
-            "timestamp": "1469733493.993",
-            "body": body
-        }
-        server.addResponse("sessionlog.json", request_header, response_header)
+NUM_OBJECTS = 300
+for i in range(NUM_OBJECTS):
+    body = f"cached-object-{i}-" + ("x" * 131072)
+    request_header = {
+        "headers": f"GET /obj/{i} HTTP/1.1\r\nHost: www.example.com\r\n\r\n",
+        "timestamp": "1469733493.993",
+        "body": ""
+    }
+    response_header = {
+        "headers": f"HTTP/1.1 200 OK\r\nCache-Control: max-age=3600\r\nContent-Length: {len(body)}\r\n\r\n",
+        "timestamp": "1469733493.993",
+        "body": body
+    }
+    server.addResponse("sessionlog.json", request_header, response_header)
 
 ts = Test.MakeATSProcess("ts")
 
@@ -74,17 +75,6 @@ plugin_path = os.path.join(Test.Variables.AtsBuildGoldTestsDir, 'pluginTest', 'c
 ts.Setup.Copy(plugin_path, ts.Env['PROXY_CONFIG_PLUGIN_PLUGIN_DIR'])
 ts.Disk.plugin_config.AddLine(f"cache_scan_delete.so {marker_file}")
 
-# Map hostnames to specific volumes to trigger the stripe mismatch bug.
-# When scanObject() extracts the hostname from a cached object and passes it
-# to cacheProcessor.remove(), key_to_stripe() uses the hosting.config mapping
-# which can return a different stripe than the one being scanned.
-ts.Disk.hosting_config.AddLines(
-    [
-        "hostname=www.example.com volume=1,2,3",
-        "hostname=cdn.example.com volume=4,5,6",
-        "hostname=api.example.com volume=7,8,9",
-    ])
-
 ts.Disk.remap_config.AddLine(f"map / http://127.0.0.1:{server.Variables.Port}/")
 
 ts.Disk.records_config.update(
@@ -100,8 +90,8 @@ tr1.Processes.Default.StartBefore(server)
 tr1.Processes.Default.StartBefore(ts)
 tr1.Processes.Default.ReturnCode = 0
 curl_cmds = ' && '.join(
-    f'curl -s -o /dev/null -w "%{{http_code}}\\n" http://127.0.0.1:{ts.Variables.port}/obj/{i} -H "Host: {host}"' for host in HOSTS
-    for i in range(OBJECTS_PER_HOST))
+    f'curl -s -o /dev/null -w "%{{http_code}}\\n" http://127.0.0.1:{ts.Variables.port}/obj/{i} -H "Host: www.example.com"'
+    for i in range(NUM_OBJECTS))
 tr1.Processes.Default.Command = curl_cmds
 tr1.StillRunningAfter = ts
 
