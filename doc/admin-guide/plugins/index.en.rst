@@ -55,6 +55,7 @@ Plugins that are considered stable are installed by default in |TS| releases.
    ESI <esi.en>
    Escalate <escalate.en>
    Compress <compress.en>
+   Dashboard <dashboard.en>
    Generator <generator.en>
    Header Rewrite <header_rewrite.en>
    Health Checks <healthchecks.en>
@@ -107,6 +108,10 @@ Plugins that are considered stable are installed by default in |TS| releases.
     Compress or deflate cache responses.
 
     .. sidebar: Formerly "gzip".
+
+:doc:`Dashboard <dashboard.en>`
+    A remap-based plugin that serves a real-time web dashboard with live-updating
+    charts and graphs for all |TS| statistics.
 
 :doc:`Header Rewrite <header_rewrite.en>`
     Modify requests and responses based on incoming and outgoing headers and

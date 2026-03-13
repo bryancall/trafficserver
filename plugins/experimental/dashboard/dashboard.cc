@@ -10,6 +10,9 @@
     /_dashboard/           -> HTML dashboard page
     /_dashboard/__api/stats -> JSON stats for live polling
 
+  The HTML dashboard is embedded directly in this source file as a raw
+  string literal, making deployment a single .so with no external files.
+
   Based on the http_stats.cc experimental plugin pattern.
 */
 
@@ -21,7 +24,6 @@
 #include <unistd.h>
 #include <string>
 #include <ctime>
-#include <fstream>
 
 #include "ts/ts.h"
 #include "ts/remap.h"
@@ -617,6 +619,7 @@ build_stats_json()
   js("total_client_conns", get_stat("proxy.process.http2.total_client_connections"));
   js("total_server_conns", get_stat("proxy.process.http2.total_server_connections"));
   js("total_client_streams", get_stat("proxy.process.http2.total_client_streams"));
+  js("total_server_streams", get_stat("proxy.process.http2.total_server_streams"));
   js("connection_errors", get_stat("proxy.process.http2.connection_errors"));
   js("stream_errors", get_stat("proxy.process.http2.stream_errors"));
   js("max_concurrent_exceeded_in", get_stat("proxy.process.http2.max_concurrent_streams_exceeded_in"));
@@ -677,31 +680,12 @@ build_stats_json()
   return json;
 }
 
-// ---- HTML Dashboard (loaded from file) ----
-
-static std::string DashboardHtmlPath;
+// ---- HTML Dashboard (embedded) ----
 
 static std::string
 build_dashboard_html()
 {
-  if (DashboardHtmlPath.empty()) {
-    return "<html><body>Dashboard HTML path not configured. "
-           "Pass path as plugin argument: @plugin=dashboard.so /path/to/dashboard.html</body></html>";
-  }
-  std::ifstream f(DashboardHtmlPath);
-  if (!f.is_open()) {
-    return "<html><body>Failed to open dashboard file: " + DashboardHtmlPath + "</body></html>";
-  }
-  std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-  return content;
-}
-
-// Legacy embedded HTML removed - dashboard is now served from external file
-#if 0
-static std::string
-build_dashboard_html_embedded()
-{
-  return std::string(R"HTMLRAW(<!DOCTYPE html>
+  return std::string(R"DASHBOARD(<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -719,426 +703,799 @@ build_dashboard_html_embedded()
     justify-content: space-between; flex-wrap: wrap; gap: 12px;
   }
   .header h1 { font-size: 20px; color: #38bdf8; font-weight: 600; }
-  .header-info { display: flex; gap: 20px; align-items: center; font-size: 13px; color: #94a3b8; }
-  .header-info span { display: flex; align-items: center; gap: 6px; }
-  .live-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: #22c55e; animation: pulse 2s infinite;
+  .header-right { display: flex; gap: 20px; align-items: center; font-size: 13px; color: #94a3b8; }
+  .header-right span { display: flex; align-items: center; gap: 6px; }
+  .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .gear-btn {
+    background: none; border: 1px solid #475569; border-radius: 6px;
+    color: #94a3b8; padding: 4px 10px; cursor: pointer; font-size: 14px; transition: all 0.2s;
   }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
-  .container { max-width: 1400px; margin: 0 auto; padding: 16px; }
-
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .card {
-    background: #1e293b; border-radius: 10px; padding: 14px 16px;
-    border: 1px solid #334155;
+  .gear-btn:hover { border-color: #38bdf8; color: #38bdf8; }
+  .settings-overlay { display:none; position:fixed; top:0;left:0;right:0;bottom:0; background:rgba(0,0,0,0.6); z-index:200; }
+  .settings-panel {
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    background:#1e293b; border:1px solid #334155; border-radius:12px;
+    padding:24px; z-index:201; min-width:380px; max-height:80vh; overflow-y:auto;
   }
-  .card-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 6px; }
-  .card-value { font-size: 28px; font-weight: 700; font-family: 'SF Mono', 'Fira Code', monospace; }
-  .card-sub { font-size: 12px; color: #64748b; margin-top: 2px; font-family: 'SF Mono', monospace; }
-  .card-value.green { color: #22c55e; }
-  .card-value.blue { color: #38bdf8; }
-  .card-value.amber { color: #f59e0b; }
-
-  .panel {
-    background: #1e293b; border-radius: 10px; padding: 14px 16px;
-    border: 1px solid #334155;
+  .settings-panel h2 { font-size:16px; color:#e2e8f0; margin-bottom:16px; }
+  .settings-cat { font-size:11px; text-transform:uppercase; letter-spacing:0.08em; color:#38bdf8; margin:12px 0 6px; padding-top:8px; border-top:1px solid #334155; }
+  .settings-cat:first-child { border-top:none; margin-top:0; padding-top:0; }
+  .widget-toggle { display:flex; align-items:center; justify-content:space-between; padding:5px 0; }
+  .widget-toggle label { font-size:13px; color:#cbd5e1; cursor:pointer; }
+  .widget-toggle input[type=checkbox] { accent-color:#38bdf8; width:15px; height:15px; cursor:pointer; }
+  .settings-close { margin-top:16px; background:#38bdf8; color:#0f172a; border:none; border-radius:6px; padding:8px 20px; cursor:pointer; font-weight:600; width:100%; }
+  .container { max-width:100%; margin:0 auto; padding:16px 24px; }
+  .error-banner { background:#7f1d1d; color:#fca5a5; padding:8px 16px; border-radius:8px; font-size:13px; margin-bottom:12px; display:none; text-align:center; }
+  .widget-grid {
+    display:grid;
+    grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+    grid-auto-rows: 118px;
+    gap:12px;
+    grid-auto-flow: dense;
   }
-  .panel-title { font-size: 13px; font-weight: 600; color: #cbd5e1; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
-  .panel-title .panel-val { font-family: 'SF Mono', monospace; font-size: 14px; color: #94a3b8; }
-
-  .graph-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
-
-  .legend { display: flex; gap: 12px; margin-bottom: 6px; font-size: 11px; color: #94a3b8; }
-  .legend-dot {
-    display: inline-block; width: 8px; height: 8px;
-    border-radius: 50%; margin-right: 3px; vertical-align: middle;
-  }
-
-  .detail-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
-
-  .conn-bar-wrap { margin-bottom: 8px; }
-  .conn-bar-label {
-    display: flex; justify-content: space-between; font-size: 12px;
-    color: #94a3b8; margin-bottom: 3px;
-  }
-  .conn-bar {
-    height: 20px; background: #334155; border-radius: 5px; overflow: hidden;
-  }
-  .conn-bar-fill {
-    height: 100%; border-radius: 5px; transition: width 0.5s ease;
-    display: flex; align-items: center; padding-left: 6px;
-    font-size: 11px; font-weight: 600; color: #fff; min-width: 24px;
-  }
-
-  .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
-  .info-item { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; border-bottom: 1px solid #1e293b; }
-  .info-label { font-size: 12px; color: #64748b; }
-  .info-val { font-size: 13px; font-weight: 600; font-family: 'SF Mono', monospace; color: #e2e8f0; }
-  .info-val.green { color: #22c55e; }
-
-  .progress-inline { margin-bottom: 8px; }
-  .progress-header {
-    display: flex; justify-content: space-between; align-items: center;
-    font-size: 12px; color: #94a3b8; margin-bottom: 4px;
-  }
-  .progress-header .pct { font-family: 'SF Mono', monospace; font-weight: 600; }
-  .progress-bar {
-    height: 6px; background: #334155; border-radius: 3px; overflow: hidden;
-  }
-  .progress-fill {
-    height: 100%; border-radius: 3px; transition: width 0.5s ease;
-  }
-  .progress-detail { font-size: 11px; color: #475569; margin-top: 2px; }
-
-  .error-banner {
-    background: #7f1d1d; color: #fca5a5; padding: 8px 16px;
-    border-radius: 8px; font-size: 13px; margin-bottom: 12px;
-    display: none; text-align: center;
-  }
+  .widget { overflow:hidden; background:#1e293b; border-radius:10px; padding:12px 14px; border:1px solid #334155; transition:box-shadow 0.2s; display:flex; flex-direction:column; grid-column:span 2; }
+  .widget.half { grid-column:span 1; padding:8px 12px; }
+  .widget.medium { grid-row:span 2; grid-column:span 2; }
+  .widget.tall { grid-row:span 2; grid-column:span 4; }
+  .widget.dragging { opacity:0.5; }
+  .widget.drag-over { border-color:#38bdf8; box-shadow:0 0 12px rgba(56,189,248,0.2); }
+  .widget-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; cursor:grab; flex-shrink:0; }
+  .widget.half .widget-header { margin-bottom:2px; }
+  .widget.half .card-value { font-size:30px; }
+  .widget.half .card-sub { font-size:11px; margin-top:3px; }
+  .widget-header:active { cursor:grabbing; }
+  .widget-title { font-size:11px; font-weight:600; color:#cbd5e1; white-space:nowrap; }
+  .widget-title-right { font-family:'SF Mono',monospace; font-size:11px; color:#94a3b8; white-space:nowrap; }
+  .drag-handle { color:#475569; font-size:12px; margin-right:5px; cursor:grab; }
+  .size-btn { background:none; border:1px solid #334155; border-radius:3px; color:#64748b; padding:0 3px; cursor:pointer; font-size:8px; margin-left:3px; transition:all 0.15s; line-height:14px; }
+  .size-btn:hover { border-color:#38bdf8; color:#38bdf8; }
+  .size-btn.active { border-color:#38bdf8; color:#38bdf8; background:rgba(56,189,248,0.1); }
+  .widget-body { flex:1; overflow:hidden; min-height:0; display:flex; flex-direction:column; }
+  .card-value { font-size:26px; font-weight:700; font-family:'SF Mono','Fira Code',monospace; margin-top:2px; line-height:1.1; }
+  .card-sub { font-size:10px; color:#64748b; margin-top:3px; font-family:'SF Mono',monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card-value.green { color:#22c55e; } .card-value.blue { color:#38bdf8; } .card-value.amber { color:#f59e0b; } .card-value.red { color:#ef4444; }
+  .legend { display:flex; gap:8px; margin-bottom:3px; font-size:9px; color:#94a3b8; flex-shrink:0; flex-wrap:wrap; }
+  .legend-dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:2px; vertical-align:middle; }
+  .spark-wrap { flex:1; min-height:0; }
+  .spark-wrap svg { width:100%; height:100%; }
+  .conn-bar-wrap { margin-bottom:4px; }
+  .conn-bar-label { display:flex; justify-content:space-between; font-size:10px; color:#94a3b8; margin-bottom:1px; }
+  .conn-bar { height:16px; background:#334155; border-radius:3px; overflow:hidden; }
+  .conn-bar-fill { height:100%; border-radius:3px; transition:width 0.5s ease; display:flex; align-items:center; padding-left:4px; font-size:9px; font-weight:600; color:#fff; min-width:16px; }
+  .info-grid { display:grid; grid-template-columns:1fr 1fr; gap:1px 10px; }
+  .info-item { display:flex; justify-content:space-between; align-items:baseline; padding:1px 0; }
+  .info-label { font-size:10px; color:#64748b; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .info-val { font-size:11px; font-weight:600; font-family:'SF Mono',monospace; color:#e2e8f0; white-space:nowrap; }
+  .info-val.green { color:#22c55e; } .info-val.red { color:#ef4444; } .info-val.amber { color:#f59e0b; } .info-val.blue { color:#38bdf8; }
+  .progress-inline { margin-bottom:4px; }
+  .progress-inline:last-child { margin-bottom:0; }
+  .progress-header { display:flex; justify-content:space-between; font-size:10px; color:#94a3b8; margin-bottom:2px; }
+  .progress-header .pct { font-family:'SF Mono',monospace; font-weight:600; }
+  .progress-bar { height:4px; background:#334155; border-radius:3px; overflow:hidden; }
+  .progress-fill { height:100%; border-radius:3px; transition:width 0.5s ease; }
+  .progress-detail { font-size:9px; color:#475569; margin-top:1px; }
+  .stats-row { display:flex; gap:10px; margin-top:4px; flex-shrink:0; }
+  .stats-row .sr-label { font-size:9px; color:#64748b; }
+  .stats-row .sr-val { font-size:12px; font-weight:600; font-family:'SF Mono',monospace; color:#e2e8f0; }
+  .stacked-bar { display:flex; height:18px; border-radius:3px; overflow:hidden; margin-bottom:4px; }
+  .stacked-bar div { transition:width 0.5s ease; min-width:0; }
+  .stacked-labels { display:flex; justify-content:space-between; font-size:9px; color:#94a3b8; margin-bottom:2px; flex-wrap:wrap; gap:2px; }
 </style>
 </head>
 <body>
 
 <div class="header">
   <h1>ATS Dashboard</h1>
-  <div class="header-info">
+  <div class="header-right">
     <span id="h-version">--</span>
     <span id="h-hostname">--</span>
     <span id="h-uptime">--</span>
     <span><div class="live-dot"></div> Live</span>
+    <button class="gear-btn" onclick="toggleSettings()">Widgets</button>
   </div>
 </div>
-
+<div class="settings-overlay" id="settings-overlay" onclick="toggleSettings()"></div>
+<div class="settings-panel" id="settings-panel" style="display:none">
+  <h2>Widgets</h2>
+  <div id="widget-toggles"></div>
+  <button class="settings-close" onclick="toggleSettings()">Done</button>
+</div>
 <div class="container">
   <div id="error-banner" class="error-banner"></div>
-
-  <div class="cards">
-    <div class="card">
-      <div class="card-label">Total Requests</div>
-      <div class="card-value blue" id="m-requests">--</div>
-      <div class="card-sub" id="m-rps">-- req/s</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Cache Hit Ratio</div>
-      <div class="card-value green" id="m-hitratio">--%</div>
-      <div class="card-sub" id="m-hitdetail">-- hits / -- misses</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Active Connections</div>
-      <div class="card-value amber" id="m-conns">--</div>
-      <div class="card-sub" id="m-conndetail">-- total / -- idle</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Avg Latency</div>
-      <div class="card-value blue" id="m-latency">--</div>
-      <div class="card-sub" id="m-latdetail">per transaction</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Bandwidth</div>
-      <div class="card-value blue" id="m-bandwidth">--</div>
-      <div class="card-sub" id="m-bwdetail">-- to origin</div>
-    </div>
-  </div>
-
-  <div class="graph-row">
-    <div class="panel">
-      <div class="panel-title">Throughput (2 min) <span class="panel-val" id="sp-rps-val">-- req/s</span></div>
-      <svg id="spark-rps" width="100%" height="100" viewBox="0 0 360 100" preserveAspectRatio="none"></svg>
-    </div>
-    <div class="panel">
-      <div class="panel-title">Bandwidth (2 min) <span class="panel-val" id="sp-bw-val">--/s</span></div>
-      <div class="legend">
-        <span><span class="legend-dot" style="background:#38bdf8"></span>Client</span>
-        <span><span class="legend-dot" style="background:#a78bfa"></span>Origin</span>
-      </div>
-      <svg id="spark-bw" width="100%" height="90" viewBox="0 0 360 90" preserveAspectRatio="none"></svg>
-    </div>
-    <div class="panel">
-      <div class="panel-title">Cache Hit Rate (2 min) <span class="panel-val" id="sp-hit-val">--%</span></div>
-      <div class="legend">
-        <span><span class="legend-dot" style="background:#22c55e"></span>Hits</span>
-        <span><span class="legend-dot" style="background:#ef4444"></span>Misses</span>
-      </div>
-      <svg id="spark-hit" width="100%" height="90" viewBox="0 0 360 90" preserveAspectRatio="none"></svg>
-    </div>
-  </div>
-
-  <div class="detail-row">
-    <div class="panel">
-      <div class="panel-title">Connections</div>
-      <div class="conn-bar-wrap">
-        <div class="conn-bar-label"><span>Client Total</span><span id="conn-client-total">0</span></div>
-        <div class="conn-bar"><div class="conn-bar-fill" id="conn-client-bar" style="width:0%;background:#38bdf8">0</div></div>
-      </div>
-      <div class="conn-bar-wrap">
-        <div class="conn-bar-label"><span>Client Active</span><span id="conn-client-active">0</span></div>
-        <div class="conn-bar"><div class="conn-bar-fill" id="conn-active-bar" style="width:0%;background:#f59e0b">0</div></div>
-      </div>
-      <div class="conn-bar-wrap">
-        <div class="conn-bar-label"><span>Client Idle</span><span id="conn-client-idle">0</span></div>
-        <div class="conn-bar"><div class="conn-bar-fill" id="conn-idle-bar" style="width:0%;background:#64748b">0</div></div>
-      </div>
-      <div class="conn-bar-wrap">
-        <div class="conn-bar-label"><span>Server</span><span id="conn-server">0</span></div>
-        <div class="conn-bar"><div class="conn-bar-fill" id="conn-server-bar" style="width:0%;background:#a78bfa">0</div></div>
-      </div>
-      <div class="conn-bar-wrap">
-        <div class="conn-bar-label"><span>Cache</span><span id="conn-cache">0</span></div>
-        <div class="conn-bar"><div class="conn-bar-fill" id="conn-cache-bar" style="width:0%;background:#22c55e">0</div></div>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-title">Details</div>
-      <div class="progress-inline">
-        <div class="progress-header">
-          <span>Disk Cache</span>
-          <span class="pct" id="cache-disk-pct">--%</span>
-        </div>
-        <div class="progress-bar">
-          <div class="progress-fill" id="cache-disk-bar" style="width:0%;background:#22c55e"></div>
-        </div>
-        <div class="progress-detail" id="cache-disk-detail">-- / --</div>
-      </div>
-      <div class="progress-inline">
-        <div class="progress-header">
-          <span>RAM Cache</span>
-          <span class="pct" id="cache-ram-pct">--%</span>
-        </div>
-        <div class="progress-bar">
-          <div class="progress-fill" id="cache-ram-bar" style="width:0%;background:#22c55e"></div>
-        </div>
-        <div class="progress-detail" id="cache-ram-detail">-- / --</div>
-      </div>
-      <div class="info-grid" style="margin-top:10px">
-        <div class="info-item"><span class="info-label">Client BW</span><span class="info-val" id="bw-client-total">--</span></div>
-        <div class="info-item"><span class="info-label">Origin BW</span><span class="info-val" id="bw-origin-total">--</span></div>
-        <div class="info-item"><span class="info-label">DNS</span><span class="info-val" id="dns-total">--</span></div>
-        <div class="info-item"><span class="info-label">DNS OK</span><span class="info-val green" id="dns-success-rate">--%</span></div>
-        <div class="info-item"><span class="info-label">HostDB</span><span class="info-val" id="hostdb-total">--</span></div>
-        <div class="info-item"><span class="info-label">HostDB Hit</span><span class="info-val green" id="hostdb-hit-rate">--%</span></div>
-        <div class="info-item"><span class="info-label">Stripes</span><span class="info-val" id="ci-stripes">--</span></div>
-        <div class="info-item"><span class="info-label">Dir Wraps</span><span class="info-val" id="ci-dirwrap">--</span></div>
-        <div class="info-item"><span class="info-label">Dir Used</span><span class="info-val" id="ci-dirent-used">--</span></div>
-        <div class="info-item"><span class="info-label">Dir Total</span><span class="info-val" id="ci-dirent-total">--</span></div>
-        <div class="info-item"><span class="info-label">Active Rd</span><span class="info-val" id="ci-read-active">--</span></div>
-        <div class="info-item"><span class="info-label">Active Wr</span><span class="info-val" id="ci-write-active">--</span></div>
-        <div class="info-item"><span class="info-label">Aborts</span><span class="info-val" id="err-abort">--</span></div>
-        <div class="info-item"><span class="info-label">Conn Fail</span><span class="info-val" id="err-connect">--</span></div>
-      </div>
-    </div>
-  </div>
+  <div class="widget-grid" id="widget-grid"></div>
 </div>
-
 <script>
-(function() {
-  const POLL = 2000, HSIZE = 60;
-  let prev = null, prevTime = null;
-  let rpsHistory = [], bwClientHistory = [], bwOriginHistory = [];
-  let hitHistory = [], missHistory = [];
+(function(){
+var POLL=2000, HSIZE=60;
 
-  function fmtB(b) {
-    if (b === 0) return '0 B';
-    const u = ['B','KB','MB','GB','TB'];
-    const i = Math.floor(Math.log(b) / Math.log(1024));
-    return (b / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
+var CATEGORIES = [
+  { name:'Summary', ids:['sR','sH','sC','sL','sB','sM','sE','sD'] },
+  { name:'Traffic', ids:['Tp','Bw','Hr','Lt','Hm','Io','Hs'] },
+  { name:'Connections', ids:['Cn','Sv','Os','Ct','Tu'] },
+  { name:'Cache', ids:['Ch','Co','Ci','Tt','Cs'] },
+  { name:'Network', ids:['Dn','Hd','Ni','Sl','H2'] },
+  { name:'System', ids:['Rc','Er','Rq','Mm','El','Lg','Ms'] }
+];
+var HALF_DEFAULT = {sR:1,sH:1,sC:1,sL:1,sB:1,sM:1,sE:1,sD:1};
+var WIDGETS = {
+  sR:{title:'Total Requests',cat:'Summary',render:renderSumRequests},
+  sH:{title:'Hit Ratio',cat:'Summary',render:renderSumHitRatio},
+  sC:{title:'Connections',cat:'Summary',render:renderSumConns},
+  sL:{title:'Latency',cat:'Summary',render:renderSumLatency},
+  sB:{title:'Bandwidth',cat:'Summary',render:renderSumBandwidth},
+  sM:{title:'Memory',cat:'Summary',render:renderSumMemory},
+  sE:{title:'Errors',cat:'Summary',render:renderSumErrors},
+  sD:{title:'Cache Full',cat:'Summary',render:renderSumCacheFull},
+  Tp:{title:'Throughput',cat:'Traffic',render:renderThroughput},
+  Bw:{title:'Bandwidth',cat:'Traffic',render:renderBandwidth},
+  Hr:{title:'Cache Hit Rate',cat:'Traffic',render:renderHitRate},
+  Lt:{title:'Latency',cat:'Traffic',render:renderLatency},
+  Hm:{title:'HTTP Methods',cat:'Traffic',render:renderHttpMethods},
+  Io:{title:'Request Flow',cat:'Traffic',render:renderRequestFlow},
+  Hs:{title:'Header Sizes',cat:'Traffic',render:renderHeaderSizes},
+  Cn:{title:'Client Connections',cat:'Connections',render:renderClientConns},
+  Sv:{title:'Server Connections',cat:'Connections',render:renderServerConns},
+  Os:{title:'Origin Server',cat:'Connections',render:renderOrigin},
+  Ct:{title:'Connection Totals',cat:'Connections',render:renderConnTotals},
+  Tu:{title:'Tunnels',cat:'Connections',render:renderTunnels},
+  Ch:{title:'Cache Health',cat:'Cache',render:renderCacheHealth},
+  Co:{title:'Cache Operations',cat:'Cache',render:renderCacheOps},
+  Ci:{title:'Cache Internals',cat:'Cache',render:renderCacheInternals},
+  Tt:{title:'TCP Transaction Types',cat:'Cache',render:renderTcpTypes},
+  Cs:{title:'Cache Savings',cat:'Cache',render:renderCacheSavings},
+  Dn:{title:'DNS',cat:'Network',render:renderDns},
+  Hd:{title:'HostDB',cat:'Network',render:renderHostdb},
+  Ni:{title:'Network I/O',cat:'Network',render:renderNetIo},
+  Sl:{title:'SSL/TLS',cat:'Network',render:renderSsl},
+  H2:{title:'HTTP/2',cat:'Network',render:renderHttp2},
+  Rc:{title:'Response Codes',cat:'System',render:renderResponseCodes},
+  Er:{title:'Errors',cat:'System',render:renderErrors},
+  Rq:{title:'Request Breakdown',cat:'System',render:renderRequestBreak},
+  Mm:{title:'Memory',cat:'System',render:renderMemory},
+  El:{title:'Event Loop',cat:'System',render:renderEventLoop},
+  Lg:{title:'Logging',cat:'System',render:renderLogging},
+  Ms:{title:'Milestones',cat:'System',render:renderMilestones}
+};
+var ALL_IDS = [];
+CATEGORIES.forEach(function(c){c.ids.forEach(function(id){ALL_IDS.push(id);});});
+var DEFAULT_HIDDEN = ['Lt','Sv','Hd','Rq','Hs','Tu','Ct','Io','H2','Lg','El'];
+var DEFAULT_SIZES = {Ms:'medium'};
+
+var prev=null, prevTime=null, dragSrc=null;
+var H = {rps:[],bwC:[],bwO:[],hit:[],miss:[],lat:[],cliConn:[],srvConn:[],rc2:[],rc4:[],rc5:[],mem:[],netR:[],netW:[],
+  msClient:[],msCache:[],msDns:[],msServer:[],msCwr:[]};
+var R = {rps:0,bwC:0,bwO:0,latNs:0,netR:0,netW:0,logBps:0};
+
+function getCk(n){var m=document.cookie.match('(^|;)\\s*'+n+'=([^;]*)');return m?decodeURIComponent(m[2]):null;}
+function setCk(n,v){document.cookie=n+'='+encodeURIComponent(v)+';path=/_dashboard;max-age=31536000;SameSite=Lax';}
+function getLayout(){
+  var o=getCk('wo'),h=getCk('wh');
+  return{order:(o||ALL_IDS.join(',')).split(',').filter(Boolean),hidden:new Set((h||(DEFAULT_HIDDEN.join(','))).split(',').filter(Boolean))};
+}
+function saveLayout(o,h){setCk('wo',o.join(','));setCk('wh',Array.from(h).join(','));}
+function getSizes(){var s=getCk('ws'),m={};if(s)s.split(',').forEach(function(p){var kv=p.split(':');if(kv.length===2)m[kv[0]]=kv[1];});return m;}
+function saveSizes(m){var p=[];for(var k in m)p.push(k+':'+m[k]);setCk('ws',p.join(','));}
+function setWidgetSize(id,sz){var m=getSizes();if(sz)m[id]=sz;else delete m[id];saveSizes(m);buildGrid();}
+
+function fmtB(b){if(b<=0)return'0 B';var u=['B','KB','MB','GB','TB'],i=Math.floor(Math.log(b)/Math.log(1024));return(b/Math.pow(1024,i)).toFixed(i>0?1:0)+' '+u[i];}
+function fmtN(n){if(n>=1e9)return(n/1e9).toFixed(2)+'B';if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(n);}
+function fmtUp(s){var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d>0?d+'d '+h+'h '+m+'m':h>0?h+'h '+m+'m':m+'m';}
+function fmtLat(ns){if(ns>=1e6)return(ns/1e6).toFixed(1)+' ms';if(ns>=1e3)return(ns/1e3).toFixed(0)+' us';return ns.toFixed(0)+' ns';}
+function fmtT(ns){if(ns>=1e9)return(ns/1e9).toFixed(1)+'s';if(ns>=1e6)return(ns/1e6).toFixed(1)+'ms';if(ns>=1e3)return(ns/1e3).toFixed(0)+'us';return ns+'ns';}
+function pctCol(p){return p<70?'#22c55e':p<90?'#f59e0b':'#ef4444';}
+function txt(id,v){var e=document.getElementById(id);if(e)e.textContent=v;}
+function row(l,v,cls){return'<div class="info-item"><span class="info-label">'+l+'</span><span class="info-val'+(cls?' '+cls:'')+'">'+v+'</span></div>';}
+function pushH(a,v){a.push(v);if(a.length>HSIZE)a.shift();}
+function sparkHtml(){return'<div class="spark-wrap"><svg preserveAspectRatio="none"></svg></div>';}
+function getSize(el){var w=el.closest('.widget');return w.classList.contains('tall')?'L':w.classList.contains('medium')?'M':w.classList.contains('half')?'H':'S';}
+function stackedBar(items){
+  var total=0;items.forEach(function(i){total+=i.v;});
+  if(total===0)total=1;
+  var labels='<div class="stacked-labels">',bar='<div class="stacked-bar">';
+  items.forEach(function(i){
+    var p=(i.v/total*100);
+    if(i.v>0||i.always)labels+='<span>'+i.l+' '+p.toFixed(1)+'%</span>';
+    bar+='<div style="width:'+p+'%;background:'+i.c+'"></div>';
+  });
+  return labels+'</div>'+bar+'</div>';
+}
+function drawSpark(svg,datasets,maxVal){
+  if(!svg)return;
+  var r=svg.getBoundingClientRect(),w=r.width||360,h=r.height||100,pad=2;
+  svg.setAttribute('viewBox','0 0 '+w+' '+h);
+  if(datasets[0].data.length<2){svg.innerHTML='';return;}
+  var grid='',auto=maxVal===0;
+  for(var i=0;i<=4;i++){var y=pad+(i/4)*(h-2*pad);grid+='<line x1="0" y1="'+y+'" x2="'+w+'" y2="'+y+'" stroke="#334155" stroke-width="0.5"/>';}
+  if(auto){maxVal=1;for(var d=0;d<datasets.length;d++)for(var j=0;j<datasets[d].data.length;j++)if(datasets[d].data[j]>maxVal)maxVal=datasets[d].data[j];maxVal*=1.1;}
+  var lines='';
+  for(var d=0;d<datasets.length;d++){
+    var ds=datasets[d],n=ds.data.length,step=w/(HSIZE-1),off=HSIZE-n,pts='';
+    for(var i=0;i<n;i++){var x=(off+i)*step,yy=h-pad-(Math.min(ds.data[i],maxVal)/maxVal*(h-2*pad));pts+=x.toFixed(1)+','+yy.toFixed(1)+' ';}
+    var sx=(off*step).toFixed(1),ex=((off+n-1)*step).toFixed(1);
+    lines+='<polygon points="'+sx+','+(h-pad)+' '+pts+ex+','+(h-pad)+'" fill="'+ds.color+'" opacity="0.12"/>';
+    lines+='<polyline points="'+pts.trim()+'" fill="none" stroke="'+ds.color+'" stroke-width="1.5" opacity="0.9"/>';
   }
-  function fmtN(n) {
-    if (n >= 1e9) return (n/1e9).toFixed(2)+'B';
-    if (n >= 1e6) return (n/1e6).toFixed(2)+'M';
-    if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
-    return n.toString();
+  svg.innerHTML=grid+lines;
+}
+
+// ==== SUMMARY WIDGETS ====
+function renderSumRequests(el,data){
+  var sz=getSize(el),v=data.http.completed_requests;
+  if(sz==='H'){el.innerHTML='<div class="card-value blue">'+fmtN(v)+'</div><div class="card-sub">'+fmtN(Math.round(R.rps))+' req/s</div>';return;}
+  el.innerHTML='<div class="card-value blue" style="font-size:22px">'+fmtN(v)+'</div><div class="card-sub">'+fmtN(Math.round(R.rps))+' req/s</div>'+sparkHtml();
+  drawSpark(el.querySelector('svg'),[{data:H.rps,color:'#38bdf8'}],0);
+}
+function renderSumHitRatio(el,data){
+  var sz=getSize(el),h=data.http.cache_hit_fresh,l=data.http.cache_lookups,m=data.http.cache_miss_cold,r=l>0?(h/l*100):0;
+  if(sz==='H'){el.innerHTML='<div class="card-value green">'+r.toFixed(1)+'%</div><div class="card-sub">'+fmtN(h)+' / '+fmtN(m)+'</div>';return;}
+  el.innerHTML='<div class="card-value green" style="font-size:22px">'+r.toFixed(1)+'%</div><div class="card-sub">'+fmtN(h)+' hits / '+fmtN(m)+' miss</div>'+sparkHtml();
+  drawSpark(el.querySelector('svg'),[{data:H.hit,color:'#22c55e'},{data:H.miss,color:'#ef4444'}],100);
+}
+function renderSumConns(el,data){
+  var sz=getSize(el),c=data.connections;
+  if(sz==='H'){el.innerHTML='<div class="card-value amber">'+c.client_active+'</div><div class="card-sub">'+c.client_total+' tot / '+c.client_idle+' idle</div>';return;}
+  el.innerHTML='<div class="card-value amber" style="font-size:22px">'+c.client_active+'</div><div class="card-sub">'+c.client_total+' total, '+c.server+' server</div>'+sparkHtml();
+  drawSpark(el.querySelector('svg'),[{data:H.cliConn,color:'#f59e0b'}],0);
+}
+function renderSumLatency(el){
+  var sz=getSize(el);
+  if(sz==='H'){el.innerHTML='<div class="card-value blue">'+fmtLat(R.latNs)+'</div><div class="card-sub">per txn</div>';return;}
+  el.innerHTML='<div class="card-value blue" style="font-size:22px">'+fmtLat(R.latNs)+'</div><div class="card-sub">per transaction avg</div>'+sparkHtml();
+  drawSpark(el.querySelector('svg'),[{data:H.lat,color:'#f59e0b'}],0);
+}
+function renderSumBandwidth(el){
+  var sz=getSize(el);
+  if(sz==='H'){el.innerHTML='<div class="card-value blue">'+fmtB(R.bwC)+'/s</div><div class="card-sub">'+fmtB(R.bwO)+'/s origin</div>';return;}
+  el.innerHTML='<div class="card-value blue" style="font-size:22px">'+fmtB(R.bwC)+'/s</div><div class="card-sub">'+fmtB(R.bwO)+'/s origin</div>'+sparkHtml();
+  drawSpark(el.querySelector('svg'),[{data:H.bwC,color:'#38bdf8'},{data:H.bwO,color:'#a78bfa'}],0);
+}
+
+function renderSumMemory(el,data){
+  var rss=data.memory.rss,sz=getSize(el);
+  if(sz==='H'){el.innerHTML='<div class="card-value blue">'+fmtB(rss)+'</div><div class="card-sub">RSS</div>';return;}
+  el.innerHTML='<div class="card-value blue" style="font-size:22px">'+fmtB(rss)+'</div><div class="card-sub">resident memory</div>'+sparkHtml();
+  drawSpark(el.querySelector('svg'),[{data:H.mem,color:'#a78bfa'}],0);
+}
+function renderSumErrors(el,data){
+  var e=data.errors,sz=getSize(el);
+  var total=e.client_abort+e.connect_fail+e.client_read_error+e.cache_read_error+e.cache_write_error;
+  if(sz==='H'){el.innerHTML='<div class="card-value'+(total>0?' red':' green')+'">'+fmtN(total)+'</div><div class="card-sub">total errors</div>';return;}
+  el.innerHTML='<div class="card-value'+(total>0?' red':' green')+'" style="font-size:22px">'+fmtN(total)+'</div><div class="card-sub">abort:'+fmtN(e.client_abort)+' conn:'+fmtN(e.connect_fail)+'</div>';
+}
+function renderSumCacheFull(el,data){
+  var d=data.cache,sz=getSize(el);
+  var pct=d.bytes_total>0?(d.bytes_used/d.bytes_total*100):d.percent_full;
+  if(sz==='H'){el.innerHTML='<div class="card-value" style="color:'+pctCol(pct)+'">'+pct.toFixed(1)+'%</div><div class="card-sub">disk cache</div>';return;}
+  el.innerHTML='<div class="card-value" style="font-size:22px;color:'+pctCol(pct)+'">'+pct.toFixed(1)+'%</div>'+
+    '<div class="card-sub">'+fmtB(d.bytes_used)+' / '+fmtB(d.bytes_total)+'</div>'+
+    '<div class="progress-bar" style="margin-top:4px"><div class="progress-fill" style="width:'+pct+'%;background:'+pctCol(pct)+'"></div></div>';
+}
+
+// ==== TRAFFIC ====
+function renderThroughput(el){
+  var rps=H.rps.length>0?H.rps[H.rps.length-1]:0,sz=getSize(el);
+  el.dataset.rightVal=fmtN(Math.round(rps))+'/s';
+  el.innerHTML=sparkHtml();
+  if(sz!=='S'){
+    var avg=0,mx=0;H.rps.forEach(function(v){avg+=v;if(v>mx)mx=v;});avg=H.rps.length?avg/H.rps.length:0;
+    el.innerHTML+='<div class="stats-row"><div class="sr-item"><div class="sr-label">Current</div><div class="sr-val">'+fmtN(Math.round(rps))+'</div></div>'+
+      '<div class="sr-item"><div class="sr-label">Avg</div><div class="sr-val">'+fmtN(Math.round(avg))+'</div></div>'+
+      '<div class="sr-item"><div class="sr-label">Peak</div><div class="sr-val">'+fmtN(Math.round(mx))+'</div></div></div>';
   }
-  function fmtUp(s) {
-    const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
-    return d>0 ? d+'d '+h+'h '+m+'m' : h>0 ? h+'h '+m+'m' : m+'m';
+  drawSpark(el.querySelector('svg'),[{data:H.rps,color:'#38bdf8'}],0);
+}
+function renderBandwidth(el){
+  var bw=H.bwC.length>0?H.bwC[H.bwC.length-1]:0,sz=getSize(el);
+  el.dataset.rightVal=fmtB(bw)+'/s';
+  el.innerHTML='<div class="legend"><span><span class="legend-dot" style="background:#38bdf8"></span>Client</span>'+
+    '<span><span class="legend-dot" style="background:#a78bfa"></span>Origin</span></div>'+sparkHtml();
+  if(sz!=='S'){
+    var bwO=H.bwO.length>0?H.bwO[H.bwO.length-1]:0;
+    el.innerHTML+='<div class="stats-row"><div class="sr-item"><div class="sr-label">Client</div><div class="sr-val">'+fmtB(bw)+'/s</div></div>'+
+      '<div class="sr-item"><div class="sr-label">Origin</div><div class="sr-val">'+fmtB(bwO)+'/s</div></div>'+
+      '<div class="sr-item"><div class="sr-label">Savings</div><div class="sr-val">'+(bw>0?((1-bwO/bw)*100).toFixed(0)+'%':'--')+'</div></div></div>';
   }
-  function pctCol(p) { return p<70?'#22c55e':p<90?'#f59e0b':'#ef4444'; }
-  function txt(id,v) { const e=document.getElementById(id); if(e) e.textContent=v; }
-
-  function setBar(bid,vid,val,max) {
-    const p = max>0 ? Math.min(100,val/max*100) : 0;
-    const b=document.getElementById(bid), v=document.getElementById(vid);
-    if(b){b.style.width=Math.max(p,2)+'%';b.textContent=val;}
-    if(v) v.textContent=val;
+  drawSpark(el.querySelector('svg'),[{data:H.bwC,color:'#38bdf8'},{data:H.bwO,color:'#a78bfa'}],0);
+}
+function renderHitRate(el){
+  var h=H.hit.length>0?H.hit[H.hit.length-1]:0,sz=getSize(el);
+  el.dataset.rightVal=h.toFixed(1)+'%';
+  el.innerHTML='<div class="legend"><span><span class="legend-dot" style="background:#22c55e"></span>Hits</span>'+
+    '<span><span class="legend-dot" style="background:#ef4444"></span>Misses</span></div>'+sparkHtml();
+  if(sz!=='S'){
+    var avg=0;H.hit.forEach(function(v){avg+=v;});avg=H.hit.length?avg/H.hit.length:0;
+    el.innerHTML+='<div class="stats-row"><div class="sr-item"><div class="sr-label">Current</div><div class="sr-val">'+h.toFixed(1)+'%</div></div>'+
+      '<div class="sr-item"><div class="sr-label">Avg</div><div class="sr-val">'+avg.toFixed(1)+'%</div></div></div>';
   }
+  drawSpark(el.querySelector('svg'),[{data:H.hit,color:'#22c55e'},{data:H.miss,color:'#ef4444'}],100);
+}
+function renderLatency(el){
+  var lat=H.lat.length>0?H.lat[H.lat.length-1]:0,sz=getSize(el);
+  el.dataset.rightVal=fmtLat(lat);
+  el.innerHTML=sparkHtml();
+  if(sz!=='S'){
+    var avg=0,mx=0;H.lat.forEach(function(v){avg+=v;if(v>mx)mx=v;});avg=H.lat.length?avg/H.lat.length:0;
+    el.innerHTML+='<div class="stats-row"><div class="sr-item"><div class="sr-label">Current</div><div class="sr-val">'+fmtLat(lat)+'</div></div>'+
+      '<div class="sr-item"><div class="sr-label">Avg</div><div class="sr-val">'+fmtLat(avg)+'</div></div>'+
+      '<div class="sr-item"><div class="sr-label">Peak</div><div class="sr-val">'+fmtLat(mx)+'</div></div></div>';
+  }
+  drawSpark(el.querySelector('svg'),[{data:H.lat,color:'#f59e0b'}],0);
+}
+function renderHttpMethods(el,data){
+  var h=data.http,sz=getSize(el);
+  var methods=[{l:'GET',v:h.get_requests,c:'#38bdf8'},{l:'POST',v:h.post_requests,c:'#22c55e'},{l:'PUT',v:h.put_requests,c:'#f59e0b'},
+    {l:'DELETE',v:h.delete_requests,c:'#ef4444'},{l:'HEAD',v:h.head_requests,c:'#a78bfa'},{l:'CONNECT',v:h.connect_requests,c:'#64748b'}];
+  el.innerHTML=stackedBar(methods.filter(function(m){return m.v>0||m.l==='GET';}));
+  el.innerHTML+='<div class="info-grid">'+
+    row('GET',fmtN(h.get_requests),'blue')+row('POST',fmtN(h.post_requests),'green')+
+    row('PUT',fmtN(h.put_requests),'amber')+row('DELETE',fmtN(h.delete_requests),'red')+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('HEAD',fmtN(h.head_requests))+row('CONNECT',fmtN(h.connect_requests))+
+      row('OPTIONS',fmtN(h.options_requests))+row('PURGE',fmtN(h.purge_requests))+'</div>';
+  }
+}
+function renderRequestFlow(el,data){
+  var h=data.http,sz=getSize(el);
+  var incoming=h.incoming_requests,outgoing=h.outgoing_requests,completed=h.completed_requests;
+  el.dataset.rightVal=fmtN(incoming)+' in';
+  el.innerHTML='<div class="info-grid">'+
+    row('Incoming',fmtN(incoming),'blue')+row('Outgoing',fmtN(outgoing),'amber')+
+    row('Completed',fmtN(completed),'green')+row('Tunnels',fmtN(h.tunnels))+'</div>';
+  if(sz!=='S'){
+    var ratio=incoming>0?(outgoing/incoming*100):0;
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Out/In Ratio',ratio.toFixed(1)+'%')+row('Invalid Req',fmtN(h.invalid_client_requests),'red')+
+      row('Missing Host',fmtN(h.missing_host_hdr),'red')+row('Not Cacheable',fmtN(h.cache_miss_not_cacheable))+'</div>';
+  }
+}
+function renderHeaderSizes(el,data){
+  var h=data.http,sz=getSize(el),c=h.completed_requests||1;
+  var uaReqAvg=h.ua_request_header_size/c,uaRespAvg=h.ua_response_header_size/c;
+  var osReqAvg=h.os_request_header_size/(h.outgoing_requests||1),osRespAvg=h.os_response_header_size/(h.outgoing_requests||1);
+  el.innerHTML='<div class="info-grid">'+
+    row('UA Req Avg',fmtB(uaReqAvg),'blue')+row('UA Resp Avg',fmtB(uaRespAvg),'blue')+
+    row('OS Req Avg',fmtB(osReqAvg),'amber')+row('OS Resp Avg',fmtB(osRespAvg),'amber')+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('UA Req Total',fmtB(h.ua_request_header_size))+row('UA Resp Total',fmtB(h.ua_response_header_size))+
+      row('OS Req Total',fmtB(h.os_request_header_size))+row('OS Resp Total',fmtB(h.os_response_header_size))+'</div>';
+  }
+}
 
-  function drawSpark(svgId, datasets, maxVal, h) {
-    const svg = document.getElementById(svgId);
-    if (!svg) return;
-    const w = 360, pad = 2;
-    if (datasets[0].data.length < 2) { svg.innerHTML = ''; return; }
+// ==== CONNECTIONS ====
+function renderClientConns(el,data){
+  var c=data.connections,mx=Math.max(c.client_total,1),sz=getSize(el);
+  function bar(l,v,col){var p=Math.max(v/mx*100,2);
+    return'<div class="conn-bar-wrap"><div class="conn-bar-label"><span>'+l+'</span><span>'+v+'</span></div>'+
+    '<div class="conn-bar"><div class="conn-bar-fill" style="width:'+p+'%;background:'+col+'">'+v+'</div></div></div>';}
+  el.innerHTML=bar('Total',c.client_total,'#38bdf8')+bar('Active',c.client_active,'#f59e0b')+bar('Idle',c.client_idle,'#64748b');
+  if(sz!=='S'){el.innerHTML+=sparkHtml();drawSpark(el.querySelector('svg'),[{data:H.cliConn,color:'#38bdf8'}],0);}
+}
+function renderServerConns(el,data){
+  var c=data.connections,sz=getSize(el),mx=Math.max(c.server,c.cache,1);
+  function bar(l,v,col){var p=Math.max(v/mx*100,2);
+    return'<div class="conn-bar-wrap"><div class="conn-bar-label"><span>'+l+'</span><span>'+v+'</span></div>'+
+    '<div class="conn-bar"><div class="conn-bar-fill" style="width:'+p+'%;background:'+col+'">'+v+'</div></div></div>';}
+  el.innerHTML=bar('Server',c.server,'#a78bfa')+bar('Cache',c.cache,'#22c55e');
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Pooled',c.pooled_server)+row('Broken',fmtN(c.broken_server),'red')+'</div>';
+    el.innerHTML+=sparkHtml();drawSpark(el.querySelector('svg'),[{data:H.srvConn,color:'#a78bfa'}],0);
+  }
+}
+function renderOrigin(el,data){
+  var o=data.origin,sz=getSize(el);
+  el.innerHTML='<div class="info-grid">'+
+    row('New Conns',fmtN(o.make_new),'blue')+row('Reused',fmtN(o.reuse),'green')+
+    row('Reuse Fail',fmtN(o.reuse_fail),'red')+row('Not Found',fmtN(o.not_found),'amber')+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Close Private',fmtN(o.close_private))+row('Tunnel Plugin',fmtN(o.shutdown_tunnel_server_plugin))+
+      row('Tunnel EOS',fmtN(o.shutdown_tunnel_server_eos))+row('Tunnel Abort',fmtN(o.shutdown_tunnel_abort),'red')+'</div>';
+  }
+}
+function renderConnTotals(el,data){
+  var c=data.connections,sz=getSize(el);
+  el.innerHTML='<div class="info-grid">'+
+    row('Total Client',fmtN(c.total_client_conns),'blue')+row('Total Server',fmtN(c.total_server_conns),'amber')+
+    row('Total Incoming',fmtN(c.total_incoming))+row('TCP Accepts',fmtN(c.tcp_accepts))+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Throttled In',fmtN(c.throttled_in),'red')+row('Throttled Out',fmtN(c.throttled_out),'red')+'</div>';
+  }
+}
+function renderTunnels(el,data){
+  var t=data.tunnel,sz=getSize(el);
+  el.innerHTML='<div class="info-grid">'+
+    row('Active',t.current_active,'amber')+row('Blind TCP',fmtN(t.blind_tcp_client))+
+    row('TLS Tunnel',fmtN(t.tls_tunnel_client))+row('TLS Forward',fmtN(t.tls_forward_client))+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+row('TLS HTTP',fmtN(t.tls_http_client))+row('HTTP Tunnels',fmtN(data.http.tunnels))+'</div>';
+  }
+}
 
-    let grid = '';
-    for (let i=0;i<=4;i++) {
-      const y = pad + (i/4)*(h-2*pad);
-      grid += '<line x1="0" y1="'+y+'" x2="'+w+'" y2="'+y+'" stroke="#334155" stroke-width="0.5"/>';
-    }
+// ==== CACHE ====
+function renderCacheHealth(el,data){
+  var d=data.cache,sz=getSize(el);
+  var dP=d.bytes_total>0?(d.bytes_used/d.bytes_total*100):d.percent_full;
+  var rP=d.ram_cache_total_bytes>0?(d.ram_cache_bytes_used/d.ram_cache_total_bytes*100):0;
+  function prog(l,p,u,t){return'<div class="progress-inline"><div class="progress-header"><span>'+l+'</span>'+
+    '<span class="pct">'+p.toFixed(1)+'%</span></div><div class="progress-bar"><div class="progress-fill" style="width:'+
+    p+'%;background:'+pctCol(p)+'"></div></div><div class="progress-detail">'+fmtB(u)+' / '+fmtB(t)+'</div></div>';}
+  el.innerHTML=prog('Disk',dP,d.bytes_used,d.bytes_total)+prog('RAM',rP,d.ram_cache_bytes_used,d.ram_cache_total_bytes);
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('RAM Hits',fmtN(d.ram_cache_hits),'green')+row('RAM Misses',fmtN(d.ram_cache_misses),'red')+
+      row('Lookup OK',fmtN(d.lookup_success),'green')+row('Lookup Fail',fmtN(d.lookup_failure),'red')+'</div>';
+  }
+}
+function renderCacheOps(el,data){
+  var d=data.cache,sz=getSize(el);
+  el.innerHTML='<div class="info-grid">'+
+    row('Read OK',fmtN(d.read_success),'green')+row('Read Fail',fmtN(d.read_failure),'red')+
+    row('Write OK',fmtN(d.write_success),'green')+row('Write Fail',fmtN(d.write_failure),'red')+
+    row('Active Rd',d.read_active)+row('Active Wr',d.write_active)+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Lookup OK',fmtN(d.lookup_success),'green')+row('Lookup Fail',fmtN(d.lookup_failure),'red')+
+      row('RAM Hits',fmtN(d.ram_cache_hits),'green')+row('RAM Misses',fmtN(d.ram_cache_misses),'red')+'</div>';
+  }
+}
+function renderCacheInternals(el,data){
+  var d=data.cache,sz=getSize(el),dirPct=d.direntries_total>0?(d.direntries_used/d.direntries_total*100):0;
+  el.innerHTML='<div class="info-grid">'+
+    row('Stripes',d.stripes)+row('Dir Wraps',fmtN(d.directory_wrap))+
+    row('Dir Used',fmtN(d.direntries_used))+row('Dir Total',fmtN(d.direntries_total))+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="progress-inline" style="margin-top:4px"><div class="progress-header"><span>Directory</span>'+
+      '<span class="pct">'+dirPct.toFixed(1)+'%</span></div><div class="progress-bar"><div class="progress-fill" style="width:'+
+      dirPct+'%;background:'+pctCol(dirPct)+'"></div></div></div>';
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+row('Active Rd',d.read_active)+row('Active Wr',d.write_active)+'</div>';
+  }
+}
+function renderTcpTypes(el,data){
+  var t=data.tcp,sz=getSize(el);
+  var total=t.hit+t.miss+t.refresh_hit+t.refresh_miss+t.ims_hit+t.ims_miss+t.expired_miss+t.client_refresh;
+  el.innerHTML=stackedBar([{l:'Hit',v:t.hit,c:'#22c55e',always:1},{l:'Miss',v:t.miss,c:'#ef4444',always:1},
+    {l:'Rfr Hit',v:t.refresh_hit,c:'#38bdf8'},{l:'Rfr Miss',v:t.refresh_miss,c:'#f59e0b'}]);
+  el.innerHTML+='<div class="info-grid">'+
+    row('TCP Hit',fmtN(t.hit),'green')+row('TCP Miss',fmtN(t.miss),'red')+
+    row('Refresh Hit',fmtN(t.refresh_hit),'blue')+row('Refresh Miss',fmtN(t.refresh_miss),'amber')+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('IMS Hit',fmtN(t.ims_hit))+row('IMS Miss',fmtN(t.ims_miss))+
+      row('Expired Miss',fmtN(t.expired_miss))+row('Client Refresh',fmtN(t.client_refresh))+'</div>';
+  }
+}
+function renderCacheSavings(el,data){
+  var bw=data.bandwidth,sz=getSize(el);
+  var clientBytes=bw.ua_response_bytes,originBytes=bw.os_response_bytes;
+  var saved=clientBytes-originBytes,pct=clientBytes>0?(saved/clientBytes*100):0;
+  el.dataset.rightVal=pct.toFixed(1)+'%';
+  el.innerHTML='<div class="progress-inline"><div class="progress-header"><span>Bandwidth Saved</span>'+
+    '<span class="pct">'+pct.toFixed(1)+'%</span></div><div class="progress-bar"><div class="progress-fill" style="width:'+
+    Math.max(0,pct)+'%;background:#22c55e"></div></div></div>';
+  el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+    row('Client Served',fmtB(clientBytes),'blue')+row('Origin Fetched',fmtB(originBytes),'amber')+
+    row('Bytes Saved',fmtB(Math.max(0,saved)),'green')+row('Savings',pct.toFixed(1)+'%','green')+'</div>';
+}
 
-    let lines = '';
-    const autoMax = maxVal === 0;
-    if (autoMax) {
-      maxVal = 1;
-      for (const ds of datasets) for (const v of ds.data) if (v > maxVal) maxVal = v;
-      maxVal *= 1.1;
-    }
+// ==== NETWORK ====
+function renderDns(el,data){
+  var dns=data.dns,sz=getSize(el);
+  var okPct=dns.total_lookups>0?(dns.lookup_successes/dns.total_lookups*100).toFixed(1)+'%':'--';
+  el.innerHTML='<div class="info-grid">'+
+    row('Total',fmtN(dns.total_lookups))+row('Success',okPct,'green')+
+    row('OK',fmtN(dns.lookup_successes),'green')+row('Fail',fmtN(dns.lookup_failures),'red')+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('In Flight',dns.in_flight,'amber')+row('Retries',fmtN(dns.retries))+
+      row('Max Retries',fmtN(dns.max_retries_exceeded),'red')+'</div>';
+  }
+}
+function renderHostdb(el,data){
+  var hdb=data.hostdb,sz=getSize(el);
+  var hitPct=hdb.total_lookups>0?(hdb.total_hits/hdb.total_lookups*100).toFixed(1)+'%':'--';
+  el.innerHTML='<div class="info-grid">'+
+    row('Lookups',fmtN(hdb.total_lookups))+row('Hit Rate',hitPct,'green')+
+    row('Hits',fmtN(hdb.total_hits),'green')+row('Misses',fmtN(hdb.total_lookups-hdb.total_hits))+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Serve Stale',fmtN(hdb.total_serve_stale))+row('TTL Expires',fmtN(hdb.ttl_expires))+'</div>';
+  }
+}
+function renderNetIo(el,data){
+  var n=data.net,sz=getSize(el);
+  el.dataset.rightVal=fmtB(R.netR)+'/s';
+  el.innerHTML='<div class="legend"><span><span class="legend-dot" style="background:#38bdf8"></span>Read</span>'+
+    '<span><span class="legend-dot" style="background:#22c55e"></span>Write</span></div>'+sparkHtml();
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Read',fmtB(R.netR)+'/s','blue')+row('Write',fmtB(R.netW)+'/s','green')+
+      row('Total Read',fmtB(n.read_bytes))+row('Total Write',fmtB(n.write_bytes))+
+      row('Read Calls',fmtN(n.calls_to_read))+row('Write Calls',fmtN(n.calls_to_write))+
+      row('Conns Open',n.connections_open)+row('Handler Runs',fmtN(n.handler_run))+'</div>';
+  }
+  drawSpark(el.querySelector('svg'),[{data:H.netR,color:'#38bdf8'},{data:H.netW,color:'#22c55e'}],0);
+}
+function renderSsl(el,data){
+  var s=data.ssl,sz=getSize(el);
+  var totalIn=s.total_handshake_in,successIn=s.success_handshake_in;
+  var failIn=totalIn-successIn;
+  el.innerHTML='<div class="info-grid">'+
+    row('Handshake In',fmtN(totalIn),'blue')+row('Success In',fmtN(successIn),'green')+
+    row('Handshake Out',fmtN(s.total_handshake_out))+row('Success Out',fmtN(s.success_handshake_out),'green')+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Sess Cache Hit',fmtN(s.session_cache_hit),'green')+row('Sess Cache Miss',fmtN(s.session_cache_miss),'red')+
+      row('Sess Eviction',fmtN(s.session_cache_eviction))+row('Sess Timeout',fmtN(s.session_cache_timeout))+
+      row('Origin Reused',fmtN(s.origin_session_reused),'green')+row('TLS 1.2',fmtN(s.tlsv12))+
+      row('TLS 1.3',fmtN(s.tlsv13))+row('SSL Errors',fmtN(s.error_ssl),'red')+
+      row('UA Bad Cert',fmtN(s.ua_bad_cert),'red')+row('UA Expired',fmtN(s.ua_expired_cert),'red')+
+      row('UA Unknown CA',fmtN(s.ua_unknown_ca),'red')+row('UA Verify Fail',fmtN(s.ua_cert_verify_failed),'red')+
+      row('OS Bad Cert',fmtN(s.os_bad_cert),'red')+row('OS Unknown CA',fmtN(s.os_unknown_ca),'red')+'</div>';
+  }
+}
+function renderHttp2(el,data){
+  var h=data.http2,sz=getSize(el);
+  el.innerHTML='<div class="info-grid">'+
+    row('Client Conns',h.current_client_conns,'blue')+row('Client Streams',h.current_client_streams)+
+    row('Total Conns',fmtN(h.total_client_conns))+row('Total Streams',fmtN(h.total_client_streams))+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Conn Errors',fmtN(h.connection_errors),'red')+row('Stream Errors',fmtN(h.stream_errors),'red')+
+      row('Srv Conns',h.current_server_conns)+row('Srv Streams',fmtN(h.total_server_streams))+
+      row('Data Frames',fmtN(h.data_frames_in))+row('Header Frames',fmtN(h.headers_frames_in))+
+      row('RST Frames',fmtN(h.rst_stream_frames_in),'amber')+row('Max Exceeded',fmtN(h.max_concurrent_exceeded_in),'red')+
+      row('Die Error',fmtN(h.session_die_error),'red')+row('Die Active',fmtN(h.session_die_active))+
+      row('Die Inactive',fmtN(h.session_die_inactive))+row('Die EOS',fmtN(h.session_die_eos))+'</div>';
+  }
+}
 
-    for (const ds of datasets) {
-      const n = ds.data.length;
-      const step = w / (HSIZE - 1);
-      const off = HSIZE - n;
-      let pts = '';
-      for (let i=0;i<n;i++) {
-        const x = (off+i)*step;
-        const y = h - pad - (Math.min(ds.data[i],maxVal)/maxVal*(h-2*pad));
-        pts += x.toFixed(1)+','+y.toFixed(1)+' ';
+// ==== SYSTEM ====
+function renderResponseCodes(el,data){
+  var rc=data.response_codes,sz=getSize(el);
+  el.innerHTML=stackedBar([{l:'2xx',v:rc['2xx'],c:'#22c55e',always:1},{l:'3xx',v:rc['3xx'],c:'#38bdf8'},
+    {l:'4xx',v:rc['4xx'],c:'#f59e0b'},{l:'5xx',v:rc['5xx'],c:'#ef4444'}]);
+  el.innerHTML+='<div class="info-grid">'+
+    row('2xx',fmtN(rc['2xx']),'green')+row('3xx',fmtN(rc['3xx']),'blue')+
+    row('4xx',fmtN(rc['4xx']),'amber')+row('5xx',fmtN(rc['5xx']),'red')+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="legend" style="margin-top:4px"><span><span class="legend-dot" style="background:#22c55e"></span>2xx</span>'+
+      '<span><span class="legend-dot" style="background:#f59e0b"></span>4xx</span>'+
+      '<span><span class="legend-dot" style="background:#ef4444"></span>5xx</span></div>'+sparkHtml();
+    drawSpark(el.querySelector('svg'),[{data:H.rc2,color:'#22c55e'},{data:H.rc4,color:'#f59e0b'},{data:H.rc5,color:'#ef4444'}],0);
+  }
+}
+function renderErrors(el,data){
+  var e=data.errors,sz=getSize(el);
+  el.innerHTML='<div class="info-grid">'+
+    row('Client Abort',fmtN(e.client_abort),'red')+row('Connect Fail',fmtN(e.connect_fail),'red')+
+    row('Client Read',fmtN(e.client_read_error),'red')+row('Cache Read',fmtN(e.cache_read_error),'red')+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Cache Write',fmtN(e.cache_write_error),'red')+row('Proxy Loop',fmtN(e.proxy_loop_detected),'red')+
+      row('No Remap',fmtN(e.no_remap_matched),'amber')+'</div>';
+    var total=e.client_abort+e.connect_fail+e.client_read_error+e.cache_read_error+e.cache_write_error;
+    el.innerHTML+='<div class="stats-row"><div class="sr-item"><div class="sr-label">Total Errors</div><div class="sr-val" style="color:#ef4444">'+fmtN(total)+'</div></div></div>';
+  }
+}
+function renderRequestBreak(el,data){
+  var h=data.http,sz=getSize(el),total=h.cache_hit_fresh+h.cache_miss_cold;
+  var hitPct=total>0?(h.cache_hit_fresh/total*100):0,missPct=total>0?(h.cache_miss_cold/total*100):0;
+  el.innerHTML=stackedBar([{l:'Hits',v:h.cache_hit_fresh,c:'#22c55e',always:1},{l:'Misses',v:h.cache_miss_cold,c:'#ef4444',always:1}]);
+  el.innerHTML+='<div class="info-grid">'+
+    row('Fresh Hits',fmtN(h.cache_hit_fresh),'green')+row('Cold Misses',fmtN(h.cache_miss_cold),'red')+
+    row('Mem Hits',fmtN(h.cache_hit_mem_fresh),'green')+row('Completed',fmtN(h.completed_requests))+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Revalidated',fmtN(h.cache_hit_revalidated))+row('Stale Served',fmtN(h.cache_hit_stale_served))+
+      row('Miss Changed',fmtN(h.cache_miss_changed))+row('Not Cacheable',fmtN(h.cache_miss_not_cacheable))+'</div>';
+  }
+}
+function renderMemory(el,data){
+  var rss=data.memory.rss,sz=getSize(el);
+  el.dataset.rightVal=fmtB(rss);
+  if(sz==='S'){
+    el.innerHTML='<div class="card-value blue" style="font-size:22px">'+fmtB(rss)+'</div><div class="card-sub">RSS</div>';
+  } else {
+    el.innerHTML='<div class="stats-row"><div class="sr-item"><div class="sr-label">RSS</div><div class="sr-val">'+fmtB(rss)+'</div></div></div>'+sparkHtml();
+    drawSpark(el.querySelector('svg'),[{data:H.mem,color:'#a78bfa'}],0);
+  }
+}
+function renderEventLoop(el,data){
+  var e=data.eventloop,sz=getSize(el);
+  el.innerHTML='<div class="info-grid">'+
+    row('Iterations/10s',fmtN(e.count_10s))+row('Events/10s',fmtN(e.events_10s))+
+    row('Time Min',fmtT(e.time_min_10s))+row('Time Max',fmtT(e.time_max_10s))+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Drain Queue Max',fmtT(e.drain_queue_max_10s))+row('IO Wait Max',fmtT(e.io_wait_max_10s))+'</div>';
+  }
+}
+function renderLogging(el,data){
+  var lg=data.logging,sz=getSize(el);
+  el.innerHTML='<div class="info-grid">'+
+    row('Written',fmtB(lg.bytes_written))+row('Flushed',fmtB(lg.bytes_flushed))+
+    row('Flushes',fmtN(lg.num_flushes))+row('Files Open',lg.files_open)+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Disk Space',fmtB(lg.space_used),'amber')+row('Access OK',fmtN(lg.access_ok),'green')+
+      row('Access Fail',fmtN(lg.access_fail),'red')+row('Bytes Lost',fmtB(lg.bytes_lost),'red')+'</div>';
+  }
+}
+
+function renderMilestones(el,data){
+  var sz=getSize(el);
+  var client=R.msCli||0,cache=R.msCch||0,dns=R.msDns||0,origin=R.msSrv||0;
+  var cacheWr=R.msCwr||0,uaWrite=R.msSend||0,smTotal=R.msSm||0;
+  var phases=[{l:'Client',v:client,c:'#38bdf8'},{l:'Cache',v:cache,c:'#22c55e'},
+    {l:'DNS',v:dns,c:'#f59e0b'},{l:'Origin',v:origin,c:'#a78bfa'},
+    {l:'Cache Write',v:cacheWr,c:'#06b6d4'},
+    {l:'Send',v:uaWrite,c:'#64748b'}];
+  el.innerHTML=stackedBar(phases.filter(function(p){return p.v>0||p.l==='Client'||p.l==='Origin';}));
+  el.innerHTML+='<div class="info-grid">'+
+    row('Client Read',fmtT(client),'blue')+row('Cache Read',fmtT(cache),'green')+
+    row('DNS',fmtT(dns),'amber')+row('Origin Total',fmtT(origin))+'</div>';
+  if(sz!=='S'){
+    el.innerHTML+='<div class="info-grid" style="margin-top:4px">'+
+      row('Cache Write',fmtT(cacheWr))+row('Client Send',fmtT(uaWrite))+
+      row('SM Total',fmtT(smTotal))+'</div>';
+    el.innerHTML+='<div class="legend" style="margin-top:4px">'+
+      '<span><span class="legend-dot" style="background:#38bdf8"></span>Client</span>'+
+      '<span><span class="legend-dot" style="background:#22c55e"></span>Cache</span>'+
+      '<span><span class="legend-dot" style="background:#a78bfa"></span>Origin</span>'+
+      '<span><span class="legend-dot" style="background:#06b6d4"></span>Cache Wr</span></div>'+sparkHtml();
+    drawSpark(el.querySelector('svg'),[{data:H.msClient,color:'#38bdf8'},{data:H.msCache,color:'#22c55e'},
+      {data:H.msServer,color:'#a78bfa'},{data:H.msCwr,color:'#06b6d4'}],0);
+  }
+}
+
+// ==== GRID ====
+function buildGrid(){
+  var layout=getLayout(),sizes=getSizes(),grid=document.getElementById('widget-grid');
+  grid.innerHTML='';
+  for(var idx=0;idx<layout.order.length;idx++){
+    var id=layout.order[idx];
+    if(layout.hidden.has(id)||!WIDGETS[id])continue;
+    var w=document.createElement('div');
+    var sz=sizes[id]||(HALF_DEFAULT[id]?'half':(DEFAULT_SIZES[id]||''));
+    w.className='widget'+(sz?' '+sz:'');
+    w.dataset.id=id;w.draggable=true;
+    var curSize=sz||'';
+    var sizeBtns='',opts=HALF_DEFAULT[id]?[['half','H'],['','S'],['medium','M'],['tall','L']]:[['','S'],['medium','M'],['tall','L']];
+    opts.forEach(function(p){sizeBtns+='<button class="size-btn'+(p[0]===curSize?' active':'')+'" onclick="setWidgetSize(\''+id+'\',\''+p[0]+'\')" title="'+p[1]+'">'+p[1]+'</button>';});
+    w.innerHTML='<div class="widget-header"><div><span class="drag-handle">\u2630</span>'+
+      '<span class="widget-title">'+WIDGETS[id].title+'</span>'+sizeBtns+'</div>'+
+      '<span class="widget-title-right"></span></div><div class="widget-body"></div>';
+    w.addEventListener('dragstart',function(e){dragSrc=this;this.classList.add('dragging');e.dataTransfer.effectAllowed='move';});
+    w.addEventListener('dragend',function(){this.classList.remove('dragging');document.querySelectorAll('.widget').forEach(function(el){el.classList.remove('drag-over');});});
+    w.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='move';this.classList.add('drag-over');});
+    w.addEventListener('dragleave',function(){this.classList.remove('drag-over');});
+    w.addEventListener('drop',function(e){
+      e.preventDefault();this.classList.remove('drag-over');
+      if(dragSrc&&dragSrc!==this){
+        var parent=this.parentNode,all=[].slice.call(parent.children);
+        var fi=all.indexOf(dragSrc),ti=all.indexOf(this);
+        if(fi<ti)parent.insertBefore(dragSrc,this.nextSibling);else parent.insertBefore(dragSrc,this);
+        saveCurrentOrder();
       }
-      const sx = (off*step).toFixed(1), ex = ((off+n-1)*step).toFixed(1);
-      const area = sx+','+(h-pad)+' '+pts+ex+','+(h-pad);
-      lines += '<polygon points="'+area+'" fill="'+ds.color+'" opacity="0.12"/>';
-      lines += '<polyline points="'+pts.trim()+'" fill="none" stroke="'+ds.color+'" stroke-width="1.5" opacity="0.9"/>';
-    }
-    svg.innerHTML = grid + lines;
+    });
+    grid.appendChild(w);
   }
-
-  function update(data) {
-    const now = Date.now();
-    const dt = prev ? (now - prevTime) / 1000 : 0;
-
-    txt('h-version', 'ATS '+data.meta.version);
-    txt('h-hostname', data.meta.hostname);
-    txt('h-uptime', 'Up '+fmtUp(data.meta.uptime));
-
-    const totalReqs = data.http.completed_requests;
-    txt('m-requests', fmtN(totalReqs));
-
-    const hits = data.http.cache_hit_fresh;
-    const lookups = data.http.cache_lookups;
-    const misses = data.http.cache_miss_cold;
-    const ratio = lookups>0 ? (hits/lookups*100) : 0;
-    txt('m-hitratio', ratio.toFixed(1)+'%');
-    txt('m-hitdetail', fmtN(hits)+' hits / '+fmtN(misses)+' misses');
-
-    txt('m-conns', data.connections.client_active);
-    txt('m-conndetail', data.connections.client_total+' total / '+data.connections.client_idle+' idle');
-
-    const uaB = data.bandwidth.ua_response_bytes;
-    const osB = data.bandwidth.os_response_bytes;
-
-    if (prev && dt > 0) {
-      const rps = (totalReqs - prev.http.completed_requests) / dt;
-      txt('m-rps', rps.toFixed(1)+' req/s');
-      rpsHistory.push(rps);
-
-      const bwC = (uaB - prev.bandwidth.ua_response_bytes) / dt;
-      const bwO = (osB - prev.bandwidth.os_response_bytes) / dt;
-      txt('m-bandwidth', fmtB(bwC)+'/s');
-      txt('m-bwdetail', fmtB(bwO)+'/s to origin');
-      bwClientHistory.push(bwC);
-      bwOriginHistory.push(bwO);
-
-      // Latency: delta total_transactions_time (nanoseconds) / delta completed_requests
-      const dReqs = totalReqs - prev.http.completed_requests;
-      const dTime = data.http.total_transactions_time - prev.http.total_transactions_time;
-      if (dReqs > 0) {
-        const avgNs = dTime / dReqs;
-        if (avgNs >= 1e6) txt('m-latency', (avgNs/1e6).toFixed(1)+' ms');
-        else if (avgNs >= 1e3) txt('m-latency', (avgNs/1e3).toFixed(0)+' us');
-        else txt('m-latency', avgNs.toFixed(0)+' ns');
-      }
-
-      const dH = hits - prev.http.cache_hit_fresh;
-      const dM = misses - prev.http.cache_miss_cold;
-      const dT = dH + dM;
-      const hPct = dT>0 ? dH/dT*100 : (lookups>0?ratio:0);
-      const mPct = dT>0 ? dM/dT*100 : 0;
-      hitHistory.push(hPct);
-      missHistory.push(mPct);
-
-      if (rpsHistory.length > HSIZE) rpsHistory.shift();
-      if (bwClientHistory.length > HSIZE) { bwClientHistory.shift(); bwOriginHistory.shift(); }
-      if (hitHistory.length > HSIZE) { hitHistory.shift(); missHistory.shift(); }
-
-      txt('sp-rps-val', fmtN(Math.round(rps))+' req/s');
-      txt('sp-bw-val', fmtB(bwC)+'/s');
-      txt('sp-hit-val', hPct.toFixed(1)+'%');
-    } else {
-      txt('m-bandwidth', fmtB(uaB));
-      txt('m-bwdetail', fmtB(osB)+' to origin');
-    }
-
-    // Sparklines
-    drawSpark('spark-rps', [{data:rpsHistory, color:'#38bdf8'}], 0, 100);
-    drawSpark('spark-bw', [{data:bwClientHistory, color:'#38bdf8'},{data:bwOriginHistory, color:'#a78bfa'}], 0, 90);
-    drawSpark('spark-hit', [{data:hitHistory, color:'#22c55e'},{data:missHistory, color:'#ef4444'}], 100, 90);
-
-    // Connections
-    const mx = Math.max(data.connections.client_total, data.connections.server, 1);
-    setBar('conn-client-bar','conn-client-total',data.connections.client_total,mx);
-    setBar('conn-active-bar','conn-client-active',data.connections.client_active,mx);
-    setBar('conn-idle-bar','conn-client-idle',data.connections.client_idle,mx);
-    setBar('conn-server-bar','conn-server',data.connections.server,mx);
-    setBar('conn-cache-bar','conn-cache',data.connections.cache,mx);
-
-    // Cache health
-    const dPct = data.cache.bytes_total>0 ? data.cache.bytes_used/data.cache.bytes_total*100 : data.cache.percent_full;
-    txt('cache-disk-pct', dPct.toFixed(1)+'%');
-    const db = document.getElementById('cache-disk-bar');
-    if(db){db.style.width=dPct+'%';db.style.background=pctCol(dPct);}
-    txt('cache-disk-detail', fmtB(data.cache.bytes_used)+' / '+fmtB(data.cache.bytes_total));
-
-    const rPct = data.cache.ram_cache_total_bytes>0 ? data.cache.ram_cache_bytes_used/data.cache.ram_cache_total_bytes*100 : 0;
-    txt('cache-ram-pct', rPct.toFixed(1)+'%');
-    const rb = document.getElementById('cache-ram-bar');
-    if(rb){rb.style.width=rPct+'%';rb.style.background=pctCol(rPct);}
-    txt('cache-ram-detail', fmtB(data.cache.ram_cache_bytes_used)+' / '+fmtB(data.cache.ram_cache_total_bytes));
-
-    // Details
-    txt('bw-client-total', fmtB(uaB));
-    txt('bw-origin-total', fmtB(osB));
-    txt('dns-total', fmtN(data.dns.total_lookups));
-    txt('dns-success-rate', data.dns.total_lookups>0 ? (data.dns.lookup_successes/data.dns.total_lookups*100).toFixed(1)+'%' : '--');
-    txt('hostdb-total', fmtN(data.hostdb.total_lookups));
-    txt('hostdb-hit-rate', data.hostdb.total_lookups>0 ? (data.hostdb.total_hits/data.hostdb.total_lookups*100).toFixed(1)+'%' : '--');
-    txt('ci-stripes', data.cache.stripes);
-    txt('ci-dirwrap', fmtN(data.cache.directory_wrap));
-    txt('ci-dirent-used', fmtN(data.cache.direntries_used));
-    txt('ci-dirent-total', fmtN(data.cache.direntries_total));
-    txt('ci-read-active', data.cache.read_active);
-    txt('ci-write-active', data.cache.write_active);
-    txt('err-abort', fmtN(data.errors.client_abort));
-    txt('err-connect', fmtN(data.errors.connect_fail));
-
-    prev = data;
-    prevTime = now;
-  }
-
-  let errCount = 0;
-  function poll() {
-    fetch('__api/stats')
-      .then(r => { if(!r.ok) throw new Error(r.status); return r.json(); })
-      .then(data => {
-        errCount=0;
-        document.getElementById('error-banner').style.display='none';
-        update(data);
-      })
-      .catch(e => {
-        errCount++;
-        const b=document.getElementById('error-banner');
-        b.textContent='Failed to fetch stats ('+e.message+') - retrying...';
-        b.style.display=errCount>=2?'block':'none';
+}
+function saveCurrentOrder(){
+  var layout=getLayout();
+  var order=[].slice.call(document.querySelectorAll('.widget')).map(function(el){return el.dataset.id;});
+  for(var i=0;i<layout.order.length;i++){if(order.indexOf(layout.order[i])<0)order.push(layout.order[i]);}
+  for(var i=0;i<ALL_IDS.length;i++){if(order.indexOf(ALL_IDS[i])<0)order.push(ALL_IDS[i]);}
+  saveLayout(order,layout.hidden);
+}
+window.setWidgetSize=setWidgetSize;
+window.toggleSettings=function(){
+  var ov=document.getElementById('settings-overlay'),pn=document.getElementById('settings-panel');
+  var show=pn.style.display==='none';
+  ov.style.display=show?'block':'none';pn.style.display=show?'block':'none';
+  if(show)buildSettingsPanel();
+};
+function buildSettingsPanel(){
+  var layout=getLayout(),ct=document.getElementById('widget-toggles');ct.innerHTML='';
+  CATEGORIES.forEach(function(cat){
+    var catDiv=document.createElement('div');catDiv.className='settings-cat';catDiv.textContent=cat.name;
+    ct.appendChild(catDiv);
+    cat.ids.forEach(function(id){
+      if(!WIDGETS[id])return;
+      var chk=!layout.hidden.has(id);
+      var div=document.createElement('div');div.className='widget-toggle';
+      var lbl=document.createElement('label');lbl.setAttribute('for','wt-'+id);lbl.textContent=WIDGETS[id].title;
+      var inp=document.createElement('input');inp.type='checkbox';inp.id='wt-'+id;inp.checked=chk;inp.dataset.id=id;
+      inp.addEventListener('change',function(){
+        var ly=getLayout();
+        if(this.checked)ly.hidden.delete(this.dataset.id);else ly.hidden.add(this.dataset.id);
+        saveLayout(ly.order,ly.hidden);buildGrid();
       });
+      div.appendChild(lbl);div.appendChild(inp);ct.appendChild(div);
+    });
+  });
+}
+function initLayout(){
+  var layout=getLayout(),changed=false;
+  for(var i=0;i<ALL_IDS.length;i++){if(layout.order.indexOf(ALL_IDS[i])<0){layout.order.push(ALL_IDS[i]);changed=true;}}
+  if(changed)saveLayout(layout.order,layout.hidden);
+}
+
+function update(data){
+  var now=Date.now(),dt=prev?(now-prevTime)/1000:0;
+  txt('h-version','ATS '+data.meta.version);
+  txt('h-hostname',data.meta.hostname);
+  txt('h-uptime','Up '+fmtUp(data.meta.uptime));
+  var totalReqs=data.http.completed_requests;
+  var hits=data.http.cache_hit_fresh,lookups=data.http.cache_lookups,misses=data.http.cache_miss_cold;
+  var uaB=data.bandwidth.ua_response_bytes;
+  if(prev&&dt>0){
+    R.rps=(totalReqs-prev.http.completed_requests)/dt;pushH(H.rps,R.rps);
+    R.bwC=(uaB-prev.bandwidth.ua_response_bytes)/dt;
+    R.bwO=(data.bandwidth.os_response_bytes-prev.bandwidth.os_response_bytes)/dt;
+    pushH(H.bwC,R.bwC);pushH(H.bwO,R.bwO);
+    var dReqs=totalReqs-prev.http.completed_requests;
+    var dTime=data.http.total_transactions_time-prev.http.total_transactions_time;
+    if(dReqs>0){R.latNs=dTime/dReqs;pushH(H.lat,R.latNs);}
+    var dH=hits-prev.http.cache_hit_fresh,dM=misses-prev.http.cache_miss_cold,dT=dH+dM;
+    var ratio=lookups>0?(hits/lookups*100):0;
+    pushH(H.hit,dT>0?dH/dT*100:(lookups>0?ratio:0));
+    pushH(H.miss,dT>0?dM/dT*100:0);
+    var rc=data.response_codes,prc=prev.response_codes;
+    pushH(H.rc2,(rc['2xx']-prc['2xx'])/dt);
+    pushH(H.rc4,(rc['4xx']-prc['4xx'])/dt);
+    pushH(H.rc5,(rc['5xx']-prc['5xx'])/dt);
+    R.netR=(data.net.read_bytes-prev.net.read_bytes)/dt;
+    R.netW=(data.net.write_bytes-prev.net.write_bytes)/dt;
+    pushH(H.netR,R.netR);pushH(H.netW,R.netW);
+    R.logBps=(data.logging.bytes_written-prev.logging.bytes_written)/dt;
   }
-  poll();
-  setInterval(poll, POLL);
+  pushH(H.cliConn,data.connections.client_total);
+  pushH(H.srvConn,data.connections.server);
+  pushH(H.mem,data.memory.rss);
+  if(prev&&dt>0){
+    var ms=data.milestones,pm=prev.milestones;
+    var dSm=(ms.sm_finish-pm.sm_finish)-(ms.sm_start-pm.sm_start);
+    var dCli=(ms.ua_read_header_done-pm.ua_read_header_done)-(ms.ua_begin-pm.ua_begin);
+    var dCch=(ms.cache_open_read_end-pm.cache_open_read_end)-(ms.cache_open_read_begin-pm.cache_open_read_begin);
+    var dDns=(ms.dns_lookup_end-pm.dns_lookup_end)-(ms.dns_lookup_begin-pm.dns_lookup_begin);
+    var dSrv=(ms.server_close-pm.server_close)-(ms.server_first_connect-pm.server_first_connect);
+    var dCwr=(ms.cache_open_write_end-pm.cache_open_write_end)-(ms.cache_open_write_begin-pm.cache_open_write_begin);
+    var dSend=(ms.ua_close-pm.ua_close)-(ms.ua_begin_write-pm.ua_begin_write);
+    R.msCli=Math.max(0,dCli);R.msCch=Math.max(0,dCch);R.msDns=Math.max(0,dDns);
+    R.msSrv=Math.max(0,dSrv);R.msCwr=Math.max(0,dCwr);
+    R.msSend=Math.max(0,dSend);R.msSm=Math.max(0,dSm);
+    pushH(H.msClient,R.msCli);pushH(H.msCache,R.msCch);
+    pushH(H.msDns,R.msDns);pushH(H.msServer,R.msSrv);pushH(H.msCwr,R.msCwr);
+  }
+
+  document.querySelectorAll('.widget').forEach(function(w){
+    var id=w.dataset.id,body=w.querySelector('.widget-body'),right=w.querySelector('.widget-title-right');
+    if(WIDGETS[id]){WIDGETS[id].render(body,data);if(body.dataset.rightVal)right.textContent=body.dataset.rightVal;}
+  });
+  prev=data;prevTime=now;
+}
+
+var errCount=0;
+function poll(){
+  fetch('__api/stats')
+    .then(function(r){if(!r.ok)throw new Error(r.status);return r.json();})
+    .then(function(data){errCount=0;document.getElementById('error-banner').style.display='none';update(data);})
+    .catch(function(e){errCount++;var b=document.getElementById('error-banner');b.textContent='Failed to fetch stats ('+e.message+') - retrying...';b.style.display=errCount>=2?'block':'none';});
+}
+
+initLayout();buildGrid();poll();setInterval(poll,POLL);
 })();
 </script>
 </body>
 </html>
-)HTMLRAW");
+)DASHBOARD");
 }
-#endif
 
 // ---- Remap Plugin Interface ----
 
@@ -1200,11 +1557,6 @@ TSRemapDoRemap(void * /* ih */, TSHttpTxn rh, TSRemapRequestInfo *rri)
 TSReturnCode
 TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf */, int /* errbuf_size */)
 {
-  // argv[0] is "from" URL, argv[1] is "to" URL, argv[2+] are plugin args
-  if (argc > 2 && argv[2]) {
-    DashboardHtmlPath = argv[2];
-    VDEBUG("dashboard HTML path: %s", DashboardHtmlPath.c_str());
-  }
   *ih = nullptr;
   return TS_SUCCESS;
 }
