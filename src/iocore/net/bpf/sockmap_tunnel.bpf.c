@@ -113,7 +113,7 @@ bpf_stream_verdict(struct __sk_buff *skb)
     __sync_fetch_and_add(&stats->packets, 1);
   }
 
-  return bpf_sk_redirect_map(skb, &sockmap, *peer_idx, BPF_F_INGRESS);
+  return bpf_sk_redirect_map(skb, &sockmap, *peer_idx, 0);
 }
 
 /*
