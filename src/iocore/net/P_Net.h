@@ -80,6 +80,11 @@ struct NetStatsBlock {
   Metrics::Counter::AtomicType *write_bytes;
   Metrics::Counter::AtomicType *write_bytes_count;
   Metrics::Gauge::AtomicType   *connection_tracker_table_size;
+  Metrics::Gauge::AtomicType   *tunnel_bpf_active;
+  Metrics::Counter::AtomicType *tunnel_bpf_total;
+  Metrics::Counter::AtomicType *tunnel_bpf_bytes;
+  Metrics::Counter::AtomicType *tunnel_bpf_fallback;
+  Metrics::Counter::AtomicType *tunnel_bpf_errors;
 };
 
 extern NetStatsBlock net_rsb;

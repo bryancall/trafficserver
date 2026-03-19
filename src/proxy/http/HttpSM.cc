@@ -60,6 +60,10 @@
 
 #include "iocore/net/ProxyProtocol.h"
 
+#if TS_USE_BPF_SOCKMAP
+#include "../../iocore/net/BpfSockmapManager.h"
+#endif
+
 #include "tscore/Layout.h"
 #include "ts/ats_probe.h"
 
@@ -7533,6 +7537,27 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
 
   _ua.get_entry()->in_tunnel = true;
   server_entry->in_tunnel    = true;
+
+#if TS_USE_BPF_SOCKMAP
+  // Attempt BPF sockmap acceleration for this blind tunnel.
+  // If successful, data flows in kernel space and we skip the userspace tunnel_run() loop.
+  // Only applies when no transforms are active (pure blind tunnel).
+  if (BpfSockmapManager::is_available() && t_state.txn_conf->tunnel_bpf_enabled && this->transform_info.vc == nullptr &&
+      this->post_transform_info.vc == nullptr) {
+    auto *client_vc = dynamic_cast<UnixNetVConnection *>(_ua.get_entry()->vc);
+    auto *server_vc = dynamic_cast<UnixNetVConnection *>(server_entry->vc);
+    if (client_vc && server_vc) {
+      int client_fd = client_vc->get_socket();
+      int server_fd = server_vc->get_socket();
+      if (BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id)) {
+        // Sockets are now managed by BPF — skip the userspace data copy loop.
+        // The tunnel will be torn down when BpfTunnelPoller detects a close event.
+        return;
+      }
+      Note("BPF sockmap insert failed for tunnel %" PRId64 ", falling back to userspace", sm_id);
+    }
+  }
+#endif
 
   tunnel.tunnel_run();
 

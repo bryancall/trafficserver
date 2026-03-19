@@ -126,6 +126,11 @@ register_net_stats()
   net_rsb.write_bytes                      = Metrics::Counter::createPtr("proxy.process.net.write_bytes");
   net_rsb.write_bytes_count                = Metrics::Counter::createPtr("proxy.process.net.write_bytes_count");
   net_rsb.connection_tracker_table_size    = Metrics::Gauge::createPtr("proxy.process.net.connection_tracker_table_size");
+  net_rsb.tunnel_bpf_active                = Metrics::Gauge::createPtr("proxy.process.tunnel.bpf.active");
+  net_rsb.tunnel_bpf_total                 = Metrics::Counter::createPtr("proxy.process.tunnel.bpf.total");
+  net_rsb.tunnel_bpf_bytes                 = Metrics::Counter::createPtr("proxy.process.tunnel.bpf.bytes");
+  net_rsb.tunnel_bpf_fallback              = Metrics::Counter::createPtr("proxy.process.tunnel.bpf.fallback");
+  net_rsb.tunnel_bpf_errors                = Metrics::Counter::createPtr("proxy.process.tunnel.bpf.errors");
 }
 
 void

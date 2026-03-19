@@ -783,6 +783,9 @@ struct OverridableHttpConfigParams {
 
   // bitset to hold the status codes that will used by nagative revalidating enabled
   HttpStatusCodeList negative_revalidating_list;
+
+  // BPF sockmap tunnel acceleration
+  MgmtByte tunnel_bpf_enabled = 0;
 };
 
 /////////////////////////////////////////////////////////////

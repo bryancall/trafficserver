@@ -82,6 +82,10 @@ extern "C" int plock(int);
 #include "../iocore/net/P_UDPNet.h"
 #include "../iocore/net/P_UnixNet.h"
 #include "../iocore/net/P_SSLUtils.h"
+#if TS_USE_BPF_SOCKMAP
+#include "../iocore/net/BpfSockmapManager.h"
+#include "../iocore/net/BpfTunnelPoller.h"
+#endif
 #include "../iocore/dns/P_SplitDNSProcessor.h"
 #include "../iocore/hostdb/P_HostDB.h"
 #include "../records/P_RecCore.h"
@@ -1928,6 +1932,19 @@ main(int /* argc ATS_UNUSED */, const char **argv)
   // Clean out any remnant temporary plugin (UUID named) directories.
   PluginFactory::cleanup();
 
+#if TS_USE_BPF_SOCKMAP
+  // Initialize BPF sockmap before privilege drop — loading BPF programs requires CAP_BPF.
+  // Map FDs survive the privilege drop and remain usable for insert/remove operations.
+  {
+    auto bpf_enabled = RecGetRecordInt("proxy.config.http.tunnel.bpf_enabled");
+    if (bpf_enabled && bpf_enabled.value()) {
+      if (!BpfSockmapManager::init()) {
+        Warning("BPF sockmap initialization failed, blind tunnels will use userspace path");
+      }
+    }
+  }
+#endif
+
 #if TS_USE_POSIX_CAP
   // Change the user of the process.
   // Do this before we start threads so we control the user id of the
@@ -2352,6 +2369,16 @@ main(int /* argc ATS_UNUSED */, const char **argv)
 #if !TS_USE_POSIX_CAP
   if (admin_user_p) {
     change_uid_gid(user);
+  }
+#endif
+
+#if TS_USE_BPF_SOCKMAP
+  // Start the BPF tunnel poller now that the event system is running
+  if (BpfSockmapManager::is_available()) {
+    static BpfTunnelPoller bpf_poller;
+    if (bpf_poller.init()) {
+      bpf_poller.start();
+    }
   }
 #endif
 

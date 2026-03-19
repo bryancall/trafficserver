@@ -158,6 +158,8 @@ records:
     transaction_no_activity_timeout_in: 30
     transaction_no_activity_timeout_out: 30
     uncacheable_requests_bypass_parent: 1
+    tunnel:
+      bpf_enabled: 0
 
 ##############################################################################
 # Logging Config. Docs:

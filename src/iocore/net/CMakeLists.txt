@@ -116,6 +116,47 @@ if(TS_USE_LINUX_IO_URING)
   target_link_libraries(inknet PUBLIC ts::inkuring)
 endif()
 
+if(TS_USE_BPF_SOCKMAP)
+  find_program(CLANG_BPF clang REQUIRED)
+  find_program(BPFTOOL bpftool REQUIRED)
+
+  # Generate vmlinux.h from running kernel BTF
+  set(BPF_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/bpf")
+  file(MAKE_DIRECTORY ${BPF_BUILD_DIR})
+
+  add_custom_command(
+    OUTPUT ${BPF_BUILD_DIR}/vmlinux.h
+    COMMAND ${BPFTOOL} btf dump file /sys/kernel/btf/vmlinux format c > ${BPF_BUILD_DIR}/vmlinux.h
+    COMMENT "Generating vmlinux.h from kernel BTF"
+  )
+
+  # Compile BPF program to .o
+  add_custom_command(
+    OUTPUT ${BPF_BUILD_DIR}/sockmap_tunnel.bpf.o
+    COMMAND ${CLANG_BPF} -g -O2 -target bpf -D__TARGET_ARCH_x86 -I${BPF_BUILD_DIR} -I${CMAKE_CURRENT_SOURCE_DIR}/bpf -c
+            ${CMAKE_CURRENT_SOURCE_DIR}/bpf/sockmap_tunnel.bpf.c -o ${BPF_BUILD_DIR}/sockmap_tunnel.bpf.o
+    DEPENDS bpf/sockmap_tunnel.bpf.c bpf/sockmap_tunnel.h ${BPF_BUILD_DIR}/vmlinux.h
+    COMMENT "Compiling BPF program sockmap_tunnel.bpf.c"
+  )
+
+  # Generate BPF skeleton header
+  add_custom_command(
+    OUTPUT ${BPF_BUILD_DIR}/sockmap_tunnel.skel.h
+    COMMAND ${BPFTOOL} gen skeleton ${BPF_BUILD_DIR}/sockmap_tunnel.bpf.o > ${BPF_BUILD_DIR}/sockmap_tunnel.skel.h
+    DEPENDS ${BPF_BUILD_DIR}/sockmap_tunnel.bpf.o
+    COMMENT "Generating BPF skeleton sockmap_tunnel.skel.h"
+  )
+
+  # Custom target to ensure skeleton is built before inknet
+  add_custom_target(bpf_sockmap_skeleton DEPENDS ${BPF_BUILD_DIR}/sockmap_tunnel.skel.h)
+
+  target_sources(inknet PRIVATE BpfSockmapManager.cc BpfTunnelRegistry.cc BpfTunnelPoller.cc)
+
+  add_dependencies(inknet bpf_sockmap_skeleton)
+  target_include_directories(inknet PRIVATE ${BPF_BUILD_DIR})
+  target_link_libraries(inknet PRIVATE LibBpf::LibBpf)
+endif()
+
 if(BUILD_TESTING)
   # libinknet_stub.cc is need because GNU ld is sensitive to the order of static libraries on the command line, and we have a cyclic dependency between inknet and proxy
   add_executable(
