@@ -7550,11 +7550,13 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
     if (!bpf_available || !bpf_conf_enabled || !no_transforms) {
       Note("BPF tunnel skip: available=%d config_enabled=%d no_transforms=%d", bpf_available, bpf_conf_enabled, no_transforms);
     } else {
-      auto *client_vc = dynamic_cast<UnixNetVConnection *>(_ua.get_entry()->vc);
-      auto *server_vc = dynamic_cast<UnixNetVConnection *>(server_entry->vc);
-      if (client_vc && server_vc) {
-        int client_fd = client_vc->get_socket();
-        int server_fd = server_vc->get_socket();
+      // Client VC: get the underlying NetVConnection from the ProxyTransaction
+      auto *client_netvc = dynamic_cast<UnixNetVConnection *>(_ua.get_txn()->get_netvc());
+      // Server VC: server_entry->vc is already a NetVConnection
+      auto *server_netvc = dynamic_cast<UnixNetVConnection *>(server_entry->vc);
+      if (client_netvc && server_netvc) {
+        int client_fd = client_netvc->get_socket();
+        int server_fd = server_netvc->get_socket();
         Note("BPF tunnel attempting insert: client_fd=%d server_fd=%d sm_id=%" PRId64, client_fd, server_fd, sm_id);
         if (BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id)) {
           Note("BPF tunnel %" PRId64 " active — kernel data path", sm_id);
@@ -7562,7 +7564,7 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
         }
         Note("BPF sockmap insert failed for tunnel %" PRId64 ", falling back to userspace", sm_id);
       } else {
-        Note("BPF tunnel skip: dynamic_cast failed client_vc=%p server_vc=%p", (void *)client_vc, (void *)server_vc);
+        Note("BPF tunnel skip: cast failed client_netvc=%p server_netvc=%p", (void *)client_netvc, (void *)server_netvc);
       }
     }
   }
