@@ -7442,87 +7442,6 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
 {
   ink_assert(server_entry->vc != nullptr);
 
-#if TS_USE_BPF_SOCKMAP
-  // BPF sockmap fast path: bypass the entire userspace tunnel setup.
-  // Check early — before allocating buffers or setting up tunnel producers/consumers.
-  if (BpfSockmapManager::is_available() && t_state.txn_conf->tunnel_bpf_enabled && send_response_hdr) {
-    auto *client_netvc = dynamic_cast<UnixNetVConnection *>(_ua.get_txn()->get_netvc());
-    auto *server_netvc = dynamic_cast<UnixNetVConnection *>(server_entry->vc);
-
-    if (client_netvc && server_netvc) {
-      int client_fd = client_netvc->get_socket();
-      int server_fd = server_netvc->get_socket();
-
-      // Build and flush the 200 OK response directly to the client socket
-      {
-        MIOBuffer      *resp_buf    = new_MIOBuffer(BUFFER_SIZE_INDEX_4K);
-        int64_t         resp_bytes  = write_response_header_into_buffer(&t_state.hdr_info.client_response, resp_buf);
-        if (initial && initial->read_avail()) {
-          resp_bytes += resp_buf->write(initial, initial->read_avail());
-        }
-        IOBufferReader *resp_reader = resp_buf->alloc_reader();
-        int64_t         avail       = resp_reader->read_avail();
-        while (avail > 0) {
-          const char *data = resp_reader->start();
-          int64_t     len  = resp_reader->block_read_avail();
-          int         n    = ::write(client_fd, data, len);
-          if (n <= 0) {
-            break;
-          }
-          resp_reader->consume(n);
-          avail -= n;
-        }
-        Dbg(dbg_ctl_bpf_sockmap, "flushed response to client");
-        free_MIOBuffer(resp_buf);
-      }
-
-      // Flush any pending client data to origin (proxy protocol, raw buffer)
-      {
-        if (_ua.get_raw_buffer_reader() != nullptr) {
-          int64_t     avail = _ua.get_raw_buffer_reader()->read_avail();
-          const char *data  = _ua.get_raw_buffer_reader()->start();
-          if (avail > 0) {
-            ::write(server_fd, data, avail);
-          }
-          _ua.get_raw_buffer_reader()->dealloc();
-          _ua.set_raw_buffer_reader(nullptr);
-        }
-        // Forward any remaining data from the client's read buffer
-        IOBufferReader *remote = _ua.get_txn()->get_remote_reader();
-        if (remote && remote->read_avail() > 0) {
-          int64_t     avail = remote->read_avail();
-          const char *data  = remote->start();
-          ::write(server_fd, data, avail);
-        }
-      }
-
-      // Insert into BPF sockmap
-      bool inserted = BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id);
-      if (inserted) {
-        Dbg(dbg_ctl_bpf_sockmap, "tunnel %" PRId64 " active via BPF sockmap", sm_id);
-
-        // Mark as tunnel endpoints for metrics
-        _ua.get_entry()->vc->mark_as_tunnel_endpoint();
-        server_entry->vc->mark_as_tunnel_endpoint();
-
-        // BPF sockmap now owns the data path. We need to keep the sockets alive
-        // but let the HttpSM clean up normally without trying to do I/O on them.
-        //
-        // Strategy: fall through to the normal tunnel setup below, but the tunnel
-        // will be a no-op since BPF handles the actual data. The sockets stay open
-        // because the VConnections still own the FDs. When the tunnel eventually
-        // times out or the client disconnects, ATS will close them normally.
-        //
-        // For now, we just return and let the SM leak — the sockets are properly
-        // managed by BPF, and the SM resources are small compared to the tunnel data.
-        // TODO: implement proper SM lifecycle cleanup for BPF tunnels.
-        return;
-      }
-      Note("BPF sockmap insert failed for tunnel %" PRId64 ", falling back to userspace", sm_id);
-    }
-  }
-#endif
-
   HttpTunnelConsumer *c_ua;
   HttpTunnelConsumer *c_os;
   HttpTunnelProducer *p_ua;
@@ -7621,6 +7540,28 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
 
   _ua.get_entry()->in_tunnel = true;
   server_entry->in_tunnel    = true;
+
+#if TS_USE_BPF_SOCKMAP
+  // Insert sockets into BPF sockmap for kernel-level data forwarding.
+  // We still call tunnel_run() below so the HttpSM lifecycle works normally —
+  // when the connection closes, the tunnel detects it and cleans up the SM.
+  // BPF intercepts packets before they reach the userspace read buffers,
+  // so the tunnel's producer_handler/consumer_handler will see no data events
+  // and just idle until the connection closes.
+  if (BpfSockmapManager::is_available() && t_state.txn_conf->tunnel_bpf_enabled && this->transform_info.vc == nullptr &&
+      this->post_transform_info.vc == nullptr) {
+    auto *client_netvc = dynamic_cast<UnixNetVConnection *>(_ua.get_txn()->get_netvc());
+    auto *server_netvc = dynamic_cast<UnixNetVConnection *>(server_entry->vc);
+    if (client_netvc && server_netvc) {
+      int client_fd = client_netvc->get_socket();
+      int server_fd = server_netvc->get_socket();
+      if (BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id)) {
+        Dbg(dbg_ctl_bpf_sockmap, "tunnel %" PRId64 " using BPF sockmap data path", sm_id);
+      }
+      // Fall through to tunnel_run() regardless — the SM needs it for lifecycle management
+    }
+  }
+#endif
 
   tunnel.tunnel_run();
 
