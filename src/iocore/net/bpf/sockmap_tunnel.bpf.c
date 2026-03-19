@@ -44,7 +44,7 @@ struct {
   __uint(type, BPF_MAP_TYPE_SOCKMAP);
   __uint(max_entries, SOCKMAP_MAX_ENTRIES);
   __type(key, __u32);
-  __type(value, __u64); /* socket */
+  __type(value, __u32); /* socket fd */
 } sockmap SEC(".maps");
 
 /*
