@@ -7542,19 +7542,28 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
   // Attempt BPF sockmap acceleration for this blind tunnel.
   // If successful, data flows in kernel space and we skip the userspace tunnel_run() loop.
   // Only applies when no transforms are active (pure blind tunnel).
-  if (BpfSockmapManager::is_available() && t_state.txn_conf->tunnel_bpf_enabled && this->transform_info.vc == nullptr &&
-      this->post_transform_info.vc == nullptr) {
-    auto *client_vc = dynamic_cast<UnixNetVConnection *>(_ua.get_entry()->vc);
-    auto *server_vc = dynamic_cast<UnixNetVConnection *>(server_entry->vc);
-    if (client_vc && server_vc) {
-      int client_fd = client_vc->get_socket();
-      int server_fd = server_vc->get_socket();
-      if (BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id)) {
-        // Sockets are now managed by BPF — skip the userspace data copy loop.
-        // The tunnel will be torn down when BpfTunnelPoller detects a close event.
-        return;
+  {
+    bool bpf_available    = BpfSockmapManager::is_available();
+    bool bpf_conf_enabled = t_state.txn_conf->tunnel_bpf_enabled;
+    bool no_transforms    = (this->transform_info.vc == nullptr && this->post_transform_info.vc == nullptr);
+
+    if (!bpf_available || !bpf_conf_enabled || !no_transforms) {
+      Note("BPF tunnel skip: available=%d config_enabled=%d no_transforms=%d", bpf_available, bpf_conf_enabled, no_transforms);
+    } else {
+      auto *client_vc = dynamic_cast<UnixNetVConnection *>(_ua.get_entry()->vc);
+      auto *server_vc = dynamic_cast<UnixNetVConnection *>(server_entry->vc);
+      if (client_vc && server_vc) {
+        int client_fd = client_vc->get_socket();
+        int server_fd = server_vc->get_socket();
+        Note("BPF tunnel attempting insert: client_fd=%d server_fd=%d sm_id=%" PRId64, client_fd, server_fd, sm_id);
+        if (BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id)) {
+          Note("BPF tunnel %" PRId64 " active — kernel data path", sm_id);
+          return;
+        }
+        Note("BPF sockmap insert failed for tunnel %" PRId64 ", falling back to userspace", sm_id);
+      } else {
+        Note("BPF tunnel skip: dynamic_cast failed client_vc=%p server_vc=%p", (void *)client_vc, (void *)server_vc);
       }
-      Note("BPF sockmap insert failed for tunnel %" PRId64 ", falling back to userspace", sm_id);
     }
   }
 #endif
