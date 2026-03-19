@@ -33,6 +33,7 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include <sys/utsname.h>
+#include <linux/tcp.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
@@ -240,8 +241,21 @@ BpfSockmapManager::insert_tunnel(int client_fd, int origin_fd, uint64_t tunnel_i
     origin_idx = client_idx + 1;
   }
 
-  Note("BPF insert: cookies client=%" PRIu64 " origin=%" PRIu64 " indices=%u/%u sockmap_fd=%d", client_cookie, origin_cookie,
-       client_idx, origin_idx, sockmap_fd_);
+  // Check socket states before insert
+  {
+    struct tcp_info ti_c = {}, ti_o = {};
+    socklen_t       ti_len = sizeof(ti_c);
+    getsockopt(client_fd, IPPROTO_TCP, TCP_INFO, &ti_c, &ti_len);
+    ti_len = sizeof(ti_o);
+    getsockopt(origin_fd, IPPROTO_TCP, TCP_INFO, &ti_o, &ti_len);
+    int type_c = 0, type_o = 0;
+    socklen_t type_len = sizeof(type_c);
+    getsockopt(client_fd, SOL_SOCKET, SO_TYPE, &type_c, &type_len);
+    type_len = sizeof(type_o);
+    getsockopt(origin_fd, SOL_SOCKET, SO_TYPE, &type_o, &type_len);
+    Note("BPF insert: cookies=%" PRIu64 "/%" PRIu64 " idx=%u/%u sockmap_fd=%d client(state=%u type=%d) origin(state=%u type=%d)",
+         client_cookie, origin_cookie, client_idx, origin_idx, sockmap_fd_, ti_c.tcpi_state, type_c, ti_o.tcpi_state, type_o);
+  }
 
   // Insert both sockets into sockmap
   if (bpf_map_update_elem(sockmap_fd_, &client_idx, &client_fd, BPF_ANY) != 0) {
