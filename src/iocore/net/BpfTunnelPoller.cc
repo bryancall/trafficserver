@@ -31,6 +31,7 @@
 
 #include "iocore/eventsystem/EThread.h"
 #include "iocore/eventsystem/EventProcessor.h"
+#include "iocore/net/Net.h"
 #include "tscore/Diags.h"
 
 #include "bpf/sockmap_tunnel.h"
@@ -48,7 +49,7 @@ DbgCtl dbg_ctl_bpf_poller{"bpf_sockmap_poller"};
  * The ctx pointer is the BpfTunnelPoller instance.
  */
 int
-ringbuf_event_handler(void *ctx, void *data, size_t data_sz)
+ringbuf_event_handler(void * /* ctx ATS_UNUSED */, void *data, size_t data_sz)
 {
   if (data_sz < sizeof(struct tunnel_event)) {
     return 0;
@@ -59,7 +60,8 @@ ringbuf_event_handler(void *ctx, void *data, size_t data_sz)
   if (evt->event == TUNNEL_EVENT_CLOSE) {
     auto info = BpfTunnelRegistry::lookup_by_cookie(evt->cookie);
     if (info) {
-      Dbg(dbg_ctl_bpf_poller, "ring buffer close event for tunnel %" PRIu64 " (cookie %" PRIu64 ")", info->tunnel_id, evt->cookie);
+      Dbg(dbg_ctl_bpf_poller, "ring buffer close event for tunnel %" PRIu64 " (cookie %" PRIu64 ")", info->tunnel_id,
+          static_cast<uint64_t>(evt->cookie));
 
       // Remove from BPF maps
       BpfSockmapManager::remove_tunnel(info->tunnel_id);
@@ -133,7 +135,7 @@ BpfTunnelPoller::stop()
 }
 
 int
-BpfTunnelPoller::mainEvent(int event, Event * /* e ATS_UNUSED */)
+BpfTunnelPoller::mainEvent(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED */)
 {
   drain_ring_buffer();
 
