@@ -126,6 +126,9 @@ static DbgCtl dbg_ctl_ssl_alpn{"ssl_alpn"};
 static DbgCtl dbg_ctl_ssl_early_data{"ssl_early_data"};
 static DbgCtl dbg_ctl_ssl_sni{"ssl_sni"};
 static DbgCtl dbg_ctl_url_rewrite{"url_rewrite"};
+#if TS_USE_BPF_SOCKMAP
+static DbgCtl dbg_ctl_bpf_sockmap{"bpf_sockmap"};
+#endif
 
 static constexpr int sub_header_size = sizeof("Content-type: ") - 1 + 2 + sizeof("Content-range: bytes ") - 1 + 4;
 static constexpr int boundary_size   = 2 + sizeof("RANGE_SEPARATOR") - 1 + 2;
@@ -7439,6 +7442,89 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
 {
   ink_assert(server_entry->vc != nullptr);
 
+#if TS_USE_BPF_SOCKMAP
+  // BPF sockmap fast path: bypass the entire userspace tunnel setup.
+  // Check early — before allocating buffers or setting up tunnel producers/consumers.
+  if (BpfSockmapManager::is_available() && t_state.txn_conf->tunnel_bpf_enabled && send_response_hdr) {
+    auto *client_netvc = dynamic_cast<UnixNetVConnection *>(_ua.get_txn()->get_netvc());
+    auto *server_netvc = dynamic_cast<UnixNetVConnection *>(server_entry->vc);
+
+    if (client_netvc && server_netvc) {
+      int client_fd = client_netvc->get_socket();
+      int server_fd = server_netvc->get_socket();
+
+      // Build and flush the 200 OK response directly to the client socket
+      {
+        MIOBuffer      *resp_buf    = new_MIOBuffer(BUFFER_SIZE_INDEX_4K);
+        int64_t         resp_bytes  = write_response_header_into_buffer(&t_state.hdr_info.client_response, resp_buf);
+        if (initial && initial->read_avail()) {
+          resp_bytes += resp_buf->write(initial, initial->read_avail());
+        }
+        IOBufferReader *resp_reader = resp_buf->alloc_reader();
+        int64_t         avail       = resp_reader->read_avail();
+        while (avail > 0) {
+          const char *data = resp_reader->start();
+          int64_t     len  = resp_reader->block_read_avail();
+          int         n    = ::write(client_fd, data, len);
+          if (n <= 0) {
+            break;
+          }
+          resp_reader->consume(n);
+          avail -= n;
+        }
+        Dbg(dbg_ctl_bpf_sockmap, "flushed response to client");
+        free_MIOBuffer(resp_buf);
+      }
+
+      // Flush any pending client data to origin (proxy protocol, raw buffer)
+      {
+        if (_ua.get_raw_buffer_reader() != nullptr) {
+          int64_t     avail = _ua.get_raw_buffer_reader()->read_avail();
+          const char *data  = _ua.get_raw_buffer_reader()->start();
+          if (avail > 0) {
+            ::write(server_fd, data, avail);
+          }
+          _ua.get_raw_buffer_reader()->dealloc();
+          _ua.set_raw_buffer_reader(nullptr);
+        }
+        // Forward any remaining data from the client's read buffer
+        IOBufferReader *remote = _ua.get_txn()->get_remote_reader();
+        if (remote && remote->read_avail() > 0) {
+          int64_t     avail = remote->read_avail();
+          const char *data  = remote->start();
+          ::write(server_fd, data, avail);
+        }
+      }
+
+      // Insert into BPF sockmap
+      bool inserted = BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id);
+      if (inserted) {
+        Dbg(dbg_ctl_bpf_sockmap, "tunnel %" PRId64 " active via BPF sockmap", sm_id);
+
+        // Mark as tunnel endpoints for metrics
+        _ua.get_entry()->vc->mark_as_tunnel_endpoint();
+        server_entry->vc->mark_as_tunnel_endpoint();
+
+        // Detach VConnections from the HttpSM so they aren't closed when the SM terminates.
+        // The BPF sockmap now owns the data path. The sockets will be closed when the
+        // BPF tunnel poller detects a close event.
+        _ua.get_entry()->vc        = nullptr;
+        _ua.get_entry()->in_tunnel = true;
+        server_entry->vc           = nullptr;
+        server_entry->in_tunnel    = true;
+
+        // Terminate the state machine — the tunnel is now fully managed by BPF.
+        // This follows the pattern used by tunnel_handler() when the tunnel completes.
+        t_state.source = HttpTransact::SOURCE_INTERNAL;
+        terminate_sm   = true;
+        kill_this();
+        return;
+      }
+      Note("BPF sockmap insert failed for tunnel %" PRId64 ", falling back to userspace", sm_id);
+    }
+  }
+#endif
+
   HttpTunnelConsumer *c_ua;
   HttpTunnelConsumer *c_os;
   HttpTunnelProducer *p_ua;
@@ -7537,63 +7623,6 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
 
   _ua.get_entry()->in_tunnel = true;
   server_entry->in_tunnel    = true;
-
-#if TS_USE_BPF_SOCKMAP
-  // Attempt BPF sockmap acceleration for this blind tunnel.
-  // If successful, data flows in kernel space and we skip the userspace tunnel_run() loop.
-  // Only applies when no transforms are active (pure blind tunnel).
-  {
-    bool bpf_available    = BpfSockmapManager::is_available();
-    bool bpf_conf_enabled = t_state.txn_conf->tunnel_bpf_enabled;
-    bool no_transforms    = (this->transform_info.vc == nullptr && this->post_transform_info.vc == nullptr);
-
-    if (!bpf_available || !bpf_conf_enabled || !no_transforms) {
-      Note("BPF tunnel skip: available=%d config_enabled=%d no_transforms=%d", bpf_available, bpf_conf_enabled, no_transforms);
-    } else {
-      // Client VC: get the underlying NetVConnection from the ProxyTransaction
-      auto *client_netvc = dynamic_cast<UnixNetVConnection *>(_ua.get_txn()->get_netvc());
-      // Server VC: server_entry->vc is already a NetVConnection
-      auto *server_netvc = dynamic_cast<UnixNetVConnection *>(server_entry->vc);
-      if (client_netvc && server_netvc) {
-        int client_fd = client_netvc->get_socket();
-        int server_fd = server_netvc->get_socket();
-
-        // Flush pending data before handing off to BPF:
-        // - to_ua_buf has the 200 OK response + any initial server data
-        // - from_ua_buf has any proxy protocol or raw client data
-        {
-          IOBufferReader *to_ua_reader   = to_ua_buf->alloc_reader();
-          IOBufferReader *from_ua_reader = r_from;
-          int64_t         to_ua_avail    = to_ua_reader->read_avail();
-          int64_t         from_ua_avail  = from_ua_reader->read_avail();
-
-          if (to_ua_avail > 0) {
-            // Send 200 OK response to client
-            const char *data = to_ua_reader->start();
-            int         n    = ::write(client_fd, data, to_ua_avail);
-            Note("BPF flushed %" PRId64 " bytes to client (wrote %d)", to_ua_avail, n);
-          }
-          if (from_ua_avail > 0) {
-            // Forward any pending client data to origin
-            const char *data = from_ua_reader->start();
-            int         n    = ::write(server_fd, data, from_ua_avail);
-            Note("BPF flushed %" PRId64 " bytes to origin (wrote %d)", from_ua_avail, n);
-          }
-          to_ua_reader->dealloc();
-        }
-
-        Note("BPF tunnel attempting insert: client_fd=%d server_fd=%d sm_id=%" PRId64, client_fd, server_fd, sm_id);
-        bool inserted = BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id);
-        Note("BPF tunnel insert returned %d for sm_id=%" PRId64, inserted, sm_id);
-        if (inserted) {
-          return;
-        }
-      } else {
-        Note("BPF tunnel skip: cast failed client_netvc=%p server_netvc=%p", (void *)client_netvc, (void *)server_netvc);
-      }
-    }
-  }
-#endif
 
   tunnel.tunnel_run();
 
