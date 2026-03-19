@@ -7558,11 +7558,11 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
         int client_fd = client_netvc->get_socket();
         int server_fd = server_netvc->get_socket();
         Note("BPF tunnel attempting insert: client_fd=%d server_fd=%d sm_id=%" PRId64, client_fd, server_fd, sm_id);
-        if (BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id)) {
-          Note("BPF tunnel %" PRId64 " active — kernel data path", sm_id);
+        bool inserted = BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id);
+        Note("BPF tunnel insert returned %d for sm_id=%" PRId64, inserted, sm_id);
+        if (inserted) {
           return;
         }
-        Note("BPF sockmap insert failed for tunnel %" PRId64 ", falling back to userspace", sm_id);
       } else {
         Note("BPF tunnel skip: cast failed client_netvc=%p server_netvc=%p", (void *)client_netvc, (void *)server_netvc);
       }
