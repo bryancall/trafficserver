@@ -1309,6 +1309,8 @@ static constexpr RecordElement RecordsConfig[] =
 
   {RECT_CONFIG, "proxy.config.http.forward_connect_method", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
   ,
+  {RECT_CONFIG, "proxy.config.http.tunnel.bpf_enabled", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
+  ,
 
   //############
   //#
