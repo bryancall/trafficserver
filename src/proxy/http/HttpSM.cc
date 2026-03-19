@@ -7558,6 +7558,30 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
         int client_fd = client_netvc->get_socket();
         int server_fd = server_netvc->get_socket();
 
+        // Flush pending data before handing off to BPF:
+        // - to_ua_buf has the 200 OK response + any initial server data
+        // - from_ua_buf has any proxy protocol or raw client data
+        {
+          IOBufferReader *to_ua_reader   = to_ua_buf->alloc_reader();
+          IOBufferReader *from_ua_reader = r_from;
+          int64_t         to_ua_avail    = to_ua_reader->read_avail();
+          int64_t         from_ua_avail  = from_ua_reader->read_avail();
+
+          if (to_ua_avail > 0) {
+            // Send 200 OK response to client
+            const char *data = to_ua_reader->start();
+            int         n    = ::write(client_fd, data, to_ua_avail);
+            Note("BPF flushed %" PRId64 " bytes to client (wrote %d)", to_ua_avail, n);
+          }
+          if (from_ua_avail > 0) {
+            // Forward any pending client data to origin
+            const char *data = from_ua_reader->start();
+            int         n    = ::write(server_fd, data, from_ua_avail);
+            Note("BPF flushed %" PRId64 " bytes to origin (wrote %d)", from_ua_avail, n);
+          }
+          to_ua_reader->dealloc();
+        }
+
         Note("BPF tunnel attempting insert: client_fd=%d server_fd=%d sm_id=%" PRId64, client_fd, server_fd, sm_id);
         bool inserted = BpfSockmapManager::insert_tunnel(client_fd, server_fd, sm_id);
         Note("BPF tunnel insert returned %d for sm_id=%" PRId64, inserted, sm_id);
