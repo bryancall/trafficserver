@@ -7515,7 +7515,7 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
 
         // Terminate the state machine — the tunnel is now fully managed by BPF.
         // This follows the pattern used by tunnel_handler() when the tunnel completes.
-        t_state.source = HttpTransact::SOURCE_INTERNAL;
+        t_state.source = HttpTransact::Source_t::INTERNAL;
         terminate_sm   = true;
         kill_this();
         return;
