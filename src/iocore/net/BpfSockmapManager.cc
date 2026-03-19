@@ -251,7 +251,7 @@ BpfSockmapManager::insert_tunnel(int client_fd, int origin_fd, uint64_t tunnel_i
   }
 
   if (bpf_map_update_elem(sockmap_fd_, &origin_idx, &origin_fd, BPF_ANY) != 0) {
-    Dbg(dbg_ctl_bpf, "sockmap insert failed for origin fd %d idx %u: %s", origin_fd, origin_idx, strerror(errno));
+    Note("BPF sockmap insert failed for origin fd %d idx %u: %s (errno %d)", origin_fd, origin_idx, strerror(errno), errno);
     bpf_map_delete_elem(sockmap_fd_, &client_idx);
     error_count_.fetch_add(1, std::memory_order_relaxed);
     return false;
@@ -259,7 +259,7 @@ BpfSockmapManager::insert_tunnel(int client_fd, int origin_fd, uint64_t tunnel_i
 
   // Set up bidirectional pairing: client cookie -> origin index, origin cookie -> client index
   if (bpf_map_update_elem(pair_fd_, &client_cookie, &origin_idx, BPF_ANY) != 0) {
-    Dbg(dbg_ctl_bpf, "sock_pair insert failed for client cookie %" PRIu64 ": %s", client_cookie, strerror(errno));
+    Note("BPF sock_pair insert failed for client cookie %" PRIu64 ": %s (errno %d)", client_cookie, strerror(errno), errno);
     bpf_map_delete_elem(sockmap_fd_, &client_idx);
     bpf_map_delete_elem(sockmap_fd_, &origin_idx);
     error_count_.fetch_add(1, std::memory_order_relaxed);
@@ -267,7 +267,7 @@ BpfSockmapManager::insert_tunnel(int client_fd, int origin_fd, uint64_t tunnel_i
   }
 
   if (bpf_map_update_elem(pair_fd_, &origin_cookie, &client_idx, BPF_ANY) != 0) {
-    Dbg(dbg_ctl_bpf, "sock_pair insert failed for origin cookie %" PRIu64 ": %s", origin_cookie, strerror(errno));
+    Note("BPF sock_pair insert failed for origin cookie %" PRIu64 ": %s (errno %d)", origin_cookie, strerror(errno), errno);
     bpf_map_delete_elem(pair_fd_, &client_cookie);
     bpf_map_delete_elem(sockmap_fd_, &client_idx);
     bpf_map_delete_elem(sockmap_fd_, &origin_idx);
@@ -286,8 +286,8 @@ BpfSockmapManager::insert_tunnel(int client_fd, int origin_fd, uint64_t tunnel_i
   active_tunnels_.fetch_add(1, std::memory_order_relaxed);
   total_tunnels_.fetch_add(1, std::memory_order_relaxed);
 
-  Dbg(dbg_ctl_bpf, "tunnel %" PRIu64 " inserted: client(fd=%d,cookie=%" PRIu64 ",idx=%u) origin(fd=%d,cookie=%" PRIu64 ",idx=%u)",
-      tunnel_id, client_fd, client_cookie, client_idx, origin_fd, origin_cookie, origin_idx);
+  Note("BPF tunnel %" PRIu64 " inserted OK: client(fd=%d,cookie=%" PRIu64 ",idx=%u) origin(fd=%d,cookie=%" PRIu64 ",idx=%u)",
+       tunnel_id, client_fd, client_cookie, client_idx, origin_fd, origin_cookie, origin_idx);
 
   return true;
 }
