@@ -224,6 +224,7 @@ BpfSockmapManager::insert_tunnel(int client_fd, int origin_fd, uint64_t tunnel_i
   uint64_t client_cookie = get_socket_cookie(client_fd);
   uint64_t origin_cookie = get_socket_cookie(origin_fd);
   if (client_cookie == 0 || origin_cookie == 0) {
+    Note("BPF insert: cookie failed client=%" PRIu64 " origin=%" PRIu64, client_cookie, origin_cookie);
     error_count_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
@@ -234,15 +235,17 @@ BpfSockmapManager::insert_tunnel(int client_fd, int origin_fd, uint64_t tunnel_i
 
   // Wrap around if we hit the max
   if (origin_idx >= SOCKMAP_MAX_ENTRIES) {
-    // Reset and try again — this is racy but acceptable for index reuse
     next_index_.store(0, std::memory_order_relaxed);
     client_idx = next_index_.fetch_add(2, std::memory_order_relaxed);
     origin_idx = client_idx + 1;
   }
 
+  Note("BPF insert: cookies client=%" PRIu64 " origin=%" PRIu64 " indices=%u/%u sockmap_fd=%d", client_cookie, origin_cookie,
+       client_idx, origin_idx, sockmap_fd_);
+
   // Insert both sockets into sockmap
   if (bpf_map_update_elem(sockmap_fd_, &client_idx, &client_fd, BPF_ANY) != 0) {
-    Dbg(dbg_ctl_bpf, "sockmap insert failed for client fd %d idx %u: %s", client_fd, client_idx, strerror(errno));
+    Note("BPF sockmap insert failed for client fd %d idx %u: %s (errno %d)", client_fd, client_idx, strerror(errno), errno);
     error_count_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
