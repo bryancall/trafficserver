@@ -1110,6 +1110,8 @@ HttpConfig::startup()
 
   HttpEstablishStaticConfigByte(c.oride.allow_half_open, "proxy.config.http.allow_half_open");
 
+  HttpEstablishStaticConfigByte(c.oride.tunnel_bpf_enabled, "proxy.config.http.tunnel.bpf_enabled");
+
   // Body factory
   HttpEstablishStaticConfigByte(c.oride.response_suppression_mode, "proxy.config.body_factory.response_suppression_mode");
 
@@ -1414,6 +1416,8 @@ HttpConfig::reconfigure()
   params->oride.srv_enabled = m_master.oride.srv_enabled;
 
   params->oride.allow_half_open = m_master.oride.allow_half_open;
+
+  params->oride.tunnel_bpf_enabled = m_master.oride.tunnel_bpf_enabled;
 
   params->oride.response_suppression_mode = m_master.oride.response_suppression_mode;
 
