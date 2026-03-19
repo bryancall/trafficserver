@@ -241,21 +241,31 @@ BpfSockmapManager::insert_tunnel(int client_fd, int origin_fd, uint64_t tunnel_i
     origin_idx = client_idx + 1;
   }
 
-  // Check socket states before insert
-  {
+  // Wait for both sockets to reach TCP_ESTABLISHED (max ~10ms)
+  // ATS may call this before the origin connect() fully completes.
+  for (int attempt = 0; attempt < 100; attempt++) {
     struct tcp_info ti_c = {}, ti_o = {};
     socklen_t       ti_len = sizeof(ti_c);
     getsockopt(client_fd, IPPROTO_TCP, TCP_INFO, &ti_c, &ti_len);
     ti_len = sizeof(ti_o);
     getsockopt(origin_fd, IPPROTO_TCP, TCP_INFO, &ti_o, &ti_len);
-    int type_c = 0, type_o = 0;
-    socklen_t type_len = sizeof(type_c);
-    getsockopt(client_fd, SOL_SOCKET, SO_TYPE, &type_c, &type_len);
-    type_len = sizeof(type_o);
-    getsockopt(origin_fd, SOL_SOCKET, SO_TYPE, &type_o, &type_len);
-    Note("BPF insert: cookies=%" PRIu64 "/%" PRIu64 " idx=%u/%u sockmap_fd=%d client(state=%u type=%d) origin(state=%u type=%d)",
-         client_cookie, origin_cookie, client_idx, origin_idx, sockmap_fd_, ti_c.tcpi_state, type_c, ti_o.tcpi_state, type_o);
+
+    if (ti_c.tcpi_state == 1 && ti_o.tcpi_state == 1) { // TCP_ESTABLISHED = 1
+      if (attempt > 0) {
+        Note("BPF insert: sockets reached ESTABLISHED after %d attempts", attempt);
+      }
+      break;
+    }
+    if (attempt == 99) {
+      Note("BPF insert: timeout waiting for ESTABLISHED (client=%u origin=%u)", ti_c.tcpi_state, ti_o.tcpi_state);
+      error_count_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    usleep(100); // 100μs per attempt, max ~10ms total
   }
+
+  Note("BPF insert: cookies=%" PRIu64 "/%" PRIu64 " idx=%u/%u sockmap_fd=%d", client_cookie, origin_cookie, client_idx, origin_idx,
+       sockmap_fd_);
 
   // Insert both sockets into sockmap
   if (bpf_map_update_elem(sockmap_fd_, &client_idx, &client_fd, BPF_ANY) != 0) {
