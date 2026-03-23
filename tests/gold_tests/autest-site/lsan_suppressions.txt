@@ -1,7 +1,7 @@
 # LSAN suppression file for ATS autest suite.
-# Suppresses known exit-time leaks from OpenSSL and ATS global caches.
+# Only verified leaks that cannot be fixed in ATS are listed here.
 
-# OpenSSL internal allocations (not freed by OpenSSL at exit)
+# OpenSSL internal allocations (external library, not freed at exit)
 leak:CRYPTO_malloc
 leak:CRYPTO_zalloc
 leak:asn1_enc_save
@@ -11,55 +11,6 @@ leak:BUF_MEM_grow
 leak:x509_name_canon
 leak:asn1_primitive_new
 
-# ATS SSL session cache entries (global cache not drained at exit)
-leak:SSLOriginSessionCache::insert_session
-leak:SSLOriginSession
-
-# ATS static config strings (intentional exit-time leaks)
+# ATS exit-time leaks (cleanup exists but ConfigProcessor may not invoke at exit)
 leak:SSLConfigParams::initialize
-
-# Plugin registration strings (not freed at exit)
 leak:TSPluginRegister
-
-# Example plugin: client_context_dump allocates via malloc in callback
-leak:CB_context_dump
-
-# header_rewrite plugin: URL string from OperatorSetBodyFrom not freed
-leak:createRequestString
-
-# TLS tunnel destination string (not freed at exit)
-leak:TLSTunnelSupport::set_tunnel_destination
-
-# origin_server_auth / s3_auth plugin: config cache not freed at exit
-leak:ConfigCache::get
-
-# traffic_dump plugin: AIO callbacks not freed at exit
-leak:new_AIOCallback
-
-# txn_box plugin: config expression parsing allocations (not freed at exit)
-leak:Config::parse_composite_expr
-leak:Config::parse_expr_with_mods
-leak:Mod_concat::load
-leak:Mod_url_encode::load
-leak:Mod_url_decode::load
-
-# healthchecks plugin: config structs not freed at exit
-leak:parse_configs
-
-# IpAllow (remap_acl): IP allow table not freed at exit
-leak:IpAllow::reconfigure
-leak:IpAllow::YAMLLoadEntry
-
-# NetAccept / HttpProxyServer: accept objects not freed at exit
-leak:SSLNetAccept::clone
-leak:NetAccept::clone
-leak:SSLNetProcessor::createNetAccept
-leak:UnixNetProcessor::createNetAccept
-leak:MakeHttpProxyAcceptor
-leak:UnixNetProcessor::accept_internal
-
-# Range transform: event system objects not freed at exit
-leak:TransformProcessor::range_transform
-
-# stale_response plugin: config string not freed at exit
-leak:_xstrdup
