@@ -120,6 +120,13 @@ Variables.AtsTestPluginsDir = os.path.join(Variables.BuildRoot, 'tests', 'tools'
 Variables.AtsBuildGoldTestsDir = os.path.join(Variables.BuildRoot, 'tests', 'gold_tests')
 Variables.CurlUds = Arguments.curl_uds
 
+# Set LSAN suppression file to suppress known OpenSSL exit-time leaks
+# when running under AddressSanitizer. This applies to all test processes
+# (traffic_server, test helpers, etc.).
+lsan_supp = os.path.join(repo_root, 'tests', 'gold_tests', 'autest-site', 'lsan_suppressions.txt')
+if os.path.exists(lsan_supp):
+    ENV['LSAN_OPTIONS'] = f'suppressions={lsan_supp}'
+
 # modify delay times as we always have to kill Trafficserver
 # no need to wait
 Variables.Autest.StopProcessLongDelaySeconds = 0
