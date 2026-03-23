@@ -1,10 +1,3 @@
-# leaks in test_X509HostnameValidator
-leak:libcrypto.so.1.1
-# for OpenSSL 1.0.2:
-leak:CRYPTO_malloc
-leak:CRYPTO_realloc
-leak:ConsCell
-# PR#10295
-leak:pcre_jit_stack_alloc
-# PR#10541
-leak:test_http_hdr_print_and_copy_aux
+# No suppressions currently needed.
+# All previous entries were for obsolete libraries (OpenSSL 1.0.2, PCRE)
+# or have been fixed with proper cleanup.
