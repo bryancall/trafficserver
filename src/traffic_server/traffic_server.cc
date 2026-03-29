@@ -1049,6 +1049,7 @@ cmd_verify(char * /* cmd ATS_UNUSED */)
 
   // TODO: Add more config validation..
 
+  plugin_cleanup();
   ::exit(exitStatus);
 
   return 0;
@@ -2418,6 +2419,7 @@ main(int /* argc ATS_UNUSED */, const char **argv)
 #endif
   }
 
+  plugin_cleanup();
   delete main_thread;
 
 #if TS_HAS_TESTS

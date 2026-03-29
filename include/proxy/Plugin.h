@@ -55,6 +55,7 @@ extern PluginRegInfo     *plugin_reg_current;
 
 bool plugin_init(bool validateOnly = false);
 bool plugin_dso_load(const char *path, void *&handle, void *&init, std::string &error);
+void plugin_cleanup();
 
 /** Abstract interface class for plugin based continuations.
 

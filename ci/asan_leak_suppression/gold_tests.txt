@@ -1,0 +1,10 @@
+# TSPluginRegister() uses ats_strdup for plugin_name, vendor_name,
+# support_email. These are intentionally never freed because plugins
+# are permanent (loaded for the lifetime of the process).
+# Proper cleanup is in plugin_cleanup() but autest kills ATS with
+# SIGKILL so the shutdown path does not run.
+leak:TSPluginRegister
+
+# TSRPCRegister() allocates an RPCRegistrationInfo that is
+# intentionally never freed because RPC handlers are permanent.
+leak:TSRPCRegister

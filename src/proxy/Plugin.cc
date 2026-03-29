@@ -376,3 +376,16 @@ plugin_init(bool validateOnly)
   }
   return retVal;
 }
+
+void
+plugin_cleanup()
+{
+  PluginRegInfo *plugin = plugin_reg_list.head;
+  while (plugin) {
+    PluginRegInfo *next = plugin->link.next;
+    plugin->plugin_registered = false;
+    plugin_reg_list.remove(plugin);
+    delete plugin;
+    plugin = next;
+  }
+}
