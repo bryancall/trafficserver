@@ -67,19 +67,22 @@ def HasLegacyTLSSupport(self):
     always disable both legacy versions together. If TLSv1.0 is unavailable,
     TLSv1.1 will be too.
 
-    The check connects to localhost on a closed port to avoid any external
-    network dependency. A "connection refused" error means the TLS protocol
-    was available but nothing was listening; "no protocols available" means
-    the crypto-policy blocked TLSv1.0 entirely.
+    The check connects to localhost port 22 (SSH) so that TCP connects and
+    OpenSSL actually attempts the TLS handshake. Connecting to a closed port
+    would fail at the TCP level with "Connection refused" before OpenSSL
+    checks protocol availability, masking the "no protocols available" error
+    that indicates legacy TLS is disabled by crypto-policy.
     """
 
     def check_tls1_support():
         try:
-            # Connect to localhost on a port nothing is listening on.
-            # This avoids external network dependency while still detecting
-            # whether the crypto-policy allows TLSv1.0.
+            # Connect to localhost port 22 (SSH). The TCP connection succeeds,
+            # forcing OpenSSL to attempt the TLS handshake. If TLSv1 is
+            # disabled by crypto-policy, we get "no protocols available".
+            # If TLSv1 is available, we get a different error (SSH doesn't
+            # speak TLS) which still indicates the protocol was attempted.
             result = subprocess.run(
-                ['openssl', 's_client', '-tls1', '-connect', '127.0.0.1:1'],
+                ['openssl', 's_client', '-tls1', '-connect', '127.0.0.1:22'],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -89,15 +92,15 @@ def HasLegacyTLSSupport(self):
             # "no protocols available" means TLSv1 is disabled by crypto-policy
             if 'no protocols available' in output:
                 return False
-            # Connection refused or other errors mean TLSv1 was attempted
-            # (the protocol is available, just no server listening)
+            # "Connection refused" means port 22 isn't listening, so we
+            # couldn't test. Assume legacy TLS is not available (safer).
+            if 'Connection refused' in output:
+                return False
+            # Any other outcome means TLSv1 was attempted (protocol available)
             return True
         except subprocess.TimeoutExpired:
-            # Timeout on localhost shouldn't happen, but if it does,
-            # assume TLSv1 is not available (safer than false positive)
             return False
         except Exception:
-            # If we can't determine, assume TLSv1 is not available (safer)
             return False
 
     return self.Condition(check_tls1_support, "System does not support legacy TLS protocols (TLSv1.0/TLSv1.1)")
