@@ -18,3 +18,4 @@
 add_autest_plugin(jsonrpc_plugin_handler_test jsonrpc_plugin_handler_test.cc)
 
 target_link_libraries(jsonrpc_plugin_handler_test PRIVATE jsonrpc_protocol libswoc::libswoc)
+target_link_options(jsonrpc_plugin_handler_test PRIVATE "LINKER:--exclude-libs,libtsutil.a")
