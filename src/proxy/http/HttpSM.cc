@@ -7617,6 +7617,8 @@ HttpSM::setup_client_request_plugin_agents(HttpTunnelProducer *p, int num_header
 inline void
 HttpSM::transform_cleanup(TSHttpHookID hook, HttpTransformInfo *info)
 {
+  // Internal-body bypass can skip transform tunnel setup, leaving no transform
+  // entry to clean up. In that case there is nothing safe/useful to close here.
   if (info->entry == nullptr) {
     return;
   }
@@ -7712,6 +7714,9 @@ HttpSM::kill_this()
     if (hooks_set) {
       bool bypassed_response_transform =
         t_state.api_info.cache_untransformed && t_state.internal_msg_buffer && !t_state.api_server_request_body_set;
+      // If we intentionally bypassed response transforms for internal-body
+      // transfer, transform_info may be partially detached; skip cleanup in this
+      // specific case to avoid dereferencing stale transform state.
       if (!bypassed_response_transform) {
         transform_cleanup(TS_HTTP_RESPONSE_TRANSFORM_HOOK, &transform_info);
       }

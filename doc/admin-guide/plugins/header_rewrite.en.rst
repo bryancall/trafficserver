@@ -1177,7 +1177,8 @@ set-body
 
   set-body <text>
 
-Sets the body to ``<text>``. Can also be used to delete a body with ``""``.
+Sets the body to ``<text>``.
+For internally generated/synthetic responses, ``set-body ""`` can be used to clear that replacement body.
 
 For origin response replacement, ``set-body`` is supported at both
 ``READ_RESPONSE_HDR_HOOK`` and ``SEND_RESPONSE_HDR_HOOK``. Prefer
@@ -1192,9 +1193,9 @@ response body tunneling starts.
    ``set-body ""`` clears the internal replacement body, but does not suppress an
    origin response body on this hook; use a non-empty replacement value when
    sanitizing origin responses.
-   The gold tests cover origin replacement for both hooks with and without a
-   response transform plugin. The no-transform matrix runs with HTTP cache
-   disabled and includes repeated-URL cache-bypass probes.
+   The gold tests cover origin replacement for both hooks with and without an
+   active response transform. The transform-inactive matrix runs with HTTP cache
+   disabled and includes repeated-URL probes to verify deterministic replacement.
 
 set-body-from
 ~~~~~~~~~~~~~

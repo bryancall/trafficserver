@@ -18,7 +18,7 @@ meta:
   version: "1.0"
 
 autest:
-  description: 'Test set-body origin replacement without response transforms'
+  description: 'Test set-body origin replacement (transform plugin loaded; selected paths keep it inactive)'
 
   dns:
     name: 'dns'
@@ -47,7 +47,7 @@ autest:
       proxy.config.diags.debug.tags: 'http|header_rewrite'
 
     remap_config:
-      # Block 1: READ_RESPONSE hook replacement path (no transform plugin).
+      # Block 1: READ_RESPONSE hook replacement path with transform inactive (non-200 response).
       - from: "http://www.example.com/set_body_read_resp_403/"
         to: "http://backend.ex:{SERVER_HTTP_PORT}/origin_read_403/"
         plugins:
@@ -55,7 +55,7 @@ autest:
             args:
               - "rules/rule_set_body_origin_read_resp.conf"
 
-      # Block 2: SEND_RESPONSE hook replacement path (no transform plugin).
+      # Block 2: SEND_RESPONSE hook replacement path with transform inactive (non-200 response).
       - from: "http://www.example.com/set_body_send_resp_403/"
         to: "http://backend.ex:{SERVER_HTTP_PORT}/origin_send_403/"
         plugins:
@@ -63,7 +63,7 @@ autest:
             args:
               - "rules/rule_set_body_origin_send_resp.conf"
 
-      # Block 3a: cache-bypass probe for READ_RESPONSE hook (same URL twice).
+      # Block 3a: repeated-URL probe for READ_RESPONSE hook (same URL twice, transform inactive).
       - from: "http://www.example.com/cache_probe_read/"
         to: "http://backend.ex:{SERVER_HTTP_PORT}/cache_probe_read/"
         plugins:
@@ -71,7 +71,7 @@ autest:
             args:
               - "rules/rule_set_body_origin_read_resp.conf"
 
-      # Block 3b: cache-bypass probe for SEND_RESPONSE hook (same URL twice).
+      # Block 3b: repeated-URL probe for SEND_RESPONSE hook (same URL twice, transform inactive).
       - from: "http://www.example.com/cache_probe_send/"
         to: "http://backend.ex:{SERVER_HTTP_PORT}/cache_probe_send/"
         plugins:
@@ -160,7 +160,7 @@ sessions:
         size: 9
         data: "Sanitized"
 
-  # Block 3a verification: cache-bypass probe for READ_RESPONSE.
+  # Block 3a verification: repeated-URL probe for READ_RESPONSE.
   # First response on repeated URL.
   - client-request:
       method: "GET"
@@ -191,7 +191,7 @@ sessions:
         size: 9
         data: "Sanitized"
 
-  # Block 3a verification: cache-bypass probe for READ_RESPONSE.
+  # Block 3a verification: repeated-URL probe for READ_RESPONSE.
   # Second response on repeated URL should still be replaced.
   # Keep this as non-200 so null_transform does not engage.
   - client-request:
@@ -223,7 +223,7 @@ sessions:
         size: 9
         data: "Sanitized"
 
-  # Block 3b verification: cache-bypass probe for SEND_RESPONSE.
+  # Block 3b verification: repeated-URL probe for SEND_RESPONSE.
   # First response on repeated URL.
   - client-request:
       method: "GET"
@@ -254,7 +254,7 @@ sessions:
         size: 9
         data: "Sanitized"
 
-  # Block 3b verification: cache-bypass probe for SEND_RESPONSE.
+  # Block 3b verification: repeated-URL probe for SEND_RESPONSE.
   # Second response on repeated URL should still be replaced.
   # Keep this as non-200 so null_transform does not engage.
   - client-request:
@@ -312,6 +312,7 @@ sessions:
       headers:
         fields:
         - [ Content-Length, { value: "9", as: equal } ]
+        - [ Content-Type, { value: "text/html", as: equal } ]
       content:
         size: 9
         data: "Sanitized"
@@ -342,6 +343,7 @@ sessions:
       headers:
         fields:
         - [ Content-Length, { value: "9", as: equal } ]
+        - [ Content-Type, { value: "text/html", as: equal } ]
       content:
         size: 9
         data: "Sanitized"
