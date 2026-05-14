@@ -861,6 +861,14 @@ SSLNetVConnection::SSLNetVConnection()
 void
 SSLNetVConnection::do_io_close(int lerrno)
 {
+  // Finding #167: stop any async-handshake eventfd before the VC is closed.
+  // If WANT_ASYNC was registered the eventfd is wired into the poller with
+  // `this` as the EventIO target. Without this stop() the SSLNetVConnection
+  // can be freed while the eventfd still has a live epoll registration; when
+  // the OpenSSL async job completes the poller wakes on freed memory.
+  if (async_ep.fd >= 0) {
+    async_ep.stop();
+  }
   if (this->ssl != nullptr) {
     if (get_context() == NET_VCONNECTION_OUT) {
       callHooks(TS_EVENT_VCONN_OUTBOUND_CLOSE);
@@ -990,6 +998,14 @@ SSLNetVConnection::clear()
 
   hookOpRequested = SslVConnOp::SSL_HOOK_OP_DEFAULT;
   free_handshake_buffers();
+
+  // Finding #167: defense in depth. If we reach clear() with the async eventfd
+  // still registered (handshake-failure path, races with do_io_close), tear it
+  // down here so the EventIO is not left pointing at memory that is about to
+  // be reused by the freelist.
+  if (async_ep.fd >= 0) {
+    async_ep.stop();
+  }
 
   super::clear();
 }
