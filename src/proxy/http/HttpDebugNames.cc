@@ -415,8 +415,8 @@ HttpDebugNames::get_action_name(HttpTransact::StateMachineAction_t e)
   case HttpTransact::StateMachineAction_t::INTERNAL_CACHE_UPDATE_HEADERS:
     return ("StateMachineAction_t::INTERNAL_CACHE_UPDATE_HEADERS");
 
-  case HttpTransact::StateMachineAction_t::SEND_ERROR_CACHE_NOOP:
-    return ("StateMachineAction_t::SEND_ERROR_CACHE_NOOP");
+  case HttpTransact::StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP:
+    return ("StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP");
 
   case HttpTransact::StateMachineAction_t::SERVE_FROM_CACHE:
     return ("StateMachineAction_t::SERVE_FROM_CACHE");

@@ -1613,6 +1613,15 @@ plugins required to work with sni_routing.
 void
 HttpSM::handle_api_return()
 {
+  // If a plugin called TSHttpTxnResponseBodyOverride() in the hook callback that
+  // just returned, route this transaction to internal transfer. Fires for ANY
+  // API hook exit (pre-origin or post-origin), making pre-origin short-circuit
+  // work uniformly with post-origin response override.
+  if (should_divert_to_internal_body()) {
+    divert_to_internal_response();
+    return;
+  }
+
   switch (t_state.api_next_action) {
   case HttpTransact::StateMachineAction_t::API_SM_START: {
     NetVConnection *netvc        = _ua.get_txn()->get_netvc();
@@ -1749,7 +1758,7 @@ HttpSM::handle_api_return()
   case HttpTransact::StateMachineAction_t::INTERNAL_CACHE_NOOP:
   case HttpTransact::StateMachineAction_t::INTERNAL_CACHE_DELETE:
   case HttpTransact::StateMachineAction_t::INTERNAL_CACHE_UPDATE_HEADERS:
-  case HttpTransact::StateMachineAction_t::SEND_ERROR_CACHE_NOOP: {
+  case HttpTransact::StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP: {
     setup_internal_transfer(&HttpSM::tunnel_handler);
     break;
   }
@@ -7122,6 +7131,67 @@ HttpSM::setup_100_continue_transfer()
 
 //////////////////////////////////////////////////////////////////////////
 //
+//  HttpSM::should_divert_to_internal_body()
+//
+//  True when a plugin called TSHttpTxnResponseBodyOverride() in the just-returned
+//  hook callback. Single explicit signal — t_state.api_owns_response_body.
+//
+//  The plugin_tunnel == nullptr guard excludes TSHttpConnect intercepts.
+//  The next_action != SEND_INTERNAL_CACHE_NOOP guard breaks the recursion that
+//  occurs when setup_error_transfer() re-fires API_SEND_RESPONSE_HDR via
+//  do_api_callout(); by then next_action is already SEND_INTERNAL_CACHE_NOOP.
+//
+bool
+HttpSM::should_divert_to_internal_body() const
+{
+  return t_state.api_owns_response_body && plugin_tunnel == nullptr &&
+         t_state.next_action != HttpTransact::StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP;
+}
+
+//  HttpSM::divert_to_internal_response()
+//
+//  Route this transaction into setup_internal_transfer via the existing
+//  SEND_INTERNAL_CACHE_NOOP state machine path. Cleanup of any in-flight
+//  transform, cache write VC, and server session happens at the entry handler
+//  via cleanup_for_internal_response().
+//
+void
+HttpSM::divert_to_internal_response()
+{
+  SMDbg(dbg_ctl_http, "plugin owns response, diverting to internal transfer");
+  t_state.next_action = HttpTransact::StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP;
+  set_next_state();
+}
+
+//  HttpSM::cleanup_for_internal_response()
+//
+//  Idempotent, nullptr-safe cleanup before serving an internally-buffered
+//  response. For the existing genuine-error call sites (auth fail, DNS error,
+//  parent fail, body factory error pages) all the fields are already null and
+//  every branch is a no-op. For the API-override case (the plugin called
+//  TSHttpTxnResponseBodyOverride() from a response-stage hook) the fields may
+//  be populated and need to be torn down before the substituted body is sent.
+//
+void
+HttpSM::cleanup_for_internal_response()
+{
+  t_state.cache_info.action = HttpTransact::CacheAction_t::NO_ACTION;
+  if (cache_sm.cache_write_vc != nullptr) {
+    cache_sm.abort_write();
+  }
+  if (transform_cache_sm.cache_write_vc != nullptr) {
+    transform_cache_sm.abort_write();
+  }
+  if (transform_info.entry != nullptr) {
+    vc_table.cleanup_entry(transform_info.entry);
+    transform_info.entry = nullptr;
+  }
+  transform_info.vc = nullptr;
+  if (server_entry != nullptr && server_entry->in_tunnel == false) {
+    release_server_session();
+  }
+}
+
 //  HttpSM::setup_error_transfer()
 //
 //  The proxy has generated an error message which it
@@ -7140,6 +7210,10 @@ HttpSM::setup_100_continue_transfer()
 void
 HttpSM::setup_error_transfer()
 {
+  // Tear down any in-flight transform, cache-write VC, or server session.
+  // Idempotent / nullptr-safe for genuine-error paths where these are null.
+  cleanup_for_internal_response();
+
   if (body_factory->is_response_suppressed(&t_state) || t_state.internal_msg_buffer ||
       is_response_body_precluded(t_state.http_return_code)) {
     // Since we need to send the error message, call the API
@@ -8163,7 +8237,7 @@ HttpSM::set_next_state()
     do_remap_request(true); /* run inline */
     SMDbg(dbg_ctl_url_rewrite, "completed inline remapping request");
     t_state.url_remap_success = remapProcessor.finish_remap(&t_state, m_remap);
-    if (t_state.next_action == HttpTransact::StateMachineAction_t::SEND_ERROR_CACHE_NOOP &&
+    if (t_state.next_action == HttpTransact::StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP &&
         t_state.transact_return_point == nullptr) {
       // It appears that we can now set the next_action to error and transact_return_point to nullptr when
       // going through do_remap_request presumably due to a plugin setting an error.  In that case, it seems
@@ -8433,7 +8507,7 @@ HttpSM::set_next_state()
     break;
   }
 
-  case HttpTransact::StateMachineAction_t::SEND_ERROR_CACHE_NOOP: {
+  case HttpTransact::StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP: {
     setup_error_transfer();
     break;
   }

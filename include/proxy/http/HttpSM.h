@@ -445,6 +445,22 @@ private:
   void                setup_internal_transfer(HttpSMHandler handler);
   void                setup_error_transfer();
 
+  // True when a plugin called TSHttpTxnResponseBodyOverride() and the SM should
+  // route this transaction to internal transfer at the next API hook exit.
+  // The single primary signal; defensive guards exclude TSHttpConnect intercepts
+  // and the recursion that would otherwise occur via setup_error_transfer().
+  bool should_divert_to_internal_body() const;
+
+  // Route this transaction into setup_internal_transfer via SEND_INTERNAL_CACHE_NOOP.
+  // Cleanup of any in-flight transform / cache write / server session happens
+  // inside setup_error_transfer (via cleanup_for_internal_response).
+  void divert_to_internal_response();
+
+  // Idempotent, nullptr-safe cleanup before serving an internally-buffered
+  // response. No-op for genuine-error call sites where transform/cache/server
+  // state is already null. Called from setup_error_transfer at entry.
+  void cleanup_for_internal_response();
+
   /** Prepare for sending both the 100 Continue and the second response header.
    *
    * This function sets up the tunnel to send the 100 Continue response and

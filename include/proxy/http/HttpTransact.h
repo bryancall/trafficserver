@@ -401,7 +401,7 @@ public:
     INTERNAL_CACHE_UPDATE_HEADERS,
     INTERNAL_CACHE_WRITE,
     INTERNAL_100_RESPONSE,
-    SEND_ERROR_CACHE_NOOP,
+    SEND_INTERNAL_CACHE_NOOP,
 
     WAIT_FOR_FULL_BODY,
     REQUEST_BUFFER_READ_COMPLETE,
@@ -762,6 +762,11 @@ public:
     int64_t internal_msg_buffer_size                = 0;       // out
     int64_t internal_msg_buffer_fast_allocator_size = -1;
 
+    // Set by TSHttpTxnResponseBodyOverride(): the plugin explicitly owns the
+    // response body for this transaction. The SM checks this at every API hook
+    // exit and diverts to internal transfer when set. Single explicit signal.
+    bool api_owns_response_body = false;
+
     int  scheme                    = -1;     // out
     int  next_hop_scheme           = scheme; // out
     int  orig_scheme               = scheme; // pre-mapped scheme
@@ -935,6 +940,7 @@ public:
         internal_msg_buffer = nullptr;
       }
       internal_msg_buffer_size = 0;
+      api_owns_response_body   = false;
     }
 
     ProxyProtocol pp_info;

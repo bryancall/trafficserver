@@ -51,6 +51,7 @@
 #include "proxy/PoolableSession.h"
 #include "proxy/http/HttpSM.h"
 #include "proxy/http/HttpConfig.h"
+#include "proxy/http/HttpTransactHeaders.h"
 #include "proxy/http/OverridableConfigDefs.h"
 #include "proxy/PluginHttpConnect.h"
 #include "../iocore/net/P_Net.h"
@@ -4961,7 +4962,56 @@ TSHttpTxnServerPacketDscpSet(TSHttpTxn txnp, int dscp)
   return TS_SUCCESS;
 }
 
-// Set the body, or, if you provide a null buffer, clear the body message
+// Build a fresh response for this transaction, replacing whatever ATS would
+// otherwise send. Resets the response to a clean slate so origin-leaked headers
+// do not propagate to the client. See ts.h for full semantics.
+void
+TSHttpTxnResponseBodyOverride(TSHttpTxn txnp, TSHttpStatus status, char *buf, int64_t buflength, char *mimetype)
+{
+  sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
+  sdk_assert(buflength >= 0);
+  sdk_assert(static_cast<int>(status) >= 100 && static_cast<int>(status) < 1000);
+
+  HttpSM              *sm = reinterpret_cast<HttpSM *>(txnp);
+  HttpTransact::State *s  = &(sm->t_state);
+
+  // 1. Replace the buffered response body. setup_internal_transfer will stream
+  //    this buffer to the client.
+  s->free_internal_msg_buffer();
+  ats_free(s->internal_msg_buffer_type);
+  s->internal_msg_buffer                     = buf;
+  s->internal_msg_buffer_size                = buf ? static_cast<size_t>(buflength) : 0;
+  s->internal_msg_buffer_type                = mimetype;
+  s->internal_msg_buffer_fast_allocator_size = -1;
+
+  // 2. Mark the response as plugin-owned. The single explicit signal the SM
+  //    checks at every API hook exit to decide whether to divert.
+  s->api_owns_response_body = (buf != nullptr);
+
+  // 3. Build a fresh client_response from scratch. client_response is the
+  //    canonical "what we send to the client" header. Any prior contents
+  //    (origin headers, partial state from a transform path, etc.) are wiped.
+  //    Use fields_clear() rather than destroy/create to avoid memory leaks
+  //    (matches the HttpTransact build_response pattern at HttpTransact.cc:~1791).
+  HTTPHdr &resp = s->hdr_info.client_response;
+  if (resp.valid()) {
+    resp.fields_clear();
+  }
+  HTTPStatus  http_status   = static_cast<HTTPStatus>(status);
+  const char *reason_phrase = http_hdr_reason_lookup(http_status);
+  if (reason_phrase == nullptr) {
+    reason_phrase = "";
+  }
+  HttpTransactHeaders::build_base_response(&resp, http_status, reason_phrase, static_cast<int>(strlen(reason_phrase)),
+                                           s->current.now);
+  if (mimetype != nullptr) {
+    resp.value_set(static_cast<std::string_view>(MIME_FIELD_CONTENT_TYPE), std::string_view{mimetype, strlen(mimetype)});
+  }
+}
+
+// Deprecated. Delegates to TSHttpTxnResponseBodyOverride. Reads the currently-set
+// status (origin's, or plugin's prior TSHttpHdrStatusSet) and passes it through,
+// preserving the historical "set body, don't touch status" contract.
 void
 TSHttpTxnErrorBodySet(TSHttpTxn txnp, char *buf, size_t buflength, char *mimetype)
 {
@@ -4970,15 +5020,14 @@ TSHttpTxnErrorBodySet(TSHttpTxn txnp, char *buf, size_t buflength, char *mimetyp
   HttpSM              *sm = reinterpret_cast<HttpSM *>(txnp);
   HttpTransact::State *s  = &(sm->t_state);
 
-  // Cleanup anything already set.
-  s->free_internal_msg_buffer();
-  ats_free(s->internal_msg_buffer_type);
+  HTTPStatus current_status = HTTPStatus::INTERNAL_SERVER_ERROR;
+  if (s->hdr_info.client_response.valid()) {
+    current_status = s->hdr_info.client_response.status_get();
+  } else if (s->hdr_info.server_response.valid()) {
+    current_status = s->hdr_info.server_response.status_get();
+  }
 
-  s->internal_msg_buffer                     = buf;
-  s->internal_msg_buffer_size                = buf ? buflength : 0;
-  s->internal_msg_buffer_fast_allocator_size = -1;
-
-  s->internal_msg_buffer_type = mimetype;
+  TSHttpTxnResponseBodyOverride(txnp, static_cast<TSHttpStatus>(current_status), buf, static_cast<int64_t>(buflength), mimetype);
 }
 
 char *

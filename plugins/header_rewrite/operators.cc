@@ -813,6 +813,7 @@ void
 OperatorSetBody::initialize_hooks()
 {
   add_allowed_hook(TS_REMAP_PSEUDO_HOOK);
+  add_allowed_hook(TS_HTTP_READ_RESPONSE_HDR_HOOK);
   add_allowed_hook(TS_HTTP_SEND_RESPONSE_HDR_HOOK);
 }
 
@@ -826,7 +827,23 @@ OperatorSetBody::exec(const Resources &res) const
   if (!value.empty()) {
     msg = TSstrdup(value.c_str());
   }
-  TSHttpTxnErrorBodySet(res.state.txnp, msg, value.size(), nullptr);
+
+  // Read the current response status (origin's, or whatever the plugin pipeline
+  // has set so far) and pass it through to the new API, so set-body preserves
+  // the response status. To change the status, use the set-status operator
+  // before set-body in the same rule.
+  TSHttpStatus current_status = TS_HTTP_STATUS_INTERNAL_SERVER_ERROR;
+  TSMBuffer    bufp           = nullptr;
+  TSMLoc       hdr_loc        = nullptr;
+  if (TSHttpTxnClientRespGet(res.state.txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
+    current_status = TSHttpHdrStatusGet(bufp, hdr_loc);
+    TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
+  } else if (TSHttpTxnServerRespGet(res.state.txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
+    current_status = TSHttpHdrStatusGet(bufp, hdr_loc);
+    TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
+  }
+
+  TSHttpTxnResponseBodyOverride(res.state.txnp, current_status, msg, static_cast<int64_t>(value.size()), nullptr);
   return true;
 }
 

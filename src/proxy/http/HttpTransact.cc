@@ -926,7 +926,7 @@ HttpTransact::BadRequest(State *s)
 
   build_error_response(s, status, reason, body_factory_template);
   s->client_info.keep_alive = HTTPKeepAlive::NO_KEEPALIVE;
-  TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+  TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
 }
 
 void
@@ -935,7 +935,7 @@ HttpTransact::PostActiveTimeoutResponse(State *s)
   TxnDbg(dbg_ctl_http_trans, "post active timeout");
   bootstrap_state_variables_from_request(s, &s->hdr_info.client_request);
   build_error_response(s, HTTPStatus::REQUEST_TIMEOUT, "Active Timeout", "timeout#activity");
-  TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+  TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
 }
 
 void
@@ -944,7 +944,7 @@ HttpTransact::PostInactiveTimeoutResponse(State *s)
   TxnDbg(dbg_ctl_http_trans, "post inactive timeout");
   bootstrap_state_variables_from_request(s, &s->hdr_info.client_request);
   build_error_response(s, HTTPStatus::REQUEST_TIMEOUT, "Inactive Timeout", "timeout#inactivity");
-  TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+  TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
 }
 
 void
@@ -954,7 +954,7 @@ HttpTransact::Forbidden(State *s)
   bootstrap_state_variables_from_request(s, &s->hdr_info.client_request);
   s->http_return_code_setter_name = "ip_allow";
   build_error_response(s, HTTPStatus::FORBIDDEN, "Access Denied", "access#denied");
-  TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+  TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
 }
 
 void
@@ -962,7 +962,7 @@ HttpTransact::SelfLoop(State *s)
 {
   TxnDbg(dbg_ctl_http_trans, "Request will selfloop.");
   bootstrap_state_variables_from_request(s, &s->hdr_info.client_request);
-  TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+  TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
 }
 
 void
@@ -971,7 +971,7 @@ HttpTransact::TooEarly(State *s)
   TxnDbg(dbg_ctl_http_trans, "Early Data method is not safe");
   bootstrap_state_variables_from_request(s, &s->hdr_info.client_request);
   build_error_response(s, HTTPStatus::TOO_EARLY, "Too Early", "too#early");
-  TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+  TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
 }
 
 void
@@ -987,7 +987,7 @@ HttpTransact::OriginDown(State *s)
                 host_name, swoc::bwf::FirstOf(url_str, "<none>"));
   Log::error("%s", error_bw_buffer.c_str());
 
-  TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+  TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
 }
 
 void
@@ -1261,7 +1261,7 @@ done:
   // pass ACL checks. ACL mismatches are also not counted as invalid client requests
   if (!s->client_connection_allowed) {
     TxnDbg(dbg_ctl_http_trans, "END HttpTransact::EndRemapRequest: connection not allowed");
-    TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+    TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
   }
 
   /*
@@ -1275,7 +1275,7 @@ done:
   if (!s->reverse_proxy && s->state_machine->plugin_tunnel_type == HttpPluginTunnel_t::NONE) {
     TxnDbg(dbg_ctl_http_trans, "END HttpTransact::EndRemapRequest");
     Metrics::Counter::increment(http_rsb.invalid_client_requests);
-    TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+    TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
   } else {
     s->hdr_info.client_response.destroy(); // release the underlying memory.
     s->hdr_info.client_response.clear();   // clear the pointers.
@@ -1382,7 +1382,7 @@ HttpTransact::handle_upgrade_request(State *s)
 
   // we want our modify_request method to just return while we fail out from here.
   // this seems like the preferred option because the user wanted to do an upgrade but sent a bad protocol.
-  TRANSACT_RETURN_VAL(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr, true);
+  TRANSACT_RETURN_VAL(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr, true);
 }
 
 void
@@ -1408,7 +1408,7 @@ HttpTransact::handle_websocket_upgrade_pre_remap(State *s)
   } else {
     TxnDbg(dbg_ctl_http_trans_websocket_upgrade_pre_remap, "Invalid scheme for websocket upgrade");
     build_error_response(s, HTTPStatus::BAD_REQUEST, "Invalid Upgrade Request", "request#syntax_error");
-    TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+    TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
   }
 
   TRANSACT_RETURN(StateMachineAction_t::API_PRE_REMAP, HttpTransact::PerformRemap);
@@ -1572,7 +1572,7 @@ HttpTransact::HandleRequest(State *s)
     if (!(is_request_valid(s, &s->hdr_info.client_request))) {
       Metrics::Counter::increment(http_rsb.invalid_client_requests);
       TxnDbg(dbg_ctl_http_seq, "request invalid.");
-      s->next_action = StateMachineAction_t::SEND_ERROR_CACHE_NOOP;
+      s->next_action = StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP;
       //  s->next_action = HttpTransact::PROXY_INTERNAL_CACHE_NOOP;
       return;
     }
@@ -1593,7 +1593,7 @@ HttpTransact::HandleRequest(State *s)
         TxnDbg(dbg_ctl_http_trans, "Rejecting websocket connection because the limit has been exceeded");
         bootstrap_state_variables_from_request(s, &s->hdr_info.client_request);
         build_error_response(s, HTTPStatus::SERVICE_UNAVAILABLE, "WebSocket Connection Limit Exceeded", nullptr);
-        TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+        TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
       }
     }
 
@@ -1606,7 +1606,7 @@ HttpTransact::HandleRequest(State *s)
       bootstrap_state_variables_from_request(s, &s->hdr_info.client_request);
       build_error_response(s, HTTPStatus::REQUEST_ENTITY_TOO_LARGE, "Request Entity Too Large", "request#entity_too_large");
       s->squid_codes.log_code = SquidLogCode::ERR_POST_ENTITY_TOO_LARGE;
-      TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+      TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
     }
 
     // The following chunk of code allows you to disallow post w/ expect 100-continue (TS-3459)
@@ -1620,7 +1620,7 @@ HttpTransact::HandleRequest(State *s)
           TxnDbg(dbg_ctl_http_trans, "Client sent a post expect: 100-continue, sending 405.");
           Metrics::Counter::increment(http_rsb.disallowed_post_100_continue);
           build_error_response(s, HTTPStatus::METHOD_NOT_ALLOWED, "Method Not Allowed", "request#method_unsupported");
-          TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+          TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
         }
       }
     }
@@ -1686,7 +1686,7 @@ HttpTransact::HandleRequest(State *s)
     } else if (s->http_config_param->no_origin_server_dns) {
       build_error_response(s, HTTPStatus::BAD_GATEWAY, "Next Hop Connection Failed", "connect#failed_connect");
 
-      TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+      TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
     }
   }
 
@@ -1976,7 +1976,7 @@ HttpTransact::OSDNSLookup(State *s)
       swoc::bwprint(error_bw_buffer, "DNS Error: {} {}", log_msg, swoc::bwf::FirstOf(url_str, "<none>"));
       Log::error("%s", error_bw_buffer.c_str());
       // s->cache_info.action = CacheAction_t::NO_ACTION;
-      TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+      TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
     }
     return;
   }
@@ -1990,7 +1990,7 @@ HttpTransact::OSDNSLookup(State *s)
     TxnDbg(dbg_ctl_http_trans, "[OSDNSLookup] Invalid request IP: INADDR_ANY");
     build_error_response(s, HTTPStatus::BAD_REQUEST, "Bad Destination Address", "request#syntax_error");
     SET_VIA_STRING(VIA_DETAIL_TUNNEL, VIA_DETAIL_TUNNEL_NO_FORWARD);
-    TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+    TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
   }
 
   // For the transparent case, nail down the kind of address we are really using
@@ -2052,7 +2052,7 @@ HttpTransact::OSDNSLookup(State *s)
       }
       build_error_response(s, HTTPStatus::FORBIDDEN, nullptr, "request#syntax_error");
       SET_VIA_STRING(VIA_DETAIL_TUNNEL, VIA_DETAIL_TUNNEL_NO_FORWARD);
-      TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+      TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
     } else {
       // Return this 3xx to the client as-is
       if (action == RedirectEnabled::Action::RETURN) {
@@ -2113,7 +2113,7 @@ HttpTransact::OSDNSLookup(State *s)
       } else {
         build_error_response(s, HTTPStatus::INTERNAL_SERVER_ERROR, "Invalid Cache Lookup result", "default");
         Log::error("HTTP: Invalid CACHE LOOKUP RESULT : %d", static_cast<int>(s->cache_lookup_result));
-        TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+        TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
       }
     }
   }
@@ -3232,7 +3232,7 @@ HttpTransact::handle_cache_write_lock(State *s)
         TxnDbg(dbg_ctl_http_error, "failed to add Ats-Internal-Messages");
       }
 
-      TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+      TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
     default:
       s->cache_info.write_status = CacheWriteStatus_t::LOCK_MISS;
       remove_ims                 = true;
@@ -3544,7 +3544,7 @@ HttpTransact::HandleCacheOpenReadMissGoToOrigin(State *s)
     }
   } else { // miss, but only-if-cached is set
     build_error_response(s, HTTPStatus::GATEWAY_TIMEOUT, "Not Cached", "cache#not_in_cache");
-    s->next_action = StateMachineAction_t::SEND_ERROR_CACHE_NOOP;
+    s->next_action = StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP;
   }
 }
 
@@ -4175,7 +4175,7 @@ HttpTransact::handle_server_connection_not_open(State *s)
       ink_assert(!("s->current.request_to is not P.P. or O.S. - hmmm."));
       break;
     }
-    s->next_action = StateMachineAction_t::SEND_ERROR_CACHE_NOOP;
+    s->next_action = StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP;
   }
 
   return;
@@ -4535,7 +4535,7 @@ HttpTransact::handle_cache_operation_on_forward_server_response(State *s)
     /* Downgrade the request level and retry */
     if (!HttpTransactHeaders::downgrade_request(&keep_alive, &s->hdr_info.server_request)) {
       build_error_response(s, HTTPStatus::HTTPVER_NOT_SUPPORTED, "HTTP Version Not Supported", "response#bad_version");
-      s->next_action        = StateMachineAction_t::SEND_ERROR_CACHE_NOOP;
+      s->next_action        = StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP;
       s->already_downgraded = true;
     } else {
       if (!keep_alive) {
@@ -4950,7 +4950,7 @@ HttpTransact::handle_no_cache_operation_on_forward_server_response(State *s)
     if (!HttpTransactHeaders::downgrade_request(&keep_alive, &s->hdr_info.server_request)) {
       s->already_downgraded = true;
       build_error_response(s, HTTPStatus::HTTPVER_NOT_SUPPORTED, "HTTP Version Not Supported", "response#bad_version");
-      s->next_action = StateMachineAction_t::SEND_ERROR_CACHE_NOOP;
+      s->next_action = StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP;
     } else {
       s->already_downgraded = true;
       s->next_action        = how_to_open_connection(s);
@@ -7797,7 +7797,7 @@ HttpTransact::handle_parent_down(State *s)
   default:
     build_error_response(s, HTTPStatus::BAD_GATEWAY, "Next Hop Connection Failed", "connect");
   }
-  TRANSACT_RETURN(StateMachineAction_t::SEND_ERROR_CACHE_NOOP, nullptr);
+  TRANSACT_RETURN(StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP, nullptr);
 }
 
 void
@@ -8438,7 +8438,7 @@ HttpTransact::build_error_response(State *s, HTTPStatus status_code, const char 
     s->hdr_info.client_response.field_delete(static_cast<std::string_view>(MIME_FIELD_CONTENT_LANGUAGE));
   }
 
-  s->next_action = StateMachineAction_t::SEND_ERROR_CACHE_NOOP;
+  s->next_action = StateMachineAction_t::SEND_INTERNAL_CACHE_NOOP;
   return;
 }
 

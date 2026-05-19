@@ -1602,10 +1602,50 @@ TSReturnCode TSHttpTxnClientPacketDscpSet(TSHttpTxn txnp, int dscp);
 TSReturnCode TSHttpTxnServerPacketDscpSet(TSHttpTxn txnp, int dscp);
 
 /**
+   Build a fresh response for this transaction, replacing whatever ATS would
+   otherwise send. Resets the response to a clean slate so origin-leaked headers
+   do not propagate to the client.
+
+   Effect (synchronous at call time):
+     - Status code: set to @a status
+     - Body: replaced with @a buf
+     - Content-Type: set from @a mimetype (or unset if NULL)
+     - Content-Length: implicit from @a buflength
+     - All other response header fields: CLEARED
+     - Date / Server: emitted as usual at send time
+
+   The plugin may add additional headers via TSMimeHdr* APIs after calling this
+   function; those additions persist. Headers added BEFORE this call are dropped.
+
+   Callable from any hook. From a pre-origin hook (READ_REQUEST_HDR, PRE_REMAP,
+   OS_DNS, SEND_REQUEST_HDR), this short-circuits the SM: the origin is not
+   contacted. From a response-stage hook (READ_RESPONSE_HDR, SEND_RESPONSE_HDR),
+   this discards the origin response and substitutes the supplied response.
+
+   @a status is required. There is no "preserve current status" sentinel. To
+   keep the current status (e.g. origin's response status from READ_RESPONSE_HDR),
+   read it first via TSHttpHdrStatusGet and pass that value back in.
+
+   @param txnp HTTP transaction.
+   @param status HTTP status code for the substituted response.
+   @param buf The body message (must be heap allocated; takes ownership).
+   @param buflength Length of the body message.
+   @param mimetype Content-Type for the response (can be NULL; if non-NULL,
+          must be heap allocated; takes ownership).
+*/
+void TSHttpTxnResponseBodyOverride(TSHttpTxn txnp, TSHttpStatus status, char *buf, int64_t buflength, char *mimetype);
+
+/**
+   @deprecated Use TSHttpTxnResponseBodyOverride() instead.
+
    Sets an error type body to a transaction. Note that both string arguments
    must be allocated with TSmalloc() or TSstrdup(). The mimetype argument is
    optional, if not provided it defaults to "text/html". Sending an empty
    string would prevent setting a content type header (but that is not advised).
+
+   Now delegates to TSHttpTxnResponseBodyOverride() with the current response
+   status code, preserving the historical "set body, don't touch status" contract.
+   Will be removed in a future major release.
 
    @param txnp HTTP transaction whose parent proxy to get.
    @param buf The body message (must be heap allocated).
