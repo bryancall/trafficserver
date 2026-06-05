@@ -140,11 +140,13 @@ if(BUILD_TESTING)
     NetVCTest.cc
     unit_tests/test_ProxyProtocol.cc
     unit_tests/test_SSLCertLookup.cc
+    unit_tests/test_SSLNetVConnectionAsyncEp.cc
     unit_tests/test_SSLSNIConfig.cc
     unit_tests/test_YamlSNIConfig.cc
     unit_tests/test_OCSPStapling.cc
     unit_tests/unit_test_main.cc
   )
+  target_include_directories(test_net PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   # Use link groups to solve circular dependency
   set(LINK_GROUP_LIBS
       ts::logging
