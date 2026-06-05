@@ -176,6 +176,13 @@ autest:
             args:
               - "rules/rule_session_vars.conf"
 
+      - from: "http://www.example.com/from_18/"
+        to: "http://backend.ex:{SERVER_HTTP_PORT}/to_18/"
+        plugins:
+          - name: "header_rewrite.so"
+            args:
+              - "rules/rule_cookie.conf"
+
     log_validation:
       traffic_out:
         excludes:
@@ -1936,3 +1943,314 @@ sessions:
       headers:
         fields:
         - [ X-Session-Seen, { value: "yes", as: equal } ]
+
+  # Test 67: set-cookie preserves the ';' separator when the rewritten cookie
+  # is followed by "; " in the Cookie value (was dropped before the fix).
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/sep
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ Cookie, "X-Test=old; Other=keep" ]
+        - [ uuid, 67 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ Cookie, { value: "X-Test=newval; Other=keep", as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
+
+  # Test 68: a configured cookie key longer than the trailing token must not
+  # read past the non-NUL-terminated Cookie value; the key is not matched and
+  # set-cookie appends the pair at the end.
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/oob
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ Cookie, "sessio" ]
+        - [ uuid, 68 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ Cookie, { value: "sessio;session=newval", as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
+
+  # Test 69: rm-cookie removes a cookie from the middle of the list.
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/rm_mid
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ Cookie, "a=1; b=2; c=3" ]
+        - [ uuid, 69 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ Cookie, { value: "a=1; c=3", as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
+
+  # Test 70: rm-cookie removes the last cookie, dropping the preceding separator.
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/rm_last
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ Cookie, "a=1; b=2; c=3" ]
+        - [ uuid, 70 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ Cookie, { value: "a=1; b=2", as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
+
+  # Test 71: rm-cookie removes the only cookie, so the field is destroyed.
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/rm_only
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ Cookie, "a=1" ]
+        - [ uuid, 71 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ Cookie, { as: absent } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
+
+  # Test 72: rm-cookie on an absent key is a no-op.
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/rm_absent
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ Cookie, "a=1; b=2" ]
+        - [ uuid, 72 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ Cookie, { value: "a=1; b=2", as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
+
+  # Test 73: add-cookie appends a key that is not already present.
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/add_new
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ Cookie, "a=1; b=2" ]
+        - [ uuid, 73 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ Cookie, { value: "a=1; b=2;newk=newv", as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
+
+  # Test 74: add-cookie is a no-op when the key already exists.
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/add_exist
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ Cookie, "a=1; b=2" ]
+        - [ uuid, 74 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ Cookie, { value: "a=1; b=2", as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
+
+  # Test 75: set-cookie creates the Cookie field when the request has none.
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/set_nohdr
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ uuid, 75 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ Cookie, { value: "foo=bar", as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
+
+  # Test 76: %{COOKIE:name} extracts a present cookie's value.
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/getfoo
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ Cookie, "foo=bar; baz=qux" ]
+        - [ uuid, 76 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ X-Cookie-Foo, { value: "bar", as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
+
+  # Test 77: %{COOKIE:name} with a key longer than the trailing token must not
+  # over-read; extraction yields the empty string.
+- transactions:
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /from_18/shortkey
+      headers:
+        fields:
+        - [ Host, www.example.com ]
+        - [ Cookie, "sessio" ]
+        - [ uuid, 77 ]
+
+    proxy-request:
+      headers:
+        fields:
+        - [ X-Cookie-Sess, { value: "empty", as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Server, microserver ]
+        - [ Content-Length, "0" ]
+
+    proxy-response:
+      status: 200
