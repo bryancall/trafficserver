@@ -978,6 +978,15 @@ SSLNetVConnection::clear()
   // resetting here will decrement the ref-counter.
   client_sess.reset();
 
+  // Finding #167: stop the async-handshake eventfd before SSL_free. The
+  // eventfd is owned by the SSL object, so SSL_free closes it; deregistering
+  // first keeps the EPOLL_CTL_DEL operating on a valid, owned fd. clear() runs
+  // on every free path through free_thread(), so it is the backstop in case
+  // do_io_close() did not already stop the eventfd.
+  if (async_ep.fd >= 0) {
+    async_ep.stop();
+  }
+
   if (ssl != nullptr) {
     SSL_free(ssl);
     ssl = nullptr;
@@ -998,14 +1007,6 @@ SSLNetVConnection::clear()
 
   hookOpRequested = SslVConnOp::SSL_HOOK_OP_DEFAULT;
   free_handshake_buffers();
-
-  // Finding #167: defense in depth. If we reach clear() with the async eventfd
-  // still registered (handshake-failure path, races with do_io_close), tear it
-  // down here so the EventIO is not left pointing at memory that is about to
-  // be reused by the freelist.
-  if (async_ep.fd >= 0) {
-    async_ep.stop();
-  }
 
   super::clear();
 }

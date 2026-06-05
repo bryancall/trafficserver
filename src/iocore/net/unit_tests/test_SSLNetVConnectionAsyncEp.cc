@@ -51,7 +51,8 @@ TEST_CASE("SSLNetVConnection::clear stops a registered async-handshake eventfd")
   PollDescriptor pd;
 
   // Any pollable fd stands in for the OpenSSL async eventfd; a pipe read end
-  // works on both epoll and kqueue.
+  // is a portable pollable fd. The deregistration the fix relies on is the
+  // EPOLL_CTL_DEL in EventIO::stop(), which CI exercises on Linux.
   int fds[2] = {-1, -1};
   REQUIRE(pipe(fds) == 0);
 
@@ -70,6 +71,38 @@ TEST_CASE("SSLNetVConnection::clear stops a registered async-handshake eventfd")
   // The fix: clear() deregisters the eventfd. EventIO::stop() nulls event_loop
   // after removing the registration from the poller.
   CHECK(ep.event_loop == nullptr);
+
+  delete vc;
+  close(fds[0]);
+  close(fds[1]);
+}
+
+// The fix stops the eventfd in both do_io_close() and clear(), and on the
+// normal close path both run. That double stop must be safe: free_thread()
+// calls clear() after do_io_close() has already deregistered the eventfd.
+// EventIO::stop() guards on event_loop, so the second call removes nothing.
+TEST_CASE("SSLNetVConnection async-handshake eventfd teardown is idempotent")
+{
+  PollDescriptor pd;
+
+  int fds[2] = {-1, -1};
+  REQUIRE(pipe(fds) == 0);
+
+  auto *vc = new SSLNetVConnection();
+  auto &ep = SSLNetVConnectionAsyncEpTestAccess::async_ep(vc);
+
+  ep.start(&pd, fds[0], nullptr, nullptr, EVENTIO_READ);
+  REQUIRE(ep.event_loop == &pd);
+
+  // First teardown stands in for do_io_close().
+  ep.stop();
+  REQUIRE(ep.event_loop == nullptr);
+
+  // Second teardown via clear() (the free path) must be a no-op, not a second
+  // deregistration of a now-stale fd.
+  vc->clear();
+  CHECK(ep.event_loop == nullptr);
+  CHECK(ep.stop() == 0);
 
   delete vc;
   close(fds[0]);
