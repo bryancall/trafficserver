@@ -361,6 +361,8 @@ register_stat_callbacks()
   http_rsb.origin_shutdown_migration_failure = Metrics::Counter::createPtr("proxy.process.http.origin_shutdown.migration_failure");
   http_rsb.origin_shutdown_pool_lock_contention =
     Metrics::Counter::createPtr("proxy.process.http.origin_shutdown.pool_lock_contention");
+  http_rsb.origin_shutdown_pool_peer_closed = Metrics::Counter::createPtr("proxy.process.http.origin_shutdown.pool_peer_closed");
+  http_rsb.origin_shutdown_pool_timeout     = Metrics::Counter::createPtr("proxy.process.http.origin_shutdown.pool_timeout");
   http_rsb.origin_shutdown_release_invalid_request =
     Metrics::Counter::createPtr("proxy.process.http.origin_shutdown.release_invalid_request");
   http_rsb.origin_shutdown_release_invalid_response =

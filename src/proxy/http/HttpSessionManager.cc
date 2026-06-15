@@ -306,6 +306,11 @@ ServerSessionPool::eventHandler(int event, void *data)
       Dbg(dbg_ctl_http_ss, "[%" PRId64 "] [session_pool] session %p received io notice [%s]", s->connection_id(), s,
           HttpDebugNames::get_event_name(event));
       ink_assert(s->state == PoolableSession::PooledState::KA_POOLED);
+      if (event == VC_EVENT_INACTIVITY_TIMEOUT || event == VC_EVENT_ACTIVE_TIMEOUT) {
+        Metrics::Counter::increment(http_rsb.origin_shutdown_pool_timeout);
+      } else {
+        Metrics::Counter::increment(http_rsb.origin_shutdown_pool_peer_closed);
+      }
       // Out of the pool! Now!
       this->removeSession(s);
       // Drop connection on this end.

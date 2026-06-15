@@ -218,6 +218,8 @@ struct HttpStatsBlock {
   Metrics::Counter::AtomicType *origin_shutdown_cleanup_entry;
   Metrics::Counter::AtomicType *origin_shutdown_migration_failure;
   Metrics::Counter::AtomicType *origin_shutdown_pool_lock_contention;
+  Metrics::Counter::AtomicType *origin_shutdown_pool_peer_closed;
+  Metrics::Counter::AtomicType *origin_shutdown_pool_timeout;
   Metrics::Counter::AtomicType *origin_shutdown_release_invalid_request;
   Metrics::Counter::AtomicType *origin_shutdown_release_invalid_response;
   Metrics::Counter::AtomicType *origin_shutdown_release_misc;
