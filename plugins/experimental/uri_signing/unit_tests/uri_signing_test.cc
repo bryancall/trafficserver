@@ -33,6 +33,10 @@ extern "C" {
 #include "../match.h"
 #include "../config.h"
 
+/* percent_decode is file-local to normalize.cc and not declared in normalize.h.
+ * Forward-declare it here so the isolation tests below can exercise it directly. */
+int percent_decode(const char *uri, int uri_ct, char *decoded_uri, int decoded_ct, bool lower);
+
 #include "tscore/Version.h"
 
 AppVersionInfo appVersionInfo;
@@ -860,5 +864,79 @@ TEST_CASE("8", "[TestsWithConfig]")
   }
 
   config_delete(cfg);
+  fprintf(stderr, "\n");
+}
+
+/* Direct, in-isolation coverage of percent_decode. These cases exercise the
+ * read-bound at the start of the percent-escape branch and the output-capacity
+ * guard that protects the reserved-char re-encode triple write. They are
+ * intended to be ASAN-clean (no heap/stack-buffer-overflow read or write). */
+TEST_CASE("9", "[PercentDecodeIsolationTest]")
+{
+  INFO("TEST 9, Isolation tests for percent_decode bounds");
+
+  SECTION("Truncated escape '%4' with uri_ct == 2 is rejected without OOB read")
+  {
+    /* Pre-fix this hit a heap-buffer-overflow READ at uri[i+2] because the
+     * bound check used (uri_ct < i + 2) instead of (i + 2 >= uri_ct). */
+    char       buf[8] = {0};
+    const char in[]   = "%4";
+    int        ret    = percent_decode(in, 2, buf, sizeof(buf), false);
+    REQUIRE(ret == -1);
+  }
+
+  SECTION("Truncated escape '%' with uri_ct == 1 is rejected")
+  {
+    char       buf[8] = {0};
+    const char in[]   = "%";
+    int        ret    = percent_decode(in, 1, buf, sizeof(buf), false);
+    REQUIRE(ret == -1);
+  }
+
+  SECTION("Reserved-char '%2A' re-encode with too-small output buffer is rejected without OOB write")
+  {
+    /* '%2A' decodes to '*', which is in the reserved set, so the re-encode
+     * path writes three bytes. A two-byte output buffer must be rejected
+     * before any write, not allowed to overflow. */
+    char       buf[2] = {0};
+    const char in[]   = "%2A";
+    int        ret    = percent_decode(in, 3, buf, sizeof(buf), false);
+    REQUIRE(ret == -1);
+  }
+
+  SECTION("Reserved-char '%2A' decodes to uppercase '%2A' when buffer fits")
+  {
+    char       buf[8] = {0};
+    const char in[]   = "%2a";
+    int        ret    = percent_decode(in, 3, buf, sizeof(buf), false);
+    REQUIRE(ret == 3);
+    REQUIRE(buf[0] == '%');
+    REQUIRE(buf[1] == '2');
+    REQUIRE(buf[2] == 'A');
+  }
+
+  SECTION("Non-reserved '%54' decodes to 'T'")
+  {
+    char       buf[8] = {0};
+    const char in[]   = "%54";
+    int        ret    = percent_decode(in, 3, buf, sizeof(buf), false);
+    REQUIRE(ret == 1);
+    REQUIRE(buf[0] == 'T');
+  }
+
+  SECTION("Non-hex following '%' is rejected")
+  {
+    char       buf[8] = {0};
+    const char in[]   = "%XY";
+    int        ret    = percent_decode(in, 3, buf, sizeof(buf), false);
+    REQUIRE(ret == -1);
+  }
+
+  SECTION("Empty input returns zero")
+  {
+    char buf[1] = {0};
+    REQUIRE(percent_decode("", 0, buf, sizeof(buf), false) == 0);
+  }
+
   fprintf(stderr, "\n");
 }

@@ -125,13 +125,14 @@ remove_dot_segments(const char *path, int path_ct, char *ret_buffer, int buff_ct
 }
 
 /* Function percent decodes uri_ct characters of the string uri and writes it to the decoded_uri
- * buffer. If lower is true, it sets all characters including decoded ones to lower case.
- * The function returns the length of the decoded string or -1 if there was a parsing error
+ * buffer of size decoded_ct. If lower is true, it sets all characters including decoded ones to
+ * lower case. The function returns the length of the decoded string or -1 if there was a parsing
+ * error or the output buffer is too small.
  * TODO: ADD functionality to ignore unicode non-standard characters and leave them encoded. Read RFC regarding normalization and
  * determine if this is compliant.
  */
 int
-percent_decode(const char *uri, int uri_ct, char *decoded_uri, bool lower)
+percent_decode(const char *uri, int uri_ct, char *decoded_uri, int decoded_ct, bool lower)
 {
   static const char *reserved_string = ":/?#[]@!$&\'()*+,;=";
 
@@ -139,12 +140,22 @@ percent_decode(const char *uri, int uri_ct, char *decoded_uri, bool lower)
     return 0;
   }
 
+  /* The reserved-char re-encode path below writes up to 3 bytes at positions
+   * (i - offset), (i + 1 - offset) and (i + 2 - offset). Because offset is
+   * monotonically non-decreasing and i is bounded by the read-bound check
+   * (i + 2 < uri_ct), the maximum write index is uri_ct - 1 - offset.
+   * Requiring decoded_ct >= uri_ct keeps every possible write in bounds. */
+  if (decoded_ct < uri_ct) {
+    PluginDebug("Decoded URI buffer too small");
+    return -1;
+  }
+
   int offset = 0;
   int i;
   for (i = 0; i < uri_ct; i++) {
     if (uri[i] == '%') {
       /* The next two characters are interpreted as the hex encoded value. Store in encodedVal */
-      if (uri_ct < i + 2) {
+      if (i + 2 >= uri_ct) {
         goto decode_failure;
       }
       char encodedVal[2] = {0};
@@ -286,7 +297,7 @@ normalize_uri(const char *uri, int uri_ct, char *normal_uri, int normal_ct)
     /* If we encounter userinfo, decode it without altering case and set comp_start/end to only include hostname/port */
     if (*comp_end == '@' && userInfo == false) {
       comp_ct = comp_end - comp_start;
-      comp_ct = percent_decode(comp_start, comp_ct, write_buffer, false);
+      comp_ct = percent_decode(comp_start, comp_ct, write_buffer, buff_end - write_buffer, false);
       if (comp_ct < 0) {
         goto normalize_failure;
       }
@@ -310,7 +321,7 @@ normalize_uri(const char *uri, int uri_ct, char *normal_uri, int normal_ct)
    */
 
   /* Parse and decode the hostname and port and set to lower case */
-  comp_ct = percent_decode(comp_start, comp_ct, write_buffer, true);
+  comp_ct = percent_decode(comp_start, comp_ct, write_buffer, buff_end - write_buffer, true);
 
   if (comp_ct < 0) {
     goto normalize_failure;
@@ -346,7 +357,7 @@ normalize_uri(const char *uri, int uri_ct, char *normal_uri, int normal_ct)
     }
     /* Decode the path component without altering case and store it to the path_buffer*/
     comp_ct = comp_end - comp_start;
-    comp_ct = percent_decode(comp_start, comp_ct, path_buffer, false);
+    comp_ct = percent_decode(comp_start, comp_ct, path_buffer, normal_ct, false);
 
     if (comp_ct < 0) {
       goto normalize_failure;
@@ -368,7 +379,7 @@ normalize_uri(const char *uri, int uri_ct, char *normal_uri, int normal_ct)
   if (comp_end != uri_end) {
     comp_start = comp_end;
     comp_ct    = uri_end - comp_start;
-    comp_ct    = percent_decode(comp_start, comp_ct, write_buffer, false);
+    comp_ct    = percent_decode(comp_start, comp_ct, write_buffer, buff_end - write_buffer, false);
     if (comp_ct < 0) {
       goto normalize_failure;
     }
