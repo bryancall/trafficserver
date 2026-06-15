@@ -653,7 +653,98 @@ TEST_CASE("4", "[NormalizeTest]")
   fprintf(stderr, "\n");
 }
 
-TEST_CASE("5", "[RegexTests]")
+TEST_CASE("5", "[PercentDecodeIsolationTest]")
+{
+  INFO("TEST 5, percent_decode isolation bounds — exercises the off-by-one bound check (Bug 1) "
+       "and reserved-char write guard (Bug 2) without going through normalize_uri");
+
+  SECTION("Truncated percent sequence (single hex digit) returns -1 cleanly")
+  {
+    char out[10] = {0};
+    REQUIRE(percent_decode("%4", 2, out, false) == -1);
+  }
+
+  SECTION("Truncated percent sequence with no hex digits returns -1 cleanly")
+  {
+    char out[10] = {0};
+    REQUIRE(percent_decode("%", 1, out, false) == -1);
+  }
+
+  SECTION("Trailing lone percent at end of longer string returns -1")
+  {
+    char out[10] = {0};
+    REQUIRE(percent_decode("abc%", 4, out, false) == -1);
+  }
+
+  SECTION("Trailing percent with only one hex digit at end returns -1")
+  {
+    char out[10] = {0};
+    REQUIRE(percent_decode("abc%4", 5, out, false) == -1);
+  }
+
+  SECTION("Non-reserved char decodes correctly and length shrinks by 2")
+  {
+    char out[10] = {0};
+    REQUIRE(percent_decode("%41", 3, out, false) == 1);
+    REQUIRE(out[0] == 'A');
+  }
+
+  SECTION("Reserved char stays encoded and length is preserved")
+  {
+    char out[10] = {0};
+    /* %3A = ':' which is in reserved_string; must stay encoded */
+    REQUIRE(percent_decode("%3A", 3, out, false) == 3);
+    REQUIRE(out[0] == '%');
+    REQUIRE(out[1] == '3');
+    REQUIRE(out[2] == 'A');
+  }
+
+  SECTION("Reserved char hex digits are upper-cased")
+  {
+    char out[10] = {0};
+    /* %3a (lower) must be normalised to %3A */
+    REQUIRE(percent_decode("%3a", 3, out, false) == 3);
+    REQUIRE(out[0] == '%');
+    REQUIRE(out[1] == '3');
+    REQUIRE(out[2] == 'A');
+  }
+
+  SECTION("Mixed decoded-then-reserved sequence is correct and in-bounds")
+  {
+    char out[10] = {0};
+    /* %41 → 'A' (decoded, offset +2), then %3A → ':' reserved (stays encoded) */
+    int len = percent_decode("%41%3A", 6, out, false);
+    REQUIRE(len == 4);
+    REQUIRE(out[0] == 'A');
+    REQUIRE(out[1] == '%');
+    REQUIRE(out[2] == '3');
+    REQUIRE(out[3] == 'A');
+  }
+
+  SECTION("Empty input returns 0")
+  {
+    char out[10] = {0};
+    REQUIRE(percent_decode("", 0, out, false) == 0);
+  }
+
+  SECTION("Plain ASCII passthrough is correct")
+  {
+    char out[10] = {0};
+    REQUIRE(percent_decode("abc", 3, out, false) == 3);
+    REQUIRE(strncmp(out, "abc", 3) == 0);
+  }
+
+  SECTION("lower flag lowercases decoded chars")
+  {
+    char out[10] = {0};
+    /* %41 = 'A'; with lower=true should become 'a' */
+    REQUIRE(percent_decode("%41", 3, out, true) == 1);
+    REQUIRE(out[0] == 'a');
+  }
+  fprintf(stderr, "\n");
+}
+
+TEST_CASE("6", "[RegexTests]")
 {
   INFO("TEST 5, Test Regex Matching");
 
@@ -692,7 +783,7 @@ TEST_CASE("5", "[RegexTests]")
   fprintf(stderr, "\n");
 }
 
-TEST_CASE("6", "[AudTests]")
+TEST_CASE("7", "[AudTests]")
 {
   INFO("TEST 6, Test Aud Matching");
 
@@ -764,7 +855,7 @@ TEST_CASE("6", "[AudTests]")
   fprintf(stderr, "\n");
 }
 
-TEST_CASE("7", "[TestsConfig]")
+TEST_CASE("8", "[TestsConfig]")
 {
   INFO("TEST 7, Config Loading and Config Functions");
 
@@ -801,7 +892,7 @@ jws_validation_helper(const char *url, const char *package, struct config *cfg)
   return true;
 }
 
-TEST_CASE("8", "[TestsWithConfig]")
+TEST_CASE("9", "[TestsWithConfig]")
 {
   INFO("TEST 8, Tests Involving Validation with Config");
   struct config *cfg = read_config_from_string(testConfig);
