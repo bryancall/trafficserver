@@ -25,6 +25,7 @@
 #include <chrono>
 #include <map>
 #include <string>
+#include <vector>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -89,9 +90,12 @@ public:
     _old_time  = 0;
     _now       = 0;
     _time      = (struct timeval){0, 0};
-    _stats     = nullptr;
-    _old_stats = nullptr;
-    _absolute  = false;
+    // _stats is never null so that a render before the first successful poll reads an empty sample
+    // instead of dereferencing a null pointer.
+    _stats      = std::make_unique<map<string, string>>();
+    _old_stats  = nullptr;
+    _absolute   = false;
+    _has_sample = false;
     lookup_table.insert(make_pair("version", LookupItem("Version", "proxy.process.version.server.short", 1)));
     lookup_table.insert(make_pair("disk_used", LookupItem("Disk Used", "proxy.process.cache.bytes_used", 1)));
     lookup_table.insert(make_pair("disk_total", LookupItem("Disk Total", "proxy.process.cache.bytes_total", 1)));
@@ -261,9 +265,6 @@ public:
   bool
   getStats()
   {
-    _old_stats = std::move(_stats);
-    _stats     = std::make_unique<map<string, string>>();
-
     gettimeofday(&_time, nullptr);
     double now = _time.tv_sec + (double)_time.tv_usec / 1000000;
 
@@ -285,16 +286,50 @@ public:
         }
       }
     }
-    // query the rpc node.
-    if (auto const &error = fetch_and_fill_stats(request, _stats.get()); !error.empty()) {
+    // Query the rpc node into a scratch sample. The previously collected sample is only replaced once
+    // the fetch has succeeded. Swapping it out up front made a single dropped poll look like every
+    // counter had dropped to zero, which shows up as large negative rates and then a recovery spike.
+    auto                     fresh = std::make_unique<map<string, string>>();
+    std::vector<std::string> unknown;
+
+    shared::rpc::RecordLookUpResponse records;
+    if (auto const &error = fetch_records(request, records); !error.empty()) {
       fprintf(stderr, "Error getting stats from the RPC node:\n%s", error.c_str());
       return false;
     }
-    _old_time  = _now;
-    _now       = now;
-    _time_diff = _now - _old_time;
+    if (auto const &error = fill_stats(records, fresh.get(), &unknown); !error.empty()) {
+      fprintf(stderr, "Error getting stats from the RPC node:\n%s", error.c_str());
+      return false;
+    }
+
+    _unknown_records = std::move(unknown);
+    if (_has_sample) {
+      // Leave _old_stats null until there are two samples, a single sample has no rate to report.
+      _old_stats = std::move(_stats);
+    }
+    _stats      = std::move(fresh);
+    _old_time   = _now;
+    _now        = now;
+    _time_diff  = _now - _old_time;
+    _has_sample = true;
 
     return true;
+  }
+
+  /// True once at least one poll has succeeded, so callers can avoid drawing a sample that was never
+  /// populated.
+  bool
+  haveSample() const
+  {
+    return _has_sample;
+  }
+
+  /// Record names the server did not recognize on the last successful poll. Informational only, the
+  /// rest of the records in that same response are still usable.
+  std::vector<std::string> const &
+  getUnknownRecords() const
+  {
+    return _unknown_records;
   }
 
   int64_t
@@ -463,58 +498,80 @@ public:
     return _host;
   }
 
-  ~Stats() {}
+  virtual ~Stats() {}
 
-private:
-  std::pair<std::string, LookupItem>
-  make_pair(std::string s, LookupItem i)
-  {
-    return std::make_pair(s, i);
-  }
-
-  /// Invoke the remote server and fill the responses into the stats map.
-  std::string
-  fetch_and_fill_stats(shared::rpc::RecordLookupRequest const &request, std::map<std::string, std::string> *stats) noexcept
+protected:
+  /// Invoke the remote server and decode the record lookup response.
+  /// Returns an error description, empty on success. Virtual so that tests can feed a canned response.
+  virtual std::string
+  fetch_records(shared::rpc::RecordLookupRequest const &request, shared::rpc::RecordLookUpResponse &records) noexcept
   {
     namespace rpc = shared::rpc;
 
-    if (stats == nullptr) {
-      return "Invalid stats parameter, it shouldn't be null.";
-    }
     try {
       rpc::RPCClient rpcClient;
 
       // invoke the rpc.
       auto const &rpcResponse = rpcClient.invoke<>(request, std::chrono::milliseconds(1000), 10);
 
-      if (!rpcResponse.is_error()) {
-        auto const &records = rpcResponse.result.as<rpc::RecordLookUpResponse>();
-
-        // we check if we got some specific record error, if any we report it.
-        if (records.errorList.size()) {
-          std::stringstream ss;
-
-          for (auto const &err : records.errorList) {
-            ss << err;
-            ss << "----\n";
-          }
-          return ss.str();
-        } else {
-          // No records error, so we are good to fill the list
-          for (auto &&recordInfo : records.recordList) {
-            (*stats)[recordInfo.name] = recordInfo.currentValue;
-          }
-        }
-      } else {
+      if (rpcResponse.is_error()) {
         // something didn't work inside the RPC server.
         std::stringstream ss;
         ss << rpcResponse.error.as<rpc::JSONRPCError>();
         return ss.str();
       }
+      records = rpcResponse.result.as<rpc::RecordLookUpResponse>();
     } catch (std::exception const &ex) {
       return {ex.what()};
     }
     return {}; // no error
+  }
+
+  /// Copy the returned records into the stats map.
+  /// The records handler on the server side is per record: a name it does not know is reported in
+  /// errorList while every other name in the same request is still answered in recordList. So the
+  /// records we did get are always consumed, and the names we did not get are handed back through
+  /// unknown as a diagnostic. Only a response with nothing usable in it is an error.
+  static std::string
+  fill_stats(shared::rpc::RecordLookUpResponse const &records, std::map<std::string, std::string> *stats,
+             std::vector<std::string> *unknown)
+  {
+    if (stats == nullptr) {
+      return "Invalid stats parameter, it shouldn't be null.";
+    }
+
+    for (auto const &recordInfo : records.recordList) {
+      (*stats)[recordInfo.name] = recordInfo.currentValue;
+    }
+
+    if (records.errorList.empty()) {
+      return {};
+    }
+
+    if (records.recordList.empty()) {
+      // Nothing came back that we can use, report it as an error.
+      std::stringstream ss;
+
+      for (auto const &err : records.errorList) {
+        ss << err;
+        ss << "----\n";
+      }
+      return ss.str();
+    }
+
+    if (unknown != nullptr) {
+      for (auto const &err : records.errorList) {
+        unknown->push_back(err.recordName.empty() ? err.code : err.recordName);
+      }
+    }
+    return {};
+  }
+
+private:
+  std::pair<std::string, LookupItem>
+  make_pair(std::string s, LookupItem i)
+  {
+    return std::make_pair(s, i);
   }
 
   std::unique_ptr<map<string, string>> _stats;
@@ -526,4 +583,6 @@ private:
   double                               _time_diff;
   struct timeval                       _time;
   bool                                 _absolute;
+  bool                                 _has_sample;
+  std::vector<std::string>             _unknown_records;
 };

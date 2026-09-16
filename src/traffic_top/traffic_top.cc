@@ -25,6 +25,7 @@
 #include <map>
 #include <list>
 #include <string>
+#include <vector>
 #include <cstring>
 #include <iostream>
 #include <cassert>
@@ -218,7 +219,7 @@ response_code_page(Stats &stats)
 
 //----------------------------------------------------------------------------
 static void
-help(const string &host, const string &version)
+help(Stats &stats, const string &host, const string &version)
 {
   timeout(1000);
 
@@ -250,6 +251,23 @@ help(const string &host, const string &version)
     mvprintw(11, 0, "Changed    => Requests that required entries in cache to be updated");
     mvprintw(12, 0, "Changed    => Requests that can't be cached for some reason");
     mvprintw(12, 0, "No Cache   => Requests that the client sent Cache-Control: no-cache header");
+
+    // A metric this build knows about but the running server does not is only a missing column, the
+    // rest of the poll is still good, so report it here rather than treating it as a dead server.
+    const std::vector<string> &unknown = stats.getUnknownRecords();
+    if (!unknown.empty()) {
+      string names;
+      for (const string &name : unknown) {
+        if (!names.empty()) {
+          names.append(", ");
+        }
+        names.append(name);
+      }
+      attron(A_BOLD);
+      mvprintw(14, 0, "Metrics not available on this server (%zu):", unknown.size());
+      attroff(A_BOLD);
+      mvprintw(15, 0, "%.*s", COLS > 0 ? COLS - 1 : 0, names.c_str());
+    }
 
     attron(COLOR_PAIR(colorPair::border));
     attron(A_BOLD);
@@ -458,10 +476,14 @@ main([[maybe_unused]] int argc, const char **argv)
     attroff(COLOR_PAIR(colorPair::border));
     attroff(A_BOLD);
 
-    if (page == MAIN_PAGE) {
-      main_stats_page(stats);
-    } else if (page == RESPONSE_PAGE) {
-      response_code_page(stats);
+    // Only draw once a poll has actually landed. Drawing an unpopulated sample painted a full page of
+    // zeroes that was indistinguishable from a genuinely idle server.
+    if (stats.haveSample()) {
+      if (page == MAIN_PAGE) {
+        main_stats_page(stats);
+      } else if (page == RESPONSE_PAGE) {
+        response_code_page(stats);
+      }
     }
 
     curs_set(0);
@@ -471,7 +493,7 @@ main([[maybe_unused]] int argc, const char **argv)
     int x = getch();
     switch (x) {
     case 'h':
-      help(host, version);
+      help(stats, host, version);
       break;
     case 'q':
       goto quit;

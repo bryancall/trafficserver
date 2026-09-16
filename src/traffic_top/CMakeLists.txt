@@ -21,3 +21,11 @@ target_link_libraries(traffic_top PRIVATE ts::tscore ts::inkevent libswoc::libsw
 install(TARGETS traffic_top)
 
 clang_tidy_check(traffic_top)
+
+if(BUILD_TESTING)
+  add_executable(test_traffic_top_stats unit_tests/test_stats.cc ${CMAKE_SOURCE_DIR}/src/shared/rpc/IPCSocketClient.cc)
+  target_link_libraries(
+    test_traffic_top_stats PRIVATE ts::tscore ts::inkevent libswoc::libswoc yaml-cpp::yaml-cpp Catch2::Catch2WithMain
+  )
+  add_catch2_test(NAME test_traffic_top_stats COMMAND $<TARGET_FILE:test_traffic_top_stats>)
+endif()
