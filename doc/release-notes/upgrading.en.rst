@@ -66,7 +66,7 @@ misses should note the following:
   :ts:cv:`proxy.config.http.cache.max_open_read_retries`, to a value different
   from the global one keeps the earlier behavior for its requests.
 * A slice plugin block request that arrives before its prefetch's response
-  headers make its own origin fetch instead of reading behind the prefetch.
+  headers makes its own origin fetch instead of reading behind the prefetch.
 * The xdebug ``X-Cache-Info`` header is absent on a miss that opens neither a
   cache read nor a cache write, such as a miss for an uncacheable object.
 
