@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -35,6 +35,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #define CACHE_BLOCK_SHIFT        9
 #define CACHE_BLOCK_SIZE         (1 << CACHE_BLOCK_SHIFT) // 512, smallest sector size
@@ -94,6 +95,8 @@ public:
    * @param dir_skip: Offset into the disk at which to start the stripe.
    * If this value is less than START_POS, START_POS will be used instead.
    *
+   * @param[in] avg_obj_size Average object size, or -1 to use the configured default.
+   * @param[in] fragment_size Fragment size, or -1 to use the configured default.
    * @see START_POS
    */
   Stripe(CacheDisk *disk, off_t blocks, off_t dir_skip, int avg_obj_size = -1, int fragment_size = -1);
@@ -148,15 +151,17 @@ protected:
   off_t                data_blocks{};
   AggregateWriteBuffer _write_buffer;
 
-  void _clear_init(std::uint32_t hw_sector_size);
-  void _init_dir();
-  bool flush_aggregate_write_buffer(int fd);
+  void               _clear_init(std::uint32_t hw_sector_size);
+  void               _init_dir();
+  bool               _shm_directory_is_valid();
+  [[nodiscard]] bool flush_aggregate_write_buffer(int fd);
 
 private:
   void _init_hash_text(CacheDisk const *disk, off_t blocks, off_t dir_skip);
   void _init_data(off_t store_block_size, int avg_obj_size = -1);
   void _init_data_internal(int avg_obj_size = -1); // Defaults to cache_config_min_average_object_size;
   void _init_directory(std::size_t directory_size, int header_size, int footer_size);
+  bool _shm_segment_membership_is_valid(int s, Dir *seg, int64_t segment_entries, std::vector<bool> &visited);
 };
 
 inline uint32_t

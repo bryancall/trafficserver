@@ -35,9 +35,46 @@
 #include "ts/ts.h"
 
 #include "conditions.h"
+#include "cidr.h"
 #include "lulu.h"
 
 static const sockaddr *getClientAddr(TSHttpTxn txnp, int txn_private_slot);
+
+static const char *
+get_hook_name(TSHttpHookID hook)
+{
+  if (hook == TS_REMAP_PSEUDO_HOOK) {
+    return "REMAP_PSEUDO_HOOK";
+  }
+
+  if (hook == TS_HTTP_LAST_HOOK) {
+    return "UNKNOWN_HOOK";
+  }
+
+  if (const char *name = TSHttpHookNameLookup(hook); name != nullptr) {
+    return name;
+  }
+
+  return "UNKNOWN_HOOK";
+}
+
+static const char *
+get_url_type_name(ConditionUrl::UrlType type)
+{
+  switch (type) {
+  case ConditionUrl::CLIENT:
+    return "CLIENT-URL";
+  case ConditionUrl::SERVER:
+    return "SERVER-URL";
+  case ConditionUrl::FROM:
+    return "FROM-URL";
+  case ConditionUrl::TO:
+    return "TO-URL";
+  case ConditionUrl::URL:
+  default:
+    return "URL";
+  }
+}
 
 #if TS_HAS_CRIPTS
 #include "cripts/Certs.hpp"
@@ -80,7 +117,7 @@ ConditionStatus::eval(const Resources &res)
 }
 
 void
-ConditionStatus::append_value(std::string &s, const Resources &res)
+ConditionStatus::do_append_value(std::string &s, const Resources &res)
 {
   s += std::to_string(res.resp_status);
   Dbg(pi_dbg_ctl, "Appending STATUS(%d) to evaluation value -> %s", res.resp_status, s.c_str());
@@ -111,7 +148,7 @@ ConditionMethod::eval(const Resources &res)
 }
 
 void
-ConditionMethod::append_value(std::string &s, const Resources &res)
+ConditionMethod::do_append_value(std::string &s, const Resources &res)
 {
   TSMBuffer bufp;
   TSMLoc    hdr_loc;
@@ -151,7 +188,7 @@ ConditionRandom::eval(const Resources &res)
 }
 
 void
-ConditionRandom::append_value(std::string &s, const Resources & /* res ATS_UNUSED */)
+ConditionRandom::do_append_value(std::string &s, const Resources & /* res ATS_UNUSED */)
 {
   s += std::to_string(rand_r(&_seed) % _max);
   Dbg(pi_dbg_ctl, "Appending RANDOM(%d) to evaluation value -> %s", _max, s.c_str());
@@ -171,7 +208,7 @@ ConditionAccess::initialize(Parser &p)
 }
 
 void
-ConditionAccess::append_value(std::string &s, const Resources &res)
+ConditionAccess::do_append_value(std::string &s, const Resources &res)
 {
   if (eval(res)) {
     s += "OK";
@@ -218,18 +255,26 @@ ConditionHeader::initialize(Parser &p)
 }
 
 void
-ConditionHeader::append_value(std::string &s, const Resources &res)
+ConditionHeader::do_append_value(std::string &s, const Resources &res)
 {
   TSMBuffer bufp;
   TSMLoc    hdr_loc;
   int       len;
 
-  if (_client) {
+  switch (_type) {
+  case CLIENT:
     bufp    = res.client_bufp;
     hdr_loc = res.client_hdr_loc;
-  } else {
+    break;
+  case SERVER:
+    bufp    = res.server_bufp;
+    hdr_loc = res.server_hdr_loc;
+    break;
+  case HEADER:
+  default:
     bufp    = res.bufp;
     hdr_loc = res.hdr_loc;
+    break;
   }
 
   if (bufp && hdr_loc) {
@@ -272,8 +317,13 @@ ConditionUrl::initialize(Parser &p)
   Condition::initialize(p);
 
   auto match = std::make_unique<MatcherType>(_cond_op);
+
   match->set(p.get_arg(), mods());
   _matcher = std::move(match);
+
+  if (_type == SERVER) {
+    require_resources(RSRC_SERVER_REQUEST_HEADERS);
+  }
 }
 
 void
@@ -306,7 +356,19 @@ ConditionUrl::set_qualifier(const std::string &q)
 }
 
 void
-ConditionUrl::append_value(std::string &s, const Resources &res)
+ConditionUrl::log_error(const Resources &res, const char *message) const
+{
+  if (has_config_location()) {
+    TSError("[%s] %s at hook=%s: %%{%s%s%s} in %s:%d", PLUGIN_NAME, message, get_hook_name(res.hook), get_url_type_name(_type),
+            _qualifier.empty() ? "" : ":", _qualifier.c_str(), get_config_filename().c_str(), get_config_lineno());
+  } else {
+    TSError("[%s] %s at hook=%s: %%{%s%s%s}", PLUGIN_NAME, message, get_hook_name(res.hook), get_url_type_name(_type),
+            _qualifier.empty() ? "" : ":", _qualifier.c_str());
+  }
+}
+
+void
+ConditionUrl::do_append_value(std::string &s, const Resources &res)
 {
   TSMLoc    url  = nullptr;
   TSMBuffer bufp = nullptr;
@@ -315,7 +377,19 @@ ConditionUrl::append_value(std::string &s, const Resources &res)
     // CLIENT always uses the pristine URL
     Dbg(pi_dbg_ctl, "   Using the pristine url");
     if (TSHttpTxnPristineUrlGet(res.state.txnp, &bufp, &url) != TS_SUCCESS) {
-      TSError("[%s] Error getting the pristine URL", PLUGIN_NAME);
+      log_error(res, "Error getting the pristine URL");
+      return;
+    }
+  } else if (_type == SERVER) {
+    Dbg(pi_dbg_ctl, "   Using the server request url");
+    bufp = res.server_bufp;
+    if (bufp && res.server_hdr_loc) {
+      if (TSHttpHdrUrlGet(bufp, res.server_hdr_loc, &url) != TS_SUCCESS) {
+        log_error(res, "Error getting the server request URL");
+        return;
+      }
+    } else {
+      Dbg(pi_dbg_ctl, "   Server request not available");
       return;
     }
   } else if (res._rri != nullptr) {
@@ -331,7 +405,7 @@ ConditionUrl::append_value(std::string &s, const Resources &res)
       Dbg(pi_dbg_ctl, "   Using the to url");
       url = res._rri->mapToUrl;
     } else {
-      TSError("[%s] Invalid option value", PLUGIN_NAME);
+      log_error(res, "Invalid URL option value");
       return;
     }
   } else {
@@ -339,11 +413,11 @@ ConditionUrl::append_value(std::string &s, const Resources &res)
       bufp           = res.bufp;
       TSMLoc hdr_loc = res.hdr_loc;
       if (TSHttpHdrUrlGet(bufp, hdr_loc, &url) != TS_SUCCESS) {
-        TSError("[%s] Error getting the URL", PLUGIN_NAME);
+        log_error(res, "Error getting the URL");
         return;
       }
     } else {
-      TSError("[%s] Rule not supported at this hook", PLUGIN_NAME);
+      log_error(res, "Rule not supported");
       return;
     }
   }
@@ -437,7 +511,7 @@ ConditionDBM::initialize(Parser &p)
 }
 
 void
-ConditionDBM::append_value(std::string & /* s ATS_UNUSED */, const Resources & /* res ATS_UNUSED */)
+ConditionDBM::do_append_value(std::string & /* s ATS_UNUSED */, const Resources & /* res ATS_UNUSED */)
 {
   // std::string key;
 
@@ -489,7 +563,7 @@ ConditionCookie::initialize(Parser &p)
 }
 
 void
-ConditionCookie::append_value(std::string &s, const Resources &res)
+ConditionCookie::do_append_value(std::string &s, const Resources &res)
 {
   TSMBuffer         bufp    = res.client_bufp;
   TSMLoc            hdr_loc = res.client_hdr_loc;
@@ -631,7 +705,7 @@ ConditionIp::eval(const Resources &res)
 }
 
 void
-ConditionIp::append_value(std::string &s, const Resources &res)
+ConditionIp::do_append_value(std::string &s, const Resources &res)
 {
   bool ip_set = false;
   char ip[INET6_ADDRSTRLEN];
@@ -683,7 +757,7 @@ ConditionTransactCount::eval(const Resources &res)
 }
 
 void
-ConditionTransactCount::append_value(std::string &s, Resources const &res)
+ConditionTransactCount::do_append_value(std::string &s, Resources const &res)
 {
   if (res.state.ssnp) {
     char value[32]; // enough for UINT64_MAX
@@ -790,7 +864,7 @@ ConditionNow::set_qualifier(const std::string &q)
 }
 
 void
-ConditionNow::append_value(std::string &s, const Resources &res)
+ConditionNow::do_append_value(std::string &s, const Resources &res)
 {
   s += std::to_string(get_now_qualified(_now_qual, res));
   Dbg(pi_dbg_ctl, "Appending NOW() to evaluation value -> %s", s.c_str());
@@ -806,14 +880,14 @@ ConditionNow::eval(const Resources &res)
 }
 
 std::string
-ConditionGeo::get_geo_string(const sockaddr * /* addr ATS_UNUSED */) const
+ConditionGeo::get_geo_string(const sockaddr * /* addr ATS_UNUSED */, void * /* geo_handle ATS_UNUSED */) const
 {
   TSError("[%s] No Geo library available!", PLUGIN_NAME);
   return "";
 }
 
 int64_t
-ConditionGeo::get_geo_int(const sockaddr * /* addr ATS_UNUSED */) const
+ConditionGeo::get_geo_int(const sockaddr * /* addr ATS_UNUSED */, void * /* geo_handle ATS_UNUSED */) const
 {
   TSError("[%s] No Geo library available!", PLUGIN_NAME);
   return 0;
@@ -863,12 +937,12 @@ ConditionGeo::set_qualifier(const std::string &q)
 }
 
 void
-ConditionGeo::append_value(std::string &s, const Resources &res)
+ConditionGeo::do_append_value(std::string &s, const Resources &res)
 {
   if (is_int_type()) {
-    s += std::to_string(get_geo_int(getClientAddr(res.state.txnp, _txn_private_slot)));
+    s += std::to_string(get_geo_int(getClientAddr(res.state.txnp, _txn_private_slot), res.geo_handle));
   } else {
-    s += get_geo_string(getClientAddr(res.state.txnp, _txn_private_slot));
+    s += get_geo_string(getClientAddr(res.state.txnp, _txn_private_slot), res.geo_handle);
   }
   Dbg(pi_dbg_ctl, "Appending GEO() to evaluation value -> %s", s.c_str());
 }
@@ -880,7 +954,7 @@ ConditionGeo::eval(const Resources &res)
 
   Dbg(pi_dbg_ctl, "Evaluating GEO()");
   if (is_int_type()) {
-    int64_t geo = get_geo_int(getClientAddr(res.state.txnp, _txn_private_slot));
+    int64_t geo = get_geo_int(getClientAddr(res.state.txnp, _txn_private_slot), res.geo_handle);
 
     ret = static_cast<const Matchers<int64_t> *>(_matcher.get())->test(geo, res);
   } else {
@@ -935,7 +1009,7 @@ ConditionId::set_qualifier(const std::string &q)
 }
 
 void
-ConditionId::append_value(std::string &s, const Resources &res ATS_UNUSED)
+ConditionId::do_append_value(std::string &s, const Resources &res ATS_UNUSED)
 {
   switch (_id_qual) {
   case ID_QUAL_REQUEST: {
@@ -992,35 +1066,22 @@ ConditionCidr::initialize(Parser &p)
 void
 ConditionCidr::set_qualifier(const std::string &q)
 {
-  bool  ok = true;
-  int   cidr;
-  char *endp;
-
   Condition::set_qualifier(q);
 
   Dbg(pi_dbg_ctl, "\tParsing %%{CIDR:%s} qualifier", q.c_str());
-  cidr = strtol(q.c_str(), &endp, 10);
-  if (cidr >= 0 && cidr <= 32) {
-    _v4_mask.s_addr = UINT32_MAX >> (32 - cidr);
-    _v4_cidr        = cidr;
-    if (endp && (*endp == ',' || *endp == '/' || *endp == ':')) {
-      cidr = strtol(endp + 1, nullptr, 10);
-      if (cidr >= 0 && cidr <= 128) {
-        _v6_cidr = cidr;
-      } else {
-        TSError("[%s] Bad CIDR mask for IPv6: %s", PLUGIN_NAME, q.c_str());
-        ok = false;
-      }
-    }
-  } else {
+
+  switch (cidr_parse_qualifier(q, _v4_cidr, _v6_cidr)) {
+  case CidrQualifierError::IPV4:
     TSError("[%s] Bad CIDR mask for IPv4: %s", PLUGIN_NAME, q.c_str());
-    ok = false;
+    return;
+  case CidrQualifierError::IPV6:
+    TSError("[%s] Bad CIDR mask for IPv6: %s", PLUGIN_NAME, q.c_str());
+    return;
+  case CidrQualifierError::NONE:
+    break;
   }
 
-  // Update the bit-masks
-  if (ok) {
-    _create_masks();
-  }
+  _create_masks();
 }
 
 bool
@@ -1035,7 +1096,7 @@ ConditionCidr::eval(const Resources &res)
 }
 
 void
-ConditionCidr::append_value(std::string &s, const Resources &res)
+ConditionCidr::do_append_value(std::string &s, const Resources &res)
 {
   struct sockaddr const *addr = getClientAddr(res.state.txnp, _txn_private_slot);
 
@@ -1055,12 +1116,7 @@ ConditionCidr::append_value(std::string &s, const Resources &res)
       char            resource[INET6_ADDRSTRLEN];
       struct in6_addr ipv6 = reinterpret_cast<const struct sockaddr_in6 *>(addr)->sin6_addr;
 
-      if (_v6_zero_bytes > 0) {
-        memset(&ipv6.s6_addr[16 - _v6_zero_bytes], 0, _v6_zero_bytes);
-      }
-      if (_v6_mask != 0xff) {
-        ipv6.s6_addr[16 - _v6_zero_bytes] &= _v6_mask;
-      }
+      cidr_apply_v6(ipv6, _v6_zero_bytes, _v6_mask);
       inet_ntop(AF_INET6, &ipv6, resource, INET6_ADDRSTRLEN);
       if (resource[0]) {
         s += resource;
@@ -1076,9 +1132,8 @@ ConditionCidr::append_value(std::string &s, const Resources &res)
 void
 ConditionCidr::_create_masks()
 {
-  _v4_mask.s_addr = htonl(UINT32_MAX << (32 - _v4_cidr));
-  _v6_zero_bytes  = (128 - _v6_cidr) / 8;
-  _v6_mask        = 0xff >> ((128 - _v6_cidr) % 8);
+  _v4_mask.s_addr = cidr_v4_mask(_v4_cidr);
+  cidr_v6_params(_v6_cidr, _v6_zero_bytes, _v6_mask);
 }
 
 void
@@ -1242,13 +1297,13 @@ ConditionInbound::eval(const Resources &res)
 }
 
 void
-ConditionInbound::append_value(std::string &s, const Resources &res)
+ConditionInbound::do_append_value(std::string &s, const Resources &res)
 {
-  this->append_value(s, res, _net_qual);
+  do_append_value(s, res, _net_qual);
 }
 
 void
-ConditionInbound::append_value(std::string &s, const Resources &res, NetworkSessionQualifiers qual)
+ConditionInbound::do_append_value(std::string &s, const Resources &res, NetworkSessionQualifiers qual)
 {
   const char *zret = nullptr;
   char        text[INET6_ADDRSTRLEN];
@@ -1369,7 +1424,7 @@ ConditionStringLiteral::ConditionStringLiteral(const std::string &v)
 }
 
 void
-ConditionStringLiteral::append_value(std::string &s, const Resources & /* res ATS_UNUSED */)
+ConditionStringLiteral::do_append_value(std::string &s, const Resources & /* res ATS_UNUSED */)
 {
   s += _literal;
   Dbg(pi_dbg_ctl, "Appending '%s' to evaluation value", _literal.c_str());
@@ -1404,7 +1459,7 @@ ConditionSessionTransactCount::eval(const Resources &res)
 }
 
 void
-ConditionSessionTransactCount::append_value(std::string &s, Resources const &res)
+ConditionSessionTransactCount::do_append_value(std::string &s, Resources const &res)
 {
   char      value[32]; // enough for UINT64_MAX
   int const count  = TSHttpTxnServerSsnTransactionCount(res.state.txnp);
@@ -1449,7 +1504,7 @@ ConditionTcpInfo::eval(const Resources &res)
 }
 
 void
-ConditionTcpInfo::append_value(std::string &s, [[maybe_unused]] Resources const &res)
+ConditionTcpInfo::do_append_value(std::string &s, [[maybe_unused]] Resources const &res)
 {
 #if defined(TCP_INFO) && defined(HAVE_STRUCT_TCP_INFO)
   if (TSHttpTxnIsInternal(res.state.txnp)) {
@@ -1510,7 +1565,7 @@ ConditionCache::eval(const Resources &res)
 }
 
 void
-ConditionCache::append_value(std::string &s, const Resources &res)
+ConditionCache::do_append_value(std::string &s, const Resources &res)
 {
   TSHttpTxn txn = res.state.txnp;
   int       status;
@@ -1555,7 +1610,7 @@ ConditionNextHop::set_qualifier(const std::string &q)
 }
 
 void
-ConditionNextHop::append_value(std::string &s, const Resources &res)
+ConditionNextHop::do_append_value(std::string &s, const Resources &res)
 {
   switch (_next_hop_qual) {
   case NEXT_HOP_HOST: {
@@ -1608,7 +1663,7 @@ ConditionHttpCntl::set_qualifier(const std::string &q)
 }
 
 void
-ConditionHttpCntl::append_value(std::string &s, const Resources &res)
+ConditionHttpCntl::do_append_value(std::string &s, const Resources &res)
 {
   s += TSHttpTxnCntlGet(res.state.txnp, _http_cntl_qual) ? "TRUE" : "FALSE";
   Dbg(pi_dbg_ctl, "Evaluating HTTP-CNTL(%s)", _qualifier.c_str());
@@ -1629,26 +1684,26 @@ ConditionStateFlag::set_qualifier(const std::string &q)
 
   _flag_ix = strtol(q.c_str(), nullptr, 10);
   if (_flag_ix < 0 || _flag_ix >= NUM_STATE_FLAGS) {
-    TSError("[%s] STATE-FLAG index out of range: %s", PLUGIN_NAME, q.c_str());
+    TSError("[%s] %s-FLAG index out of range: %s", PLUGIN_NAME, _scope_label(_scope), q.c_str());
   } else {
-    Dbg(pi_dbg_ctl, "\tParsing %%{STATE-FLAG:%s}", q.c_str());
+    Dbg(pi_dbg_ctl, "\tParsing %%{%s-FLAG:%s}", _scope_label(_scope), q.c_str());
     _mask = 1ULL << _flag_ix;
   }
 }
 
 void
-ConditionStateFlag::append_value(std::string &s, const Resources &res)
+ConditionStateFlag::do_append_value(std::string &s, const Resources &res)
 {
   s += eval(res) ? "TRUE" : "FALSE";
-  Dbg(pi_dbg_ctl, "Evaluating STATE-FLAG(%d)", _flag_ix);
+  Dbg(pi_dbg_ctl, "Evaluating %s-FLAG(%d)", _scope_label(_scope), _flag_ix);
 }
 
 bool
 ConditionStateFlag::eval(const Resources &res)
 {
-  auto data = reinterpret_cast<uint64_t>(TSUserArgGet(res.state.txnp, _txn_slot));
+  auto data = _get_state_data(_scope, res);
 
-  Dbg(pi_dbg_ctl, "Evaluating STATE-FLAG()");
+  Dbg(pi_dbg_ctl, "Evaluating %s-FLAG()", _scope_label(_scope));
 
   return (data & _mask) == _mask;
 }
@@ -1671,20 +1726,20 @@ ConditionStateInt8::set_qualifier(const std::string &q)
 
   _byte_ix = strtol(q.c_str(), nullptr, 10);
   if (_byte_ix < 0 || _byte_ix >= NUM_STATE_INT8S) {
-    TSError("[%s] STATE-INT8 index out of range: %s", PLUGIN_NAME, q.c_str());
+    TSError("[%s] %s-INT8 index out of range: %s", PLUGIN_NAME, _scope_label(_scope), q.c_str());
   } else {
-    Dbg(pi_dbg_ctl, "\tParsing %%{STATE-INT8:%s}", q.c_str());
+    Dbg(pi_dbg_ctl, "\tParsing %%{%s-INT8:%s}", _scope_label(_scope), q.c_str());
   }
 }
 
 void
-ConditionStateInt8::append_value(std::string &s, const Resources &res)
+ConditionStateInt8::do_append_value(std::string &s, const Resources &res)
 {
   uint8_t data = _get_data(res);
 
   s += std::to_string(data);
 
-  Dbg(pi_dbg_ctl, "Appending STATE-INT8(%d) to evaluation value -> %s", data, s.c_str());
+  Dbg(pi_dbg_ctl, "Appending %s-INT8(%d) to evaluation value -> %s", _scope_label(_scope), data, s.c_str());
 }
 
 bool
@@ -1692,7 +1747,7 @@ ConditionStateInt8::eval(const Resources &res)
 {
   uint8_t data = _get_data(res);
 
-  Dbg(pi_dbg_ctl, "Evaluating STATE-INT8()");
+  Dbg(pi_dbg_ctl, "Evaluating %s-INT8()", _scope_label(_scope));
 
   return static_cast<const MatcherType *>(_matcher.get())->test(data, res);
 }
@@ -1717,20 +1772,20 @@ ConditionStateInt16::set_qualifier(const std::string &q)
     long ix = strtol(q.c_str(), nullptr, 10);
 
     if (ix != 0) {
-      TSError("[%s] STATE-INT16 index out of range: %s", PLUGIN_NAME, q.c_str());
+      TSError("[%s] %s-INT16 index out of range: %s", PLUGIN_NAME, _scope_label(_scope), q.c_str());
     } else {
-      Dbg(pi_dbg_ctl, "\tParsing %%{STATE-INT16:%s}", q.c_str());
+      Dbg(pi_dbg_ctl, "\tParsing %%{%s-INT16:%s}", _scope_label(_scope), q.c_str());
     }
   }
 }
 
 void
-ConditionStateInt16::append_value(std::string &s, const Resources &res)
+ConditionStateInt16::do_append_value(std::string &s, const Resources &res)
 {
   uint16_t data = _get_data(res);
 
   s += std::to_string(data);
-  Dbg(pi_dbg_ctl, "Appending STATE-INT16(%d) to evaluation value -> %s", data, s.c_str());
+  Dbg(pi_dbg_ctl, "Appending %s-INT16(%d) to evaluation value -> %s", _scope_label(_scope), data, s.c_str());
 }
 
 bool
@@ -1738,12 +1793,22 @@ ConditionStateInt16::eval(const Resources &res)
 {
   uint16_t data = _get_data(res);
 
-  Dbg(pi_dbg_ctl, "Evaluating STATE-INT8()");
+  Dbg(pi_dbg_ctl, "Evaluating %s-INT16()", _scope_label(_scope));
 
   return static_cast<const MatcherType *>(_matcher.get())->test(data, res);
 }
 
 // ConditionLastCapture
+void
+ConditionLastCapture::initialize(Parser &p)
+{
+  Condition::initialize(p);
+  auto match = std::make_unique<MatcherType>(_cond_op);
+
+  match->set(p.get_arg(), mods());
+  _matcher = std::move(match);
+}
+
 void
 ConditionLastCapture::set_qualifier(const std::string &q)
 {
@@ -1763,7 +1828,7 @@ ConditionLastCapture::set_qualifier(const std::string &q)
 }
 
 void
-ConditionLastCapture::append_value(std::string &s, const Resources &res)
+ConditionLastCapture::do_append_value(std::string &s, const Resources &res)
 {
   if (res.matches().size() > _ix) {
     s.append(res.matches()[_ix]);

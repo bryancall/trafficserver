@@ -27,6 +27,7 @@
 #include "iocore/eventsystem/Thread.h"
 #include <sys/stat.h>
 #include <dirent.h>
+#include <exception>
 #include <string>
 #include <iostream>
 #include <fstream>
@@ -35,6 +36,7 @@
 
 const static int MAX_REQUEST_HEADER_SIZE = 131072;
 const static int MAX_TABLE_SIZE          = 4096;
+const static int MAX_FIELD_SIZE          = 32768;
 
 using namespace std;
 
@@ -194,7 +196,8 @@ test_decoding(const string &filename)
       case 'w':
         parse_line(line, 6, name, value);
         unpacked_len = unpack(value, unpacked);
-        hpack_decode_header_block(indexing_table, &decoded, unpacked, unpacked_len, MAX_REQUEST_HEADER_SIZE, MAX_TABLE_SIZE);
+        hpack_decode_header_block(indexing_table, &decoded, unpacked, unpacked_len, MAX_REQUEST_HEADER_SIZE, MAX_TABLE_SIZE,
+                                  MAX_FIELD_SIZE);
         break;
       }
       break;
@@ -250,7 +253,7 @@ test_encoding(const string &filename_in, const string &filename_out)
             break;
           }
           hpack_decode_header_block(indexing_table_for_decoding, &decoded, encoded, written, MAX_REQUEST_HEADER_SIZE,
-                                    MAX_TABLE_SIZE);
+                                    MAX_TABLE_SIZE, MAX_FIELD_SIZE);
           if (compare_header_fields(&decoded, &original) != 0) {
             result = seqnum;
             break;
@@ -295,7 +298,8 @@ test_encoding(const string &filename_in, const string &filename_out)
     result = seqnum;
     return result;
   }
-  hpack_decode_header_block(indexing_table_for_decoding, &decoded, encoded, written, MAX_REQUEST_HEADER_SIZE, MAX_TABLE_SIZE);
+  hpack_decode_header_block(indexing_table_for_decoding, &decoded, encoded, written, MAX_REQUEST_HEADER_SIZE, MAX_TABLE_SIZE,
+                            MAX_FIELD_SIZE);
   if (compare_header_fields(&decoded, &original) != 0) {
     result = seqnum;
     return result;
@@ -328,13 +332,13 @@ prepare()
     cerr << "Cannot open " << input_dir << endl;
     return 1;
   }
-  struct stat st;
-  char        name[PATH_MAX + 1] = "";
-  strcat(name, input_dir.c_str());
   while ((d = readdir(dir)) != nullptr) {
-    name[input_dir.length()] = '\0';
-    ink_strlcat(name, d->d_name, sizeof(name));
-    stat(name, &st);
+    struct stat st;
+    string      name = input_dir + d->d_name;
+
+    if (stat(name.c_str(), &st) != 0) {
+      continue;
+    }
     if (!S_ISDIR(st.st_mode)) {
       ++last;
     }
@@ -390,30 +394,38 @@ REGRESSION_TEST(HPACK_Encoding)(RegressionTest *t, int /* atype ATS_UNUSED */, i
 int
 main(int argc, const char **argv)
 {
-  auto &version = AppVersionInfo::setup_version("test_HPACK");
-  process_args(&version, argument_descriptions, countof(argument_descriptions), argv);
+  try {
+    auto &version = AppVersionInfo::setup_version("test_HPACK");
+    process_args(&version, argument_descriptions, countof(argument_descriptions), argv);
 
-  ink_freelist_init_ops(cmd_disable_freelist, cmd_disable_pfreelist);
+    ink_freelist_init_ops(cmd_disable_freelist, cmd_disable_pfreelist);
 
-  if (*cmd_input_dir) {
-    input_dir = cmd_input_dir;
-    if (input_dir.back() != '/') {
-      input_dir += '/';
+    if (*cmd_input_dir) {
+      input_dir = cmd_input_dir;
+      if (input_dir.back() != '/') {
+        input_dir += '/';
+      }
     }
-  }
-  if (*cmd_output_dir) {
-    output_dir = cmd_output_dir;
-    if (output_dir.back() != '/') {
-      output_dir += '/';
+    if (*cmd_output_dir) {
+      output_dir = cmd_output_dir;
+      if (output_dir.back() != '/') {
+        output_dir += '/';
+      }
     }
-  }
 
-  Thread *main_thread = new EThread;
-  main_thread->set_specific();
-  url_init();
-  mime_init();
-  http_init();
-  prepare();
-  int status = RegressionTest::main(argc, argv, REGRESSION_TEST_QUICK);
-  return status;
+    Thread *main_thread = new EThread;
+    main_thread->set_specific();
+    url_init();
+    mime_init();
+    http_init();
+    prepare();
+    int status = RegressionTest::main(argc, argv, REGRESSION_TEST_QUICK);
+    return status;
+  } catch (const std::exception &e) {
+    cerr << "test_HPACK: unhandled exception: " << e.what() << endl;
+    return 2;
+  } catch (...) {
+    cerr << "test_HPACK: unhandled exception of unknown type" << endl;
+    return 2;
+  }
 }

@@ -93,8 +93,14 @@ if(NOT APPLE)
   target_link_options(test_PluginDso PRIVATE -Wl,--allow-multiple-definition)
 endif()
 
+# These tests dlopen plugins, and the stub file libinknet_stub.cc double-defines symbols.
+# Disable the resulting ODR violation report; see remap_test_dlopen_leak_suppression.txt.
+set(REMAP_DSO_TEST_ENVIRONMENT
+    "ASAN_OPTIONS=detect_odr_violation=0;LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/remap_test_dlopen_leak_suppression.txt"
+)
+
 if(NOT APPLE)
-  add_catch2_test(NAME test_PluginDso COMMAND $<TARGET_FILE:test_PluginDso>)
+  add_catch2_test(NAME test_PluginDso COMMAND $<TARGET_FILE:test_PluginDso> ENVIRONMENT "${REMAP_DSO_TEST_ENVIRONMENT}")
 endif()
 ### test_PluginFactory ########################################################################
 
@@ -133,7 +139,9 @@ target_link_libraries(
 )
 
 if(NOT APPLE)
-  add_catch2_test(NAME test_PluginFactory COMMAND $<TARGET_FILE:test_PluginFactory>)
+  add_catch2_test(
+    NAME test_PluginFactory COMMAND $<TARGET_FILE:test_PluginFactory> ENVIRONMENT "${REMAP_DSO_TEST_ENVIRONMENT}"
+  )
 endif()
 ### test_RemapPluginInfo ########################################################################
 
@@ -166,18 +174,8 @@ target_link_libraries(
 )
 
 if(NOT APPLE)
-  add_catch2_test(NAME test_RemapPluginInfo COMMAND $<TARGET_FILE:test_RemapPluginInfo>)
-endif()
-
-# not in the same if as the above will be removed shortly.
-if(NOT APPLE)
-  # Disable ORD violation caused by double definition inside a stub file libinknet_stub.cc
-  # see remap_test_dlopen_leak_suppression.txt for more info.
-  set_tests_properties(
-    test_RemapPluginInfo test_PluginDso test_PluginFactory
-    PROPERTIES
-      ENVIRONMENT
-      "ASAN_OPTIONS=detect_odr_violation=0;LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/remap_test_dlopen_leak_suppression.txt"
+  add_catch2_test(
+    NAME test_RemapPluginInfo COMMAND $<TARGET_FILE:test_RemapPluginInfo> ENVIRONMENT "${REMAP_DSO_TEST_ENVIRONMENT}"
   )
 endif()
 ### test_NextHopStrategyFactory ########################################################################
@@ -201,9 +199,19 @@ target_compile_definitions(
 target_include_directories(test_NextHopStrategyFactory PRIVATE ${PROJECT_SOURCE_DIR}/tests/include)
 
 target_link_libraries(
-  test_NextHopStrategyFactory PRIVATE Catch2::Catch2WithMain ts::hdrs ts::inkutils tscore libswoc::libswoc
-                                      yaml-cpp::yaml-cpp
+  test_NextHopStrategyFactory
+  PRIVATE Catch2::Catch2WithMain
+          ts::hdrs
+          ts::inkutils
+          tscore
+          libswoc::libswoc
+          yaml-cpp::yaml-cpp
+          configmanager
 )
+
+if(NOT APPLE)
+  target_link_options(test_NextHopStrategyFactory PRIVATE -Wl,--allow-multiple-definition)
+endif()
 
 add_catch2_test(NAME test_NextHopStrategyFactory COMMAND $<TARGET_FILE:test_NextHopStrategyFactory>)
 
@@ -234,7 +242,12 @@ target_link_libraries(
           tscore
           libswoc::libswoc
           yaml-cpp::yaml-cpp
+          configmanager
 )
+
+if(NOT APPLE)
+  target_link_options(test_NextHopRoundRobin PRIVATE -Wl,--allow-multiple-definition)
+endif()
 
 add_catch2_test(NAME test_NextHopRoundRobin COMMAND $<TARGET_FILE:test_NextHopRoundRobin>)
 
@@ -267,7 +280,12 @@ target_link_libraries(
           ts::inkutils
           libswoc::libswoc
           yaml-cpp::yaml-cpp
+          configmanager
 )
+
+if(NOT APPLE)
+  target_link_options(test_NextHopConsistentHash PRIVATE -Wl,--allow-multiple-definition)
+endif()
 
 add_catch2_test(NAME test_NextHopConsistentHash COMMAND $<TARGET_FILE:test_NextHopConsistentHash>)
 
@@ -288,3 +306,21 @@ target_link_libraries(
 )
 
 add_catch2_test(NAME test_RemapRules COMMAND $<TARGET_FILE:test_RemapRules>)
+
+### test_RemapRulesYaml ########################################################################
+add_executable(test_RemapRulesYaml "${PROJECT_SOURCE_DIR}/src/iocore/cache/unit_tests/stub.cc" test_RemapRulesYaml.cc)
+
+target_link_libraries(
+  test_RemapRulesYaml
+  PRIVATE Catch2::Catch2WithMain
+          ts::http
+          ts::hdrs # transitive
+          logging # transitive
+          ts::http_remap # transitive
+          ts::proxy
+          inkdns # transitive
+          ts::inknet
+          ts::jsonrpc_protocol
+)
+
+add_catch2_test(NAME test_RemapRulesYaml COMMAND $<TARGET_FILE:test_RemapRulesYaml>)

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -25,6 +25,7 @@
 #include "tscore/ink_platform.h"
 #include "tscore/ink_inet.h"
 #include <cassert>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <string_view>
@@ -693,7 +694,7 @@ http_hdr_url_set(HdrHeap *heap, HTTPHdrImpl *hh, URLImpl *url)
 void
 http_hdr_status_set(HTTPHdrImpl *hh, HTTPStatus status)
 {
-  ink_assert(hh->m_polarity == HTTPType::RESPONSE);
+  ink_release_assert(hh->m_polarity == HTTPType::RESPONSE);
   hh->u.resp.m_status = static_cast<int16_t>(status);
 }
 
@@ -713,7 +714,7 @@ http_hdr_reason_get(HTTPHdrImpl *hh)
 void
 http_hdr_reason_set(HdrHeap *heap, HTTPHdrImpl *hh, std::string_view value, bool must_copy)
 {
-  ink_assert(hh->m_polarity == HTTPType::RESPONSE);
+  ink_release_assert(hh->m_polarity == HTTPType::RESPONSE);
   mime_str_u16_set(heap, value, &(hh->u.resp.m_ptr_reason), &(hh->u.resp.m_len_reason), must_copy);
 }
 
@@ -913,7 +914,7 @@ http_parser_parse_req(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const 
            (end[-2] ^ '\r') | (end[-1] ^ '\n')) != 0) {
         goto slow_case;
       }
-      if (!(isdigit(end[-5]) && isdigit(end[-3]))) {
+      if (!(ParseRules::is_digit(end[-5]) && ParseRules::is_digit(end[-3]))) {
         goto slow_case;
       }
       if (!(ParseRules::is_space(cur[3]) && (!ParseRules::is_space(cur[4])) && (!ParseRules::is_space(end[-12])) &&
@@ -1010,7 +1011,7 @@ http_parser_parse_req(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const 
     }
     version_end = cur + 1;
   parse_version2:
-    if (isdigit(*cur)) {
+    if (ParseRules::is_digit(*cur)) {
       GETPREV(parse_url);
       goto parse_version2;
     }
@@ -1020,7 +1021,7 @@ http_parser_parse_req(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const 
     }
     goto parse_url;
   parse_version3:
-    if (isdigit(*cur)) {
+    if (ParseRules::is_digit(*cur)) {
       GETPREV(parse_url);
       goto parse_version3;
     }
@@ -1118,29 +1119,94 @@ http_parser_parse_req(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const 
 ParseResult
 validate_hdr_request_target(int method_wk_idx, URLImpl *url)
 {
-  ParseResult ret = ParseResult::DONE;
-  auto        host{url->get_host()};
-  auto        path{url->get_path()};
-  auto        scheme{url->get_scheme()};
+  // The only rejected request-target is authority-form (host present, scheme
+  // absent) with a method other than CONNECT. A part is empty when its pointer
+  // is null or its length is zero, matching the getters this replaces; the
+  // asterisk-form check is intentionally disabled (URLImpl can't distinguish
+  // '*' from '/*'), so origin-, asterisk-, and absolute-form all accept.
+  bool const host_present  = url->m_ptr_host != nullptr && url->m_len_host != 0;
+  bool const scheme_absent = url->m_scheme_wks_idx < 0 && (url->m_ptr_scheme == nullptr || url->m_len_scheme == 0);
 
-  if (host.empty()) {
-    if (path == "*"sv) { // asterisk-form
-      // Skip this check for now because URLImpl can't distinguish '*' and '/*'
-      // if (method_wk_idx != HTTP_WKSIDX_OPTIONS) {
-      //   ret = ParseResult::ERROR;
-      // }
-    } else { // origin-form
-      // Nothing to check here
-    }
-  } else if (scheme.empty() && !host.empty()) { // authority-form
-    if (method_wk_idx != HTTP_WKSIDX_CONNECT) {
-      ret = ParseResult::ERROR;
-    }
-  } else { // absolute-form
-    // Nothing to check here
+  if (host_present && scheme_absent && method_wk_idx != HTTP_WKSIDX_CONNECT) {
+    return ParseResult::ERROR;
+  }
+  return ParseResult::DONE;
+}
+
+bool
+http_parse_host_header(std::string_view value, std::string_view &host, int &port, bool &has_port)
+{
+  swoc::TextView text{value};
+
+  host     = {};
+  port     = 0;
+  has_port = false;
+
+  text.ltrim_if(&ParseRules::is_ws);
+  text.rtrim_if(&ParseRules::is_ws);
+  if (text.empty()) {
+    return false;
   }
 
-  return ret;
+  if ('[' == *text) {
+    // IPv6.
+    auto const close = text.find(']');
+    if (close == swoc::TextView::npos) {
+      // No closing ']', invalid host.
+      return false;
+    }
+
+    host = {text.data(), close + 1};
+    text.remove_prefix(close + 1);
+    if (!text.empty()) {
+      if (':' != text.front()) {
+        // If there are more characters, the next one must be a colon for the port.
+        return false;
+      }
+      text.remove_prefix(1);
+      if (text.empty()) {
+        // Port is indicated but not provided.
+        return false;
+      }
+      has_port = true;
+    }
+  } else {
+    // IPv4 or hostname.
+    auto const first_colon = text.find(':');
+    if (first_colon == swoc::TextView::npos) {
+      host = text;
+    } else {
+      if (text.find(':', first_colon + 1) != swoc::TextView::npos || first_colon == 0) {
+        // Only one colon is allowed, and it can't be the first character (empty host).
+        return false;
+      }
+
+      host = {text.data(), first_colon};
+      text.remove_prefix(first_colon + 1);
+      if (text.empty()) {
+        return false;
+      }
+      has_port = true;
+    }
+  }
+
+  if (!validate_host_name(host)) {
+    return false;
+  }
+
+  if (has_port) {
+    if (text.size() > 5 || !std::all_of(text.begin(), text.end(), &ParseRules::is_digit)) {
+      // Too many characters for a port, or non-digit characters in the port.
+      return false;
+    }
+
+    port = ink_atoi(text.data(), static_cast<int>(text.size()));
+    if (port <= 0 || port > 65535) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 ParseResult
@@ -1151,26 +1217,14 @@ validate_hdr_host(HTTPHdrImpl *hh)
   if (host_field) {
     if (host_field->has_dups()) {
       ret = ParseResult::ERROR; // can't have more than 1 host field.
+    } else if (auto host{host_field->value_get()}; host.empty()) {
+      ret = ParseResult::ERROR;
     } else {
-      auto             host{host_field->value_get()};
-      std::string_view addr, port, rest;
-      if (0 == ats_ip_parse(host, &addr, &port, &rest)) {
-        if (!port.empty()) {
-          if (port.size() > 5) {
-            return ParseResult::ERROR;
-          }
-          int port_i = ink_atoi(port.data(), port.size());
-          if (port_i >= 65536 || port_i <= 0) {
-            return ParseResult::ERROR;
-          }
-        }
-        if (!validate_host_name(addr)) {
-          return ParseResult::ERROR;
-        }
-        if (ParseResult::DONE == ret && !std::all_of(rest.begin(), rest.end(), &ParseRules::is_ws)) {
-          return ParseResult::ERROR;
-        }
-      } else {
+      std::string_view parsed_host;
+      int              port     = 0;
+      bool             has_port = false;
+
+      if (!http_parse_host_header(host, parsed_host, port, has_port)) {
         ret = ParseResult::ERROR;
       }
     }
@@ -1206,18 +1260,17 @@ validate_hdr_content_length(HdrHeap *heap, HTTPHdrImpl *hh)
     // status code and then close the connection
     std::string_view value = content_length_field->value_get();
 
-    // RFC 9110 section 8.6.
-    // Content-Length = 1*DIGIT
-    //
-    if (value.empty()) {
-      Dbg(dbg_ctl_http, "Content-Length headers don't match the ABNF, returning parse error");
-      return ParseResult::ERROR;
-    }
-
-    // If the content-length value contains a non-numeric value, the header is invalid
-    if (std::find_if(value.cbegin(), value.cend(), [](std::string_view::value_type c) { return !std::isdigit(c); }) !=
-        value.cend()) {
-      Dbg(dbg_ctl_http, "Content-Length value contains non-digit, returning parse error");
+    // RFC 9110 section 8.6: Content-Length = 1*DIGIT
+    // RFC 9110 section 8.6: "a recipient MUST anticipate potentially large
+    // decimal numerals and prevent parsing errors due to integer conversion
+    // overflows"
+    // RFC 9112 section 6.3: an invalid Content-Length is an unrecoverable
+    // framing error (request → 400, proxied response → 502).
+    // from_chars rejects empty, non-digit, and overflow in one pass.
+    int64_t cl;
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), cl);
+    if (ec != std::errc{} || ptr != value.data() + value.size() || cl < 0) {
+      Dbg(dbg_ctl_http, "Content-Length value is invalid, returning parse error");
       return ParseResult::ERROR;
     }
 
@@ -1298,8 +1351,9 @@ http_parser_parse_resp(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const
     if (end - cur >= 16) {
       int http_match =
         ((cur[0] ^ 'H') | (cur[1] ^ 'T') | (cur[2] ^ 'T') | (cur[3] ^ 'P') | (cur[4] ^ '/') | (cur[6] ^ '.') | (cur[8] ^ ' '));
-      if ((http_match != 0) || (!(isdigit(cur[5]) && isdigit(cur[7]) && isdigit(cur[9]) && isdigit(cur[10]) && isdigit(cur[11]) &&
-                                  (!ParseRules::is_space(cur[13]))))) {
+      if ((http_match != 0) ||
+          (!(ParseRules::is_digit(cur[5]) && ParseRules::is_digit(cur[7]) && ParseRules::is_digit(cur[9]) &&
+             ParseRules::is_digit(cur[10]) && ParseRules::is_digit(cur[11]) && (!ParseRules::is_space(cur[13]))))) {
         goto slow_case;
       }
 
@@ -1358,7 +1412,7 @@ http_parser_parse_resp(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const
     }
     GETNEXT(eoh);
   parse_version2:
-    if (isdigit(*cur)) {
+    if (ParseRules::is_digit(*cur)) {
       GETNEXT(eoh);
       goto parse_version2;
     }
@@ -1368,7 +1422,7 @@ http_parser_parse_resp(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const
     }
     goto eoh;
   parse_version3:
-    if (isdigit(*cur)) {
+    if (ParseRules::is_digit(*cur)) {
       GETNEXT(eoh);
       goto parse_version3;
     }
@@ -1387,7 +1441,7 @@ http_parser_parse_resp(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const
     status_start = cur;
   parse_status2:
     status_end = cur;
-    if (isdigit(*cur)) {
+    if (ParseRules::is_digit(*cur)) {
       GETNEXT(done);
       goto parse_status2;
     }
@@ -1459,8 +1513,11 @@ http_parse_status(const char *start, const char *end)
     start += 1;
   }
 
-  while ((start != end) && isdigit(*start)) {
+  while ((start != end) && ParseRules::is_digit(*start)) {
     status = (status * 10) + (*start++ - '0');
+    if (status > 999) {
+      return HTTPStatus::NONE;
+    }
   }
 
   return static_cast<HTTPStatus>(status);
@@ -1485,7 +1542,7 @@ http_parse_version(const char *start, const char *end)
     maj = 0;
     min = 0;
 
-    while ((start != end) && isdigit(*start)) {
+    while ((start != end) && ParseRules::is_digit(*start)) {
       maj    = (maj * 10) + (*start - '0');
       start += 1;
     }
@@ -1494,7 +1551,7 @@ http_parse_version(const char *start, const char *end)
       start += 1;
     }
 
-    while ((start != end) && isdigit(*start)) {
+    while ((start != end) && ParseRules::is_digit(*start)) {
       min    = (min * 10) + (*start - '0');
       start += 1;
     }
@@ -1564,7 +1621,7 @@ http_parse_qvalue(const char *&buf, int &len)
         http_skip_ws(buf, len);
 
         n = 0.0;
-        while (len > 0 && *buf && isdigit(*buf)) {
+        while (len > 0 && *buf && ParseRules::is_digit(*buf)) {
           n    = (n * 10) + (*buf++ - '0');
           len -= 1;
         }
@@ -1574,7 +1631,7 @@ http_parse_qvalue(const char *&buf, int &len)
           len -= 1;
 
           f = 10;
-          while (len > 0 && *buf && isdigit(*buf)) {
+          while (len > 0 && *buf && ParseRules::is_digit(*buf)) {
             n   += (*buf++ - '0') / static_cast<double>(f);
             f   *= 10;
             len -= 1;
@@ -1649,21 +1706,17 @@ HTTPHdr::_fill_target_cache() const
     m_host_mime      = nullptr;
     m_host_length    = static_cast<int>(host.length());
   } else {
-    std::string_view port;
-    std::tie(m_host_mime, host, port) = const_cast<HTTPHdr *>(this)->get_host_port_values();
-    m_host_length                     = static_cast<int>(host.length());
+    m_host_mime   = const_cast<HTTPHdr *>(this)->field_find(static_cast<std::string_view>(MIME_FIELD_HOST));
+    m_host_length = 0;
+    m_port        = 0;
 
-    if (m_host_mime != nullptr) {
-      m_port = 0;
-      if (!port.empty()) {
-        for (auto c : port) {
-          if (isdigit(c)) {
-            m_port = m_port * 10 + c - '0';
-          }
-        }
-      }
-      m_port_in_header = (0 != m_port);
-      m_port           = url_canonicalize_port(url->m_url_impl->m_url_type, m_port);
+    if (m_host_mime != nullptr && http_parse_host_header(m_host_mime->value_get(), host, m_port, m_port_in_header)) {
+      m_host_length = static_cast<int>(host.length());
+      m_port        = url_canonicalize_port(url->m_url_impl->m_url_type, m_port);
+    } else {
+      m_host_mime      = nullptr;
+      m_port           = 0;
+      m_port_in_header = false;
     }
   }
 
@@ -1902,6 +1955,26 @@ HTTPHdrImpl::unmarshal(intptr_t offset)
 }
 
 void
+HTTPHdrImpl::recompute_wks_indices()
+{
+  if (m_polarity == HTTPType::REQUEST) {
+    // http_hdr_method_get() answers from the index when it is set, so a stale index would report a
+    // different method than the one stored here. Tokenize case sensitively, exactly as the parser
+    // does, so a method that only matches a well-known string case insensitively stays untokenized.
+    u.req.m_method_wks_idx = u.req.m_ptr_method != nullptr ?
+                               static_cast<int16_t>(hdrtoken_method_tokenize(u.req.m_ptr_method, u.req.m_len_method)) :
+                               int16_t{-1};
+    if (u.req.m_url_impl != nullptr) {
+      u.req.m_url_impl->recompute_wks_idx();
+    }
+  }
+
+  if (m_fields_impl != nullptr) {
+    m_fields_impl->recompute_accelerators_and_presence_bits();
+  }
+}
+
+void
 HTTPHdrImpl::move_strings(HdrStrHeap *new_heap)
 {
   if (m_polarity == HTTPType::REQUEST) {
@@ -2047,7 +2120,7 @@ HTTPInfo::copy_frag_offsets_from(HTTPInfo *src)
 int
 HTTPInfo::marshal_length()
 {
-  int len = HTTP_ALT_MARSHAL_SIZE;
+  int len = HTTP_ALT_MARSHAL_SIZE + sizeof(uint64_t);
 
   if (m_alt->m_request_hdr.valid()) {
     len += m_alt->m_request_hdr.m_heap->marshal_length();
@@ -2082,7 +2155,7 @@ HTTPInfo::marshal(char *buf, int len)
   //   extra bytes now but will save copying any
   //   bytes on the way out of the cache
   memcpy(buf, m_alt, sizeof(HTTPCacheAlt));
-  marshal_alt->m_magic          = CacheAltMagic::MARSHALED;
+  marshal_alt->m_magic          = CacheAltMagic::MARSHALED_WKS;
   marshal_alt->m_writeable      = 0;
   marshal_alt->m_unmarshal_len  = -1;
   marshal_alt->m_ext_buffer     = nullptr;
@@ -2120,6 +2193,16 @@ HTTPInfo::marshal(char *buf, int len)
     marshal_alt->m_response_hdr.m_heap = nullptr;
   }
 
+  uint64_t identity = hdrtoken_wks_identity;
+#if TS_HAS_TESTS
+  if (char const *shift = std::getenv("ATS_TEST_WKS_IDX_SHIFT"); shift != nullptr && atoi(shift) != 0) {
+    identity = 0;
+  }
+#endif
+  ink_release_assert(len - used >= static_cast<int>(sizeof(identity)));
+  memcpy(reinterpret_cast<char *>(marshal_alt) + used, &identity, sizeof(identity));
+  used += sizeof(identity);
+
   // The prior system failed the marshal if there wasn't
   //   enough space by measuring the space for every
   //   component. Seems much faster to check once to
@@ -2128,6 +2211,30 @@ HTTPInfo::marshal(char *buf, int len)
 
   return used;
 }
+
+namespace
+{
+/** Rebuild the well-known string indexes of a freshly unmarshalled alternate.
+ *
+ * The object may have been written by a build whose well-known string table differed from this
+ * one's, in which case the indexes it stores denote different strings here than they did there.
+ * Both header heaps are fully swizzled by the time this runs, which the MIME field block walk
+ * needs. Doing this in unmarshal() rather than in the cache covers every reader of a marshalled
+ * object, and the CacheAltMagic check keeps it to once per buffer.
+ */
+void
+recompute_alt_wks_indices(HTTPCacheAlt *alt)
+{
+  // m_heap stays null unless unmarshalling filled the header in, so it also says whether m_http is
+  // a pointer this process may follow rather than one left over from the writer.
+  if (alt->m_request_hdr.m_heap != nullptr) {
+    alt->m_request_hdr.m_http->recompute_wks_indices();
+  }
+  if (alt->m_response_hdr.m_heap != nullptr) {
+    alt->m_response_hdr.m_http->recompute_wks_indices();
+  }
+}
+} // anonymous namespace
 
 int
 HTTPInfo::unmarshal(char *buf, int len, RefCountObj *block_ref)
@@ -2141,10 +2248,12 @@ HTTPInfo::unmarshal(char *buf, int len, RefCountObj *block_ref)
     ink_assert(alt->m_unmarshal_len > 0);
     ink_assert(alt->m_unmarshal_len <= len);
     return alt->m_unmarshal_len;
-  } else if (alt->m_magic != CacheAltMagic::MARSHALED) {
+  } else if (alt->m_magic != CacheAltMagic::MARSHALED && alt->m_magic != CacheAltMagic::MARSHALED_WKS) {
     ink_assert(!"HTTPInfo::unmarshal bad magic");
     return -1;
   }
+
+  bool const has_wks_identity = alt->m_magic == CacheAltMagic::MARSHALED_WKS;
 
   ink_assert(alt->m_unmarshal_len < 0);
   alt->m_magic = CacheAltMagic::ALIVE;
@@ -2152,9 +2261,16 @@ HTTPInfo::unmarshal(char *buf, int len, RefCountObj *block_ref)
   len -= HTTP_ALT_MARSHAL_SIZE;
 
   if (alt->m_frag_offset_count > HTTPCacheAlt::N_INTEGRAL_FRAG_OFFSETS) {
-    alt->m_frag_offsets  = reinterpret_cast<FragOffset *>(buf + reinterpret_cast<intptr_t>(alt->m_frag_offsets));
-    len                 -= sizeof(FragOffset) * alt->m_frag_offset_count;
-    ink_assert(len >= 0);
+    // Validate that m_frag_offset_count is sane: the fragment offset table must fit within the remaining buffer.
+    int64_t  frag_table_size = static_cast<int64_t>(sizeof(FragOffset)) * alt->m_frag_offset_count;
+    intptr_t frag_offset     = reinterpret_cast<intptr_t>(alt->m_frag_offsets);
+
+    if (frag_offset < 0 || len < frag_table_size || static_cast<int64_t>(orig_len) - frag_offset < frag_table_size) {
+      Warning("HTTPInfo::unmarshal: m_frag_offset_count or offset exceeds buffer - corrupt cache entry");
+      return -1;
+    }
+    alt->m_frag_offsets  = reinterpret_cast<FragOffset *>(buf + frag_offset);
+    len                 -= static_cast<int>(frag_table_size);
   } else if (alt->m_frag_offset_count > 0) {
     alt->m_frag_offsets = alt->m_integral_frag_offsets;
   } else {
@@ -2191,6 +2307,18 @@ HTTPInfo::unmarshal(char *buf, int len, RefCountObj *block_ref)
     alt->m_response_hdr.m_mime = hh->m_fields_impl;
   }
 
+  uint64_t identity = 0;
+  if (has_wks_identity) {
+    if (len < static_cast<int>(sizeof(identity))) {
+      return -1;
+    }
+    memcpy(&identity, buf + orig_len - len, sizeof(identity));
+    len -= sizeof(identity);
+  }
+  if (!has_wks_identity || identity != hdrtoken_wks_identity) {
+    recompute_alt_wks_indices(alt);
+  }
+
   alt->m_unmarshal_len = orig_len - len;
 
   return alt->m_unmarshal_len;
@@ -2219,9 +2347,19 @@ HTTPInfo::unmarshal_v24_1(char *buf, int len, RefCountObj *block_ref)
   len -= HTTP_ALT_MARSHAL_SIZE;
 
   if (alt->m_frag_offset_count > HTTPCacheAlt::N_INTEGRAL_FRAG_OFFSETS) {
+    // Validate that m_frag_offset_count is sane before computing sizes.
+    int64_t  frag_table_size = static_cast<int64_t>(sizeof(FragOffset)) * alt->m_frag_offset_count;
+    int64_t  extra64         = frag_table_size - static_cast<int64_t>(sizeof(alt->m_integral_frag_offsets));
+    intptr_t frag_offset     = reinterpret_cast<intptr_t>(alt->m_frag_offsets);
+
+    if (frag_offset < 0 || len < extra64 || static_cast<int64_t>(orig_len) - frag_offset < extra64) {
+      Warning("HTTPInfo::unmarshal_v24_1: m_frag_offset_count or offset exceeds buffer - corrupt cache entry");
+      return -1;
+    }
+
     // stuff that didn't fit in the integral slots.
-    int   extra     = sizeof(FragOffset) * alt->m_frag_offset_count - sizeof(alt->m_integral_frag_offsets);
-    char *extra_src = buf + reinterpret_cast<intptr_t>(alt->m_frag_offsets);
+    int   extra     = static_cast<int>(extra64);
+    char *extra_src = buf + frag_offset;
     // Actual buffer size, which must be a power of two.
     // Well, technically not, because we never modify an unmarshalled fragment
     // offset table, but it would be a nasty bug should that be done in the
@@ -2272,6 +2410,8 @@ HTTPInfo::unmarshal_v24_1(char *buf, int len, RefCountObj *block_ref)
     alt->m_response_hdr.m_mime = hh->m_fields_impl;
   }
 
+  recompute_alt_wks_indices(alt);
+
   alt->m_unmarshal_len = orig_len - len;
 
   return alt->m_unmarshal_len;
@@ -2286,7 +2426,7 @@ HTTPInfo::check_marshalled(char *buf, int len)
 {
   HTTPCacheAlt *alt = reinterpret_cast<HTTPCacheAlt *>(buf);
 
-  if (alt->m_magic != CacheAltMagic::MARSHALED) {
+  if (alt->m_magic != CacheAltMagic::MARSHALED && alt->m_magic != CacheAltMagic::MARSHALED_WKS) {
     return false;
   }
 

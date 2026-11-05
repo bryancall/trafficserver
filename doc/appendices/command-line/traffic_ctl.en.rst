@@ -43,6 +43,8 @@ of subcommands that control different aspects of Traffic Server:
 
 :program:`traffic_ctl config`
    Manipulate and display configuration records
+:program:`traffic_ctl cache`
+   Invalidate cached objects
 :program:`traffic_ctl metric`
    Manipulate performance and status metrics
 :program:`traffic_ctl server`
@@ -113,6 +115,70 @@ Options
 .. option:: --run-root
 
    Path to the runroot file.
+
+.. option:: --error-level <level>
+
+   Lowest severity that makes a server error exit with ``2``. When a method handler fails, each
+   entry in the ``data`` array of the error can carry a ``severity`` (see
+   :ref:`jsonrpc-node-errors-severity`). :program:`traffic_ctl` takes the most severe entry: at
+   or above ``<level>`` the command exits ``2``, below it the command exits ``0``. The error is
+   printed either way.
+
+   An entry without a ``severity`` counts as ``error``. That is how |TS| itself treats it, and it
+   is how every entry from an older |TS| arrives, so with the default level every failure still
+   exits ``2`` unless its handler marked it as less severe. For example, ``traffic_ctl server
+   drain`` on a server that is already draining reports a ``warn`` and exits ``0``.
+
+   Accepted values, case-insensitive: ``diag``, ``debug``, ``status``, ``note``, ``warn`` (or
+   ``warning``), ``error``, ``fatal``, ``alert`` and ``emergency``. Default: ``error``. The option
+   is refused when it is given more than once, or without a value.
+
+   |TS| answers a handler result below ``warn`` with a success, so a handler failure reaches
+   :program:`traffic_ctl` only at ``warn`` or above. Against |TS|, ``diag``, ``debug``, ``status``
+   and ``note`` therefore act like ``warn``. They differ only for a failure whose entries are all
+   marked below ``warn``, which takes a handler that sets the severity of its errata apart from the
+   entries (see :ref:`jsonrpc-node-errors-severity`).
+
+   The level applies to every command that decodes the server response, in every output format,
+   ``--format json`` included. ``traffic_ctl rpc file`` and ``traffic_ctl rpc input`` are the
+   exception: they print the raw response and their exit status does not look at errors in it.
+
+   A command that cannot finish because a request it depends on failed below the level exits
+   ``75`` rather than ``0``, since what was asked was not done: ``traffic_ctl config reload
+   --monitor`` when it cannot see how the reload ended, ``traffic_ctl config reload --show-details``
+   when it cannot show the reload's details, ``traffic_ctl config reset`` when it cannot read the
+   records, ``traffic_ctl metric monitor`` when a poll fails, and ``traffic_ctl server debug enable
+   --append`` when it cannot read the current tags.
+
+   .. note::
+
+      Errors that do not come from a method handler always exit ``2``, whatever the level:
+      protocol errors such as ``-32601 Method not found``, an unauthorized call, and a handler
+      failure without ``data`` entries. The level does not change errors a command reports inside
+      a successful response either, such as the record errors of ``traffic_ctl config get`` or
+      the reload errors of ``traffic_ctl config reload``.
+
+   Examples:
+
+   .. code-block:: bash
+
+      $ traffic_ctl server drain
+      $ traffic_ctl server drain
+      Server Error found:
+      [9] Error during execution
+      - [3000] Warn: Server already draining.
+      $ echo $?
+      0
+
+      # Treat warnings as failures
+      $ traffic_ctl --error-level=warn server drain
+      $ echo $?
+      2
+
+      # Only fail on fatal or above: a read-only record (no severity, so an error) exits 0
+      $ traffic_ctl --error-level=fatal config set proxy.config.thread.max_heartbeat_mseconds 999
+      $ echo $?
+      0
 
 Subcommands
 ===========
@@ -211,8 +277,353 @@ Display the current value of a configuration record.
    configuration after any configuration file modification. If no configuration files have been
    modified since the previous configuration load, this command is a no-op.
 
+   The reload is **asynchronous**: the command sends a JSONRPC request to |TS| and returns
+   immediately — it does not block until every config handler finishes. The actual reload work
+   runs on background threads (``ET_TASK``), where each registered config handler loads its
+   configuration and reports success or failure.
+
+   Every reload is assigned a **token** — a unique identifier for the reload operation. The token
+   is the handle you use to track, monitor, or query the reload after it starts. If no token is
+   provided via ``--token``, the server generates one automatically using a timestamp (e.g.
+   ``rldtk-1739808000000``). You can supply a custom token via ``--token`` (e.g.
+   ``-t deploy-v2.1``) to tag reloads with meaningful labels for CI pipelines, deploy scripts, or
+   post-mortem analysis.
+
+   Use the token to:
+
+   - **Monitor** a reload in real-time: ``traffic_ctl config reload -t <token> -m``
+   - **Query** the final status: ``traffic_ctl config status -t <token>``
+   - **Get detailed logs**: ``traffic_ctl config status -t <token>``
+
    The timestamp of the last reconfiguration event (in seconds since epoch) is published in the
-   `proxy.process.proxy.reconfigure_time` metric.
+   ``proxy.process.proxy.reconfigure_time`` metric.
+
+   **Behavior without options:**
+
+   When called without ``--monitor`` or ``--show-details``, the command sends the reload request
+   and immediately prints the assigned token along with suggested next-step commands:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config reload
+      ✔ Reload scheduled [rldtk-1739808000000]
+
+        Monitor : traffic_ctl config reload -t rldtk-1739808000000 -m
+        Details : traffic_ctl config reload -t rldtk-1739808000000 -s -l
+
+   **When a reload is already in progress:**
+
+   Only one reload can be active at a time. If a reload is already running, the command does
+   **not** start a new one. Instead, it reports the in-progress reload's token and provides
+   options to monitor it or force a new one:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config reload
+      ⟳ Reload in progress [rldtk-1739808000000]
+
+        Monitor : traffic_ctl config reload -t rldtk-1739808000000 -m
+        Details : traffic_ctl config status -t rldtk-1739808000000
+        Force   : traffic_ctl config reload --force  (may conflict with the running reload)
+
+   With ``--monitor``, it automatically switches to monitoring the in-progress reload instead of
+   failing. With ``--show-details``, it displays the current status of the in-progress reload.
+
+   **When a token already exists:**
+
+   If the token provided via ``--token`` was already used by a previous reload (even a completed
+   one), the command refuses to start a new reload to prevent ambiguity. Choose a different token
+   or omit ``--token`` to let the server generate a unique one:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config reload -t my-deploy
+      ✗ Token 'my-deploy' already in use
+
+        Status : traffic_ctl config status -t my-deploy
+        Retry  : traffic_ctl config reload
+
+   Supports the following options:
+
+   .. option:: --token, -t <token>
+
+      Assign a custom token to this reload. Tokens must be unique across the reload history — if
+      a reload (active or completed) already has this token, the command is rejected. When omitted,
+      the server generates a unique token automatically.
+
+      Custom tokens are useful for tagging reloads with deployment identifiers, ticket numbers,
+      or other meaningful labels that make it easier to query status later.
+
+      .. code-block:: bash
+
+         $ traffic_ctl config reload -t deploy-v2.1
+         ✔ Reload scheduled [deploy-v2.1]
+
+   .. option:: --monitor, -m
+
+      Start the reload and monitor its progress with a live progress bar until completion. The
+      progress bar updates in real-time showing the number of completed handlers, overall status,
+      and elapsed time.
+
+      Polls the server at regular intervals controlled by ``--refresh-int`` (default: every 0.5
+      seconds). Before the first poll, waits briefly (see ``--initial-wait``) to allow the server
+      time to dispatch work to all handlers.
+
+      If a reload is already in progress, ``--monitor`` automatically attaches to that reload and
+      monitors it instead of failing.
+
+      If both ``--monitor`` and ``--show-details`` are specified, ``--monitor`` is ignored and
+      ``--show-details`` takes precedence.
+
+      .. code-block:: bash
+
+         $ traffic_ctl config reload -t deploy-v2.1 -m
+         ✔ Reload scheduled [deploy-v2.1]
+         ✔ [deploy-v2.1] ████████████████████ 11/11  success  (245ms)
+
+      Failed reload:
+
+      .. code-block:: bash
+
+         $ traffic_ctl config reload -t hotfix-cert -m
+         ✔ Reload scheduled [hotfix-cert]
+         ✗ [hotfix-cert] ██████████████░░░░░░ 9/11  fail  (310ms)
+
+           Details : traffic_ctl config status -t hotfix-cert
+
+      .. note::
+
+         During a reload, all subtasks are pre-registered shortly after file processing
+         completes. However, the first file (typically ``records.yaml``) may briefly show as
+         ``1/1 success`` before record-triggered handlers are reserved by the flush. The
+         ``--initial-wait`` option (default: 2s) delays the first poll to reduce the chance
+         of observing this transient state.
+
+   .. option:: --show-details, -s
+
+      Start the reload and display a detailed status report. The command sends the reload request,
+      waits for the configured initial wait (see ``--initial-wait``, default: 2 seconds) to allow
+      handlers to start, then fetches and prints the full task tree with per-handler status and
+      durations.
+
+      If a reload is already in progress, shows the status of that reload immediately.
+
+      Combine with ``--include-logs`` to also show per-handler log messages.
+
+      .. code-block:: bash
+
+         $ traffic_ctl config reload -s -l
+         ✔ Reload scheduled [rldtk-1739808000000]. Waiting for details...
+
+         ✔ Reload [success] — rldtk-1739808000000
+           Started : 2025 Feb 17 12:00:00.123
+           Duration: 245ms
+
+           Tasks:
+            ✔ ip_allow.yaml ·························· 18ms
+            ✔ logging.yaml ··························· 120ms
+            ...
+
+   .. option:: --include-logs, -l
+
+      Include per-handler log messages in the output. Only meaningful together with
+      ``--show-details``. Log messages are set by handlers via ``ctx.log()`` and
+      ``ctx.fail()`` during the reload.
+
+   .. option:: --data, -d <source>
+
+      Supply inline YAML configuration content for the reload. The content is passed directly to
+      config handlers at runtime and is **not persisted to disk** — a server restart will revert
+      to the file-based configuration. A warning is printed after a successful inline reload to
+      remind the operator.
+
+      Accepts the following formats:
+
+      - ``@file.yaml`` — read content from a file
+      - ``@-`` — read content from stdin
+      - ``"yaml: content"`` — inline YAML string
+      - Multiple ``-d`` arguments can be provided — their content is merged, with later values
+        overriding earlier ones for the same key
+
+      The YAML content uses **registry keys** (e.g. ``ip_allow``, ``sni``) as top-level keys.
+      Each key maps to the full configuration content that the handler normally reads from its
+      config file. A single file can target multiple handlers:
+
+      .. code-block:: yaml
+
+         # reload_rules.yaml
+         # Each top-level key is a registry key.
+         # The value is the config content (inner data, not the file's top-level wrapper).
+         ip_allow:
+           - apply: in
+             ip_addrs: 0.0.0.0/0
+             action: allow
+         sni:
+           - fqdn: "*.example.com"
+             verify_client: NONE
+
+      .. code-block:: bash
+
+         # Reload from file
+         $ traffic_ctl config reload -d @reload_rules.yaml -t update-rules -m
+
+         # Reload from stdin
+         $ cat rules.yaml | traffic_ctl config reload -d @- -m
+
+      When used with ``-d``, only the handlers for the keys present in the YAML content are
+      invoked — other config handlers are not triggered.
+
+      .. note::
+
+         Inline YAML reload requires the target config handler to support
+         ``ConfigSource::FileAndRpc``. Handlers that only support ``ConfigSource::FileOnly``
+         will return an error for the corresponding key. The JSONRPC response will contain
+         per-key error details.
+
+   .. option:: --directive, -D <config_key.directive_key=value>
+
+      Pass a reload directive to a specific config handler. Directives are operational parameters
+      that modify how the handler performs the reload — for example, scoping a reload to a single
+      entry or enabling a dry-run mode. They are distinct from config content (``-d``).
+
+      The format is ``config_key.directive_key=value``, parsed by splitting on the first ``.``
+      and the first ``=``:
+
+      - ``config_key`` — the registry key (e.g. ``ip_allow``, ``sni``)
+      - ``directive_key`` — the directive name understood by that handler
+      - ``value`` — the directive value (always passed as a string on the wire)
+
+      Multiple directives are passed as space-separated values after a single ``-D``, or by
+      repeating the option. Both spellings accumulate, and they may be mixed:
+
+      .. code-block:: bash
+
+         # Single directive
+         $ traffic_ctl config reload -D myconfig.id=foo
+
+         # Multiple directives for the same handler
+         $ traffic_ctl config reload -D myconfig.id=foo myconfig.dry_run=true
+
+         # Directives for different handlers in the same reload
+         $ traffic_ctl config reload -D myconfig.id=foo sni.fqdn=example.com
+
+         # The same, written as a repeated option
+         $ traffic_ctl config reload -D myconfig.id=foo -D sni.fqdn=example.com
+
+         # Repeating it is how a directive is written after another option
+         $ traffic_ctl config reload -D myconfig.id=foo --monitor -D sni.fqdn=example.com
+
+      On the wire, ``-D myconfig.id=foo`` translates to:
+
+      .. code-block:: json
+
+         { "configs": { "myconfig": { "_reload": { "id": "foo" } } } }
+
+      For complex or nested directive values, use ``-d`` with full YAML instead:
+
+      .. code-block:: bash
+
+         $ traffic_ctl config reload -d 'myconfig: { _reload: { id: foo, options: { strict: true } } }'
+
+      .. note::
+
+         ``-D`` accepts values until the next option or the end of the command line, so it
+         may appear anywhere among the options and can be combined with ``-d`` — directives
+         and inline content merge under the same config key:
+
+         .. code-block:: bash
+
+            $ traffic_ctl config reload -D myconfig.id=foo --monitor
+            $ traffic_ctl config reload -D myconfig.id=foo -d 'myconfig: {rules: [a]}'
+
+         To pass a directive value that begins with ``-``, place ``--`` before it. Recognition of
+         ``config reload``'s own options then stays off for the rest of the line, so every
+         remaining token becomes a directive value and any such option written afterwards is
+         swallowed. The global options (``--format``, ``--help``, ``--run-root``, ...) are
+         different: only the first token after ``--`` is kept away from them, so a later token
+         spelled like one of them is still taken as that option. When options have to follow,
+         or more than one value begins with ``-``, give each such value as
+         ``--directive=-value`` instead, without ``-D --``:
+
+         .. code-block:: bash
+
+            $ traffic_ctl config reload --directive=-weird.id=foo --monitor
+
+      .. note::
+
+         Available directives depend on the handler — consult each config's documentation for
+         supported directive keys. Directive values are strings on the wire; handlers use
+         yaml-cpp's ``as<T>()`` to interpret them as needed.
+
+   .. option:: --force, -F
+
+      Force a new reload even if one is already in progress. Without this flag, the server rejects
+      a new reload when one is active.
+
+      .. warning::
+
+         ``--force`` does **not** stop or cancel the running reload. It starts a second reload
+         alongside the first one. Handlers from both reloads may execute concurrently on separate
+         ``ET_TASK`` threads. This can lead to unpredictable behavior if handlers are not designed
+         for concurrent execution. Use this flag only for debugging or recovery situations.
+
+   .. option:: --refresh-int, -r <seconds>
+
+      Set the polling interval in seconds used with ``--monitor``. Accepts fractional values
+      (e.g. ``0.5`` for 500ms). Controls how often ``traffic_ctl`` queries the server for
+      updated reload status. Default: ``0.5``.
+
+   .. option:: --initial-wait <seconds>
+
+      Initial wait in seconds before the first status poll. After scheduling a reload, the
+      server needs a brief moment to dispatch work to all handlers. This delay avoids polling
+      before any handler has started, which would show an empty or incomplete task tree.
+      Accepts fractional values (e.g. ``1.5``). Default: ``2``.
+
+   .. option:: --timeout, -T <duration>
+
+      Maximum time to wait for reload completion when using ``--monitor``. Accepts duration
+      strings (e.g. ``30s``, ``1m``, ``500ms``). If the reload does not reach a terminal state
+      within the specified duration, ``traffic_ctl`` stops monitoring and exits with
+      ``EX_TEMPFAIL`` (75). The reload itself continues on the server — use
+      ``traffic_ctl config status -t <token>`` to check its final status later.
+      Default: ``0`` (no timeout — wait indefinitely until the reload completes or is
+      interrupted). Requires ``--monitor``.
+
+   **Exit codes for config reload:**
+
+   The ``config reload`` command sets the process exit code to reflect the outcome of the
+   reload operation:
+
+   ``0``
+      Success. The reload was scheduled (without ``--monitor``) or completed successfully
+      (with ``--monitor``). Without ``--monitor`` or ``--show-details``, also when the server
+      reported an error below :option:`traffic_ctl --error-level`.
+
+   ``2``
+      Error. The reload reached a terminal failure state (``fail`` or ``timeout``), an
+      RPC communication error occurred, or the server reported an error at or above
+      :option:`traffic_ctl --error-level`.
+
+   ``75``
+      Temporary failure (``EX_TEMPFAIL`` from ``sysexits.h``). A reload is already in
+      progress and the command could not start a new one, monitoring was interrupted
+      (e.g. Ctrl+C) before the reload reached a terminal state, the ``--timeout``
+      duration was exceeded, or, with ``--monitor`` or ``--show-details``, a request failed with
+      an error below :option:`traffic_ctl --error-level`. The caller is invited to retry or
+      monitor the operation later.
+
+   Example usage in scripts:
+
+   .. code-block:: bash
+
+      traffic_ctl config reload -m
+      rc=$?
+      case $rc in
+        0)  echo "Reload completed successfully" ;;
+        2)  echo "Reload failed" ;;
+        75) echo "Reload still in progress, retry later" ;;
+      esac
 
 .. program:: traffic_ctl config
 .. option:: set RECORD VALUE
@@ -222,6 +633,13 @@ Display the current value of a configuration record.
    Set the named configuration record to the specified value. Refer to the :file:`records.yaml`
    documentation for a list of the configuration variables you can specify. Note that this is not a
    synchronous operation.
+
+   A value that begins with ``-`` and could be read as an option, such as ``-f`` or ``-h``, needs
+   ``--`` directly before it. Only the value right after ``--`` is protected:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config set proxy.config.diags.debug.tags -- -f
 
    Supports the following options.
 
@@ -242,6 +660,55 @@ Display the current value of a configuration record.
 
    Specifying the file name is not needed as `traffic_ctl` will try to use the build(or the runroot if used) information to figure
    out the path to the `records.yaml`.
+
+   ``-c`` accepts at most one file name, so it may be written before or after the record
+   names:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config get -c records.yaml proxy.config.diags.debug.enabled
+      $ traffic_ctl config get proxy.config.diags.debug.enabled -c records.yaml
+      $ traffic_ctl config get --cold=records.yaml proxy.config.diags.debug.enabled
+
+   When no file name is given, write ``-c`` last, or use the ``--cold=`` form for the
+   explicit file. A bare ``-c`` followed by a record name takes the record as the file name,
+   which leaves the command short of its own arguments. Each command reports this in terms of
+   what it was left without:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config get proxy.config.diags.debug.enabled -c    # default records.yaml
+      $ traffic_ctl config get -c proxy.config.diags.debug.enabled
+      Error: at least one argument expected by get
+
+      $ traffic_ctl config set proxy.config.diags.debug.enabled 1 -c  # default records.yaml
+      $ traffic_ctl config set -c proxy.config.diags.debug.enabled 1
+      Error: 2 argument(s) expected by set
+
+   An empty file name is not a file name, so it is reported rather than taken as a request for
+   the default file. This matters when the name comes from a variable that is unset, where
+   reading or writing the live :file:`records.yaml` is unlikely to be what was meant:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config set -c "" proxy.config.diags.debug.enabled 1
+      Error: missing argument for '-c'
+
+   ``-c`` is also given at most once, so repeating it is a usage error rather than the last
+   file name silently winning.
+
+   When ``-c`` is written with no file name and the ``TS_RECORD_YAML`` environment variable
+   is set, its value is used as the file name instead of the sysconfig
+   :file:`records.yaml`:
+
+   .. code-block:: bash
+
+      $ TS_RECORD_YAML=/tmp/records.yaml traffic_ctl config get proxy.config.diags.debug.enabled -c
+
+   A file name typed on the command line always takes precedence over the variable, which is
+   used only when ``-c`` is given no file name at all. ``-c`` is already refused outright when
+   written more than once, so there is no case where one occurrence has a file name and another
+   does not.
 
    If the file exists and is empty a new document will be created. If a file does not exist, an attempt to create a new file will be done.
 
@@ -351,11 +818,192 @@ Display the current value of a configuration record.
 .. program:: traffic_ctl config
 .. option:: status
 
-   :ref:`admin_lookup_records`
+   :ref:`get_reload_config_status`
 
-   Display detailed status about the Traffic Server configuration system. This includes version
-   information, whether the internal configuration store is current and whether any daemon processes
-   should be restarted.
+   Display the status of configuration reloads. This is a read-only command — it does not trigger
+   a reload, it only queries the server for information about past or in-progress reloads.
+
+   **Behavior without options:**
+
+   When called without ``--token`` or ``--count``, shows the most recent reload:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config status
+      ✔ Reload [success] — rldtk-1739808000000
+        Started : 2025 Feb 17 12:00:00.123
+        Finished: 2025 Feb 17 12:00:00.368
+        Duration: 245ms
+
+        ✔ 11 success  ◌ 0 in-progress  ✗ 0 failed  (11 total)
+
+        Tasks:
+         ✔ logging.yaml ··························· 120ms
+         ✔ ip_allow.yaml ·························· 18ms
+         ...
+
+   **When no reloads have occurred:**
+
+   If the server has not performed any reloads since startup, the command reports that no reload
+   tasks were found.
+
+   **Querying a specific reload:**
+
+   Use ``--token`` to look up a specific reload by its token. If the token does not exist in
+   the history, an error is returned:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config status -t nonexistent
+      ✗ Token 'nonexistent' not found
+
+   **Failed reload report:**
+
+   When a reload has failed handlers, the output shows which handlers succeeded and which failed,
+   along with durations and per-handler log entries. Log entries carry severity tags when a
+   severity level was recorded:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config status -t hotfix-cert
+      ✗ Reload [fail] — hotfix-cert
+        Started : 2025 Feb 17 14:30:10.500
+        Finished: 2025 Feb 17 14:30:10.810
+        Duration: 310ms
+
+        ✔ 9 success  ◌ 0 in-progress  ✗ 2 failed  (11 total)
+
+        Tasks:
+         ✔ ip_allow.yaml ·························· 18ms
+         ✗ ssl_client_coordinator ················· 85ms  ✗ FAIL
+         │  [Note]  SSL configs reloaded
+         ├─ ✔ SSLConfig ·························· 10ms
+         │     [Note]  SSLConfig loading ...
+         │     [Note]  SSLConfig reloaded
+         ├─ ✗ SNIConfig ·························· 12ms  ✗ FAIL
+         │     [Note]  sni.yaml loading ...
+         │     [Err]   sni.yaml failed to load: yaml-cpp error ...
+         └─ ✔ SSLCertificateConfig ·············· 13ms
+               [Note]  (ssl) ssl_multicert.yaml loading ...
+               [Note]  (ssl) ssl_multicert.yaml finished loading
+         ...
+
+   Supports the following options:
+
+   .. option:: --token, -t <token>
+
+      Show the status of a specific reload identified by its token. The token was either assigned
+      by the server (e.g. ``rldtk-<timestamp>``) or provided by the operator via
+      ``traffic_ctl config reload --token``.
+
+      Returns an error if the token is not found in the reload history.
+
+   .. option:: --count, -c <N|all>
+
+      Show the last ``N`` reload records from the history. Use ``all`` to display every reload
+      the server has recorded (up to the internal history limit).
+
+      When ``--count`` is provided, ``--token`` is ignored.
+
+      .. code-block:: bash
+
+         # Show full history
+         $ traffic_ctl config status -c all
+
+         # Show last 5 reloads
+         $ traffic_ctl config status -c 5
+
+   .. option:: --min-level <level>
+
+      Filter task log entries by minimum severity level. Only entries at or above the specified
+      level are displayed. State-transition messages carry implicit severity:
+      ``in_progress()`` and ``complete()`` produce ``[Note]`` entries, ``fail()`` produces
+      ``[Err]`` entries. Entries without a severity (``DL_Undefined``) — typically those logged
+      via the one-argument ``ctx.log(text)`` — are always shown regardless of this filter.
+
+      Valid levels (case-insensitive): ``debug``, ``note``, ``warning``, ``error``.
+
+      .. code-block:: bash
+
+         # Show only warnings and errors
+         $ traffic_ctl config status -t my-token --min-level warning
+
+         # Show only errors
+         $ traffic_ctl config status -t my-token --min-level error
+
+      **Example — all logs (no filter):**
+
+      .. code-block:: text
+
+         ✗ ssl_client_coordinator ·······················    2ms  ✗ FAIL
+         │  [Note]  SSL configs reloaded
+         ├─ ✔ SSLConfig ·································    1ms
+         │     [Note]  SSLConfig loading ...
+         │     [Note]  SSLConfig reloaded
+         ├─ ✗ SNIConfig ·································    1ms  ✗ FAIL
+         │     [Note]  sni.yaml loading ...
+         │     [Err]   sni.yaml failed to load
+         └─ ✔ SSLCertificateConfig ······················    0ms
+               [Note]  (ssl) ssl_multicert.yaml loading ...
+               [Warn]  Cannot open SSL certificate configuration "ssl_multicert.yaml" - No such file or directory
+               [Note]  (ssl) ssl_multicert.yaml finished loading
+
+      **Example — --min-level warning (note and debug entries filtered out):**
+
+      .. code-block:: text
+
+         ✗ ssl_client_coordinator ·······················    2ms  ✗ FAIL
+         ├─ ✗ SNIConfig ·································    1ms  ✗ FAIL
+         │     [Err]   sni.yaml failed to load
+         └─ ✔ SSLCertificateConfig ······················    0ms
+               [Warn]  Cannot open SSL certificate configuration "ssl_multicert.yaml" - No such file or directory
+
+      All entries from state transitions and ``CfgLoad*`` macros carry a severity tag
+      (e.g. ``[Dbg]``, ``[Note]``, ``[Warn]``, ``[Err]``). Entries without a tag are
+      "unleveled" (from the one-argument ``ctx.log(text)``) and always pass the filter.
+
+   .. tip::
+
+      For deeper investigation beyond what ``traffic_ctl config status`` shows, enable the
+      ``config.reload`` debug tag. This writes a full dump of every subtask and its log entries
+      (with severity tags) to ``diags.log`` after each reload completes.
+      See :ref:`config-reload-diags-log` in the developer guide for details and examples.
+
+      Enable at runtime without restarting:
+
+      .. code-block:: bash
+
+         $ traffic_ctl server debug enable --tags "config.reload"
+
+      Or persistently in ``records.yaml``:
+
+      .. code-block:: yaml
+
+         records:
+           diags:
+             debug:
+               enabled: 1
+               tags: config.reload
+
+   **JSON output:**
+
+   All ``config status`` commands support the global ``--format json`` option to output the raw
+   JSONRPC response as JSON instead of the human-readable format. This is useful for automation,
+   CI pipelines, monitoring tools, or any system that consumes structured output directly:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config status -t deploy-v2.1 --format json
+      {
+        "tasks": [
+          {
+            "config_token": "deploy-v2.1",
+            "status": "success",
+            "description": "Main reload task - 2025 Feb 17 12:00:00",
+            "sub_tasks": [ ...]
+          }
+        ]
+      }
 
 .. program:: traffic_ctl config
 .. option:: registry
@@ -364,6 +1012,76 @@ Display the current value of a configuration record.
 
    Display information about the registered files in |TS|. This includes the full file path, config record name, parent config (if any)
    if needs root access and if the file is required in |TS|.
+
+.. program:: traffic_ctl config
+.. option:: convert <type> <args...>
+
+   Convert a legacy configuration file to its YAML equivalent. The conversion
+   runs locally — no running :program:`traffic_server` is required.
+
+   Supported types:
+
+   ``ssl_multicert``
+      Convert ``ssl_multicert.config`` to :file:`ssl_multicert.yaml`.
+
+      .. code-block:: bash
+
+         traffic_ctl config convert ssl_multicert ssl_multicert.config ssl_multicert.yaml
+
+   ``storage``
+      Convert ``storage.config`` and ``volume.config`` to
+      :file:`storage.yaml`.
+
+      .. code-block:: bash
+
+         traffic_ctl config convert storage storage.config volume.config storage.yaml
+
+   ``plugin_config``
+      Convert :file:`plugin.config` to :file:`plugin.yaml`.
+      Commented-out lines are converted to ``enabled: false`` entries by
+      default. Pass ``--skip-disabled`` to omit them entirely.
+
+      .. code-block:: bash
+
+         # Write to a file
+         traffic_ctl config convert plugin_config plugin.config plugin.yaml
+
+         # Preview on stdout
+         traffic_ctl config convert plugin_config plugin.config -
+
+         # Drop commented-out entries
+         traffic_ctl config convert plugin_config plugin.config plugin.yaml --skip-disabled
+
+   For all types, use ``-`` as the output file to write to stdout.
+
+.. program:: traffic_ctl config
+.. option:: ssl-multicert show [--yaml | --json]
+
+   Display the current ``ssl_multicert.yaml`` configuration. By default, output is in YAML format.
+   Use ``--json`` or ``-j`` to output in JSON format.
+
+   .. option:: --yaml, -y
+
+      Output in YAML format (default).
+
+   .. option:: --json, -j
+
+      Output in JSON format.
+
+   Example:
+
+   .. code-block:: bash
+
+      $ traffic_ctl config ssl-multicert show
+      ssl_multicert:
+        - ssl_cert_name: server.pem
+          dest_ip: "*"
+          ssl_key_name: server.key
+
+   .. code-block:: bash
+
+      $ traffic_ctl config ssl-multicert show --json
+      {"ssl_multicert": [{"ssl_cert_name": "server.pem", "dest_ip": "*", "ssl_key_name": "server.key"}]}
 
 .. _traffic-control-command-metric:
 
@@ -378,12 +1096,20 @@ traffic_ctl metric
    Display the current value of the specified statistics.
 
 .. program:: traffic_ctl metric
-.. option:: match REGEX [REGEX...]
+.. option:: match [--include-hidden] REGEX [REGEX...]
 
    :ref:`admin_lookup_records`
 
    Display the current values of all statistics whose names match
    the given regular expression.
+
+.. program:: traffic_ctl metric match
+.. option:: --include-hidden
+
+   Also match hidden metrics. Hidden metrics are internal metrics that are stored but never
+   published through the normal metrics registry; they are not part of the stable metric
+   contract and may be added, changed, or removed between releases without notice. This
+   option is intended for debugging.
 
 .. program:: traffic_ctl metric
 .. option:: describe RECORD [RECORD...]
@@ -535,10 +1261,28 @@ traffic_ctl server
    This string should contain an anchored regular expression that filters the messages based on the debug tag tag.
    Please refer to :ts:cv:`proxy.config.diags.debug.tags` for more information
 
+   When ``--tags`` is written with no value and the ``TS_DEBUG_TAGS`` environment variable is
+   set, its value is used instead:
+
+   .. code-block:: bash
+
+      $ TS_DEBUG_TAGS="http|cache" traffic_ctl server debug enable --tags
+
+   A value typed on the command line always takes precedence over the variable, which is used
+   only when ``--tags`` is given no value at all. If ``--tags`` is written more than once, the
+   variable applies only when every occurrence is bare; a bare occurrence next to one that was
+   given a value, in either spelling, is the same usage error it would be without a variable:
+
+   .. code-block:: bash
+
+      $ TS_DEBUG_TAGS="http|cache" traffic_ctl server debug enable --tags dns --tags
+      Error: 1 argument(s) expected by tags
+
    .. option:: --append, -a
 
    Append the specified tags to the existing debug tags instead of replacing them. This option requires
    ``--tags`` to be specified. The new tags will be combined with existing tags using the ``|`` separator.
+   If the request that reads the existing tags fails, nothing is set and the command fails.
 
    .. option:: --client_ip, -c ip
 
@@ -568,6 +1312,22 @@ traffic_ctl server
       $ traffic_ctl server debug disable
       ■ TS Runtime debug set to »OFF(0)«
 
+.. _traffic-control-command-cache:
+
+traffic_ctl cache
+-----------------
+
+.. program:: traffic_ctl cache
+.. option:: clear
+
+   :ref:`admin_cache_clear`
+
+   Invalidate cached HTTP objects in the global cache-generation namespace without restarting |TS|. This advances
+   :ts:cv:`proxy.config.http.cache.generation`, causing subsequent cache lookups to use a new key namespace. Remap rules that
+   override this configuration have independent namespaces and are not affected. The invalidated data remains on cache storage until
+   it is overwritten through normal cache operation. The configuration change applies to the running process and is not persisted to
+   :file:`records.yaml`.
+
 .. _traffic-control-command-storage:
 
 traffic_ctl storage
@@ -579,7 +1339,7 @@ traffic_ctl storage
    :ref:`admin_storage_set_device_offline`
 
    Mark a cache storage device as offline. The storage is identified by :arg:`PATH` which must match
-   exactly a path specified in :file:`storage.config`. This removes the storage from the cache and
+   exactly a path specified in :file:`storage.yaml`. This removes the storage from the cache and
    redirects requests that would have used this storage to other storage. This has exactly the same
    effect as a disk failure for that storage. This does not persist across restarts of the
    :program:`traffic_server` process.
@@ -597,6 +1357,36 @@ traffic_ctl plugin
 -------------------
 
 .. program:: traffic_ctl plugin
+.. option:: list
+
+   Display the globally loaded plugins and their status.  The output includes
+   the configuration source, each plugin's sequence index, path,
+   ``load_order`` (when any plugin has one), and status.
+
+   Example (with ``load_order``):
+
+   .. code-block:: bash
+
+      $ traffic_ctl plugin list
+      source: plugin.yaml
+        #  plugin                          load_order   status
+        1  certifier.so                    100          loaded
+        2  header_rewrite.so               --           loaded
+        3  debug_plugin.so                 --           disabled
+
+   Example (without ``load_order``):
+
+   .. code-block:: bash
+
+      $ traffic_ctl plugin list
+      source: plugin.yaml
+        #  plugin                          status
+        1  stats_over_http.so              loaded
+        2  header_rewrite.so               loaded
+
+   This command requires a running :program:`traffic_server` instance — it
+   communicates via JSONRPC.
+
 .. option:: msg TAG DATA
 
    :ref:`admin_plugin_send_basic_msg`
@@ -690,6 +1480,13 @@ traffic_ctl hostdb
    Get the current status of HostDB.
 
    If ``HOSTNAME`` is specified, the output is filtered to show only records whose names contain the given string.
+
+.. option:: clear
+
+   :ref:`admin_hostdb_clear`
+
+   Remove all cached DNS resolution records from HostDB without restarting |TS|. Entries loaded from the host file remain. In-flight
+   transactions retain their current resolution, while subsequent transactions resolve their upstream hosts again.
 
 traffic_ctl rpc
 ---------------
@@ -890,17 +1687,43 @@ Configure Traffic Server to insert ``Via`` header in the response to the client
       # traffic_ctl config set proxy.config.http.insert_response_via_str 1
       # traffic_ctl config reload
 
-Autest
-======
+Uranium Tests
+================
 
 Runroot needs to be configured in order to let `traffic_ctl` know where to find the socket. This is done by default
 and there is no change you have to do to interact with it, but make sure that you are not overriding the `dump_runroot=False`
 when creating the ATS Process, otherwise the `runroot.yaml` will not be set.
 
+Exit Codes
+==========
+
+:program:`traffic_ctl` uses the following exit codes:
+
+``0``
+   Success. The requested operation completed successfully, or the server returned an error whose
+   most severe annotation is below :option:`traffic_ctl --error-level` (default: ``error``).
+
+``2``
+   Error. The operation failed. This may be returned when:
+
+   - The RPC communication with :program:`traffic_server` failed (e.g. socket not found or connection refused).
+   - The server response contains an error (e.g. invalid record name, malformed request) whose most
+     severe annotation is at or above :option:`traffic_ctl --error-level`. An annotation without a
+     severity counts as ``error``, and errors that do not come from a method handler always
+     count.
+
+``3``
+   Unimplemented. The requested command is not yet implemented.
+
+``75``
+   Temporary failure (aligned with ``EX_TEMPFAIL`` from ``sysexits.h``). The caller is invited to retry later.
+   Also returned when a command could not finish because a request it depends on failed with an error
+   below :option:`traffic_ctl --error-level`.
+
 See also
 ========
 
 :manpage:`records.yaml(5)`,
-:manpage:`storage.config(5)`,
+:manpage:`storage.yaml(5)`,
 :ref:`admin-jsonrpc-configuration`,
 :ref:`jsonrpc-protocol`

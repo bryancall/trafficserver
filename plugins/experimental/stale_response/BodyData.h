@@ -63,6 +63,10 @@ struct BodyData {
   bool     intercept_active = false;
   bool     key_hash_active  = false;
   uint32_t key_hash         = 0;
+  // This BodyData object's contribution to ConfigInfo::body_data_memory_usage.
+  // The aggregate is used to enforce the plugin memory cap; this value lets
+  // cleanup subtract exactly this object's reservation, and only once.
+  int64_t memory_accounted = 0;
 
 private:
   struct Chunk {
@@ -115,7 +119,8 @@ BodyData::removeChunk(uint32_t chunk)
   bool bGood = false;
   if (chunk < chunk_list.size() && !chunk_list[chunk].start.empty()) {
     bGood = true;
-    chunk_list[chunk].start.clear();
+    // Release the storage, not just the contents, so the memory is freed now.
+    std::vector<char>().swap(chunk_list[chunk].start);
   }
   return bGood;
 }

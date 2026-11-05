@@ -2,7 +2,7 @@
 
   HTTP configuration support.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -34,6 +34,8 @@
 #include "tscore/ink_assert.h"
 #include <algorithm>
 #include <array>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 /** Load IP addresses from a configuration value.
  *
@@ -281,6 +283,9 @@ public:
   IpAddr m_inbound_ip;
   /// Path for listening on unix domain socket
   UnAddr m_unix_path;
+  mode_t m_unix_perm = 0666;
+  uid_t  m_unix_uid  = static_cast<uid_t>(-1);
+  gid_t  m_unix_gid  = static_cast<gid_t>(-1);
   /// Local address for outbound connections (to origin server).
   ts::IPAddrPair m_outbound;
   /// Ordered preference for DNS resolution family ( @c FamilyPrefence )
@@ -379,7 +384,7 @@ public:
 
   /// Load default value if @a ports is empty.
   /// @return @c true if the default was needed / loaded.
-  static bool loadDefaultIfEmpty(std::vector<self> &ports ///< Load target.
+  static bool loadDefaultIfEmpty(std::vector<HttpProxyPort> &ports ///< Load target.
   );
 
   /// Load default value into the global set if it is empty.
@@ -437,6 +442,9 @@ public:
   static const char *const OPT_PROTO_PREFIX;              ///< Transport layer protocols.
   static const char *const OPT_MPTCP;                     ///< MPTCP.
   static const char *const OPT_PROXY_PROTO_CLIENT_SRC_IP; ///< The Proxy protocol SRC IP address is used as the client's IP address
+  static const char *const OPT_UDS_PERM_PREFIX;           ///< Prefix for unix domain socket file permission mode.
+  static const char *const OPT_UDS_USER_PREFIX;           ///< Prefix for unix domain socket file owner name.
+  static const char *const OPT_UDS_GROUP_PREFIX;          ///< Prefix for unix domain socket file group name.
 
   static std::vector<self> &m_global; ///< Global ("default") data.
 

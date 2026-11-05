@@ -2,7 +2,7 @@
 
   [RFC 7541] HPACK: Header Compression for HTTP/2
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,6 +23,7 @@
 
 #include "proxy/http2/HPACK.h"
 
+#include "tscore/ink_ascii_tolower.h"
 #include "tsutil/LocalBuffer.h"
 #include "swoc/TextView.h"
 
@@ -430,7 +431,6 @@ encode_literal_header_field_with_indexed_name(uint8_t *buf_start, const uint8_t 
 
   switch (type) {
   case HpackField::INDEXED_LITERAL:
-    indexing_table.add_header_field(header);
     prefix = 6;
     flag   = 0x40;
     break;
@@ -467,6 +467,11 @@ encode_literal_header_field_with_indexed_name(uint8_t *buf_start, const uint8_t 
   }
   p += len;
 
+  // Encoded successfully; update the dynamic table.
+  if (type == HpackField::INDEXED_LITERAL) {
+    indexing_table.add_header_field(header);
+  }
+
   Dbg(dbg_ctl_hpack_encode, "Encoded field: %d: %.*s", index, static_cast<int>(header.value.size()), header.value.data());
   return p - buf_start;
 }
@@ -483,7 +488,6 @@ encode_literal_header_field_with_new_name(uint8_t *buf_start, const uint8_t *buf
 
   switch (type) {
   case HpackField::INDEXED_LITERAL:
-    indexing_table.add_header_field(header);
     flag = 0x40;
     break;
   case HpackField::NOINDEX_LITERAL:
@@ -514,6 +518,11 @@ encode_literal_header_field_with_new_name(uint8_t *buf_start, const uint8_t *buf
   }
 
   p += len;
+
+  // Encoded successfully; update the dynamic table.
+  if (type == HpackField::INDEXED_LITERAL) {
+    indexing_table.add_header_field(header);
+  }
 
   Dbg(dbg_ctl_hpack_encode, "Encoded field: %.*s: %.*s", static_cast<int>(header.name.size()), header.name.data(),
       static_cast<int>(header.value.size()), header.value.data());
@@ -548,7 +557,11 @@ decode_indexed_header_field(MIMEFieldWrapper &header, const uint8_t *buf_start, 
     return HPACK_ERROR_COMPRESSION_ERROR;
   }
 
-  if (indexing_table.get_header_field(index, header) == HPACK_ERROR_COMPRESSION_ERROR) {
+  if (index > UINT32_MAX) {
+    return HPACK_ERROR_COMPRESSION_ERROR;
+  }
+
+  if (indexing_table.get_header_field(static_cast<uint32_t>(index), header) == HPACK_ERROR_COMPRESSION_ERROR) {
     return HPACK_ERROR_COMPRESSION_ERROR;
   }
 
@@ -569,7 +582,7 @@ decode_indexed_header_field(MIMEFieldWrapper &header, const uint8_t *buf_start, 
 //
 int64_t
 decode_literal_header_field(MIMEFieldWrapper &header, const uint8_t *buf_start, const uint8_t *buf_end,
-                            HpackIndexingTable &indexing_table)
+                            HpackIndexingTable &indexing_table, uint32_t header_field_max_size)
 {
   const uint8_t *p                   = buf_start;
   bool           isIncremental       = false;
@@ -592,18 +605,22 @@ decode_literal_header_field(MIMEFieldWrapper &header, const uint8_t *buf_start, 
     return HPACK_ERROR_COMPRESSION_ERROR;
   }
 
+  if (index > UINT32_MAX) {
+    return HPACK_ERROR_COMPRESSION_ERROR;
+  }
+
   p += len;
 
   // Decode header field name
   if (index) {
-    if (indexing_table.get_header_field(index, header) == HPACK_ERROR_COMPRESSION_ERROR) {
+    if (indexing_table.get_header_field(static_cast<uint32_t>(index), header) == HPACK_ERROR_COMPRESSION_ERROR) {
       return HPACK_ERROR_COMPRESSION_ERROR;
     }
   } else {
     char    *name_str     = nullptr;
     uint64_t name_str_len = 0;
 
-    len = xpack_decode_string(indexing_table.arena, &name_str, name_str_len, p, buf_end);
+    len = xpack_decode_string(indexing_table.arena, &name_str, name_str_len, p, buf_end, header_field_max_size);
     if (len == XPACK_ERROR_COMPRESSION_ERROR) {
       return HPACK_ERROR_COMPRESSION_ERROR;
     }
@@ -617,23 +634,29 @@ decode_literal_header_field(MIMEFieldWrapper &header, const uint8_t *buf_start, 
       }
     }
 
-    p += len;
-    header.name_set(name_str, name_str_len);
+    p                += len;
+    bool name_stored  = header.name_set(name_str, name_str_len);
     indexing_table.arena.str_free(name_str);
+    if (!name_stored) {
+      return HPACK_ERROR_COMPRESSION_ERROR;
+    }
   }
 
   // Decode header field value
   char    *value_str     = nullptr;
   uint64_t value_str_len = 0;
 
-  len = xpack_decode_string(indexing_table.arena, &value_str, value_str_len, p, buf_end);
+  len = xpack_decode_string(indexing_table.arena, &value_str, value_str_len, p, buf_end, header_field_max_size);
   if (len == XPACK_ERROR_COMPRESSION_ERROR) {
     return HPACK_ERROR_COMPRESSION_ERROR;
   }
 
-  p += len;
-  header.value_set(value_str, value_str_len);
+  p                 += len;
+  bool value_stored  = header.value_set(value_str, value_str_len);
   indexing_table.arena.str_free(value_str);
+  if (!value_stored) {
+    return HPACK_ERROR_COMPRESSION_ERROR;
+  }
 
   // Incremental Indexing adds header to header table as new entry
   if (isIncremental) {
@@ -687,7 +710,7 @@ update_dynamic_table_size(const uint8_t *buf_start, const uint8_t *buf_end, Hpac
 
 int64_t
 hpack_decode_header_block(HpackIndexingTable &indexing_table, HTTPHdr *hdr, const uint8_t *in_buf, const size_t in_buf_len,
-                          uint32_t max_header_size, uint32_t maximum_table_size)
+                          uint32_t max_header_size, uint32_t maximum_table_size, uint32_t header_field_max_size)
 {
   const uint8_t       *cursor               = in_buf;
   const uint8_t *const in_buf_end           = in_buf + in_buf_len;
@@ -700,9 +723,9 @@ hpack_decode_header_block(HpackIndexingTable &indexing_table, HTTPHdr *hdr, cons
   while (cursor < in_buf_end) {
     int64_t read_bytes = 0;
 
-    // decode a header field encoded by HPACK
-    MIMEField       *field = mime_field_create(heap, hh->m_fields_impl);
-    MIMEFieldWrapper header(field, heap, hh->m_fields_impl);
+    // Decode a header field encoded by HPACK. The wrapper allocates the field
+    // after its name is known so the selected slot preserves duplicate order.
+    MIMEFieldWrapper header(heap, hh->m_fields_impl);
     HpackField       ftype = hpack_parse_field_type(*cursor);
 
     switch (ftype) {
@@ -717,7 +740,7 @@ hpack_decode_header_block(HpackIndexingTable &indexing_table, HTTPHdr *hdr, cons
     case HpackField::INDEXED_LITERAL:
     case HpackField::NOINDEX_LITERAL:
     case HpackField::NEVERINDEX_LITERAL:
-      read_bytes = decode_literal_header_field(header, cursor, in_buf_end, indexing_table);
+      read_bytes = decode_literal_header_field(header, cursor, in_buf_end, indexing_table, header_field_max_size);
       if (read_bytes == HPACK_ERROR_COMPRESSION_ERROR) {
         return HPACK_ERROR_COMPRESSION_ERROR;
       }
@@ -740,8 +763,8 @@ hpack_decode_header_block(HpackIndexingTable &indexing_table, HTTPHdr *hdr, cons
       continue;
     }
 
-    auto name{field->name_get()};
-    auto value{field->value_get()};
+    auto name{header.name_get()};
+    auto value{header.value_get()};
 
     // [RFC 7540] 6.5.2. SETTINGS_MAX_HEADER_LIST_SIZE:
     // The value is based on the uncompressed size of header fields, including the length of the name and value in octets plus an
@@ -752,8 +775,7 @@ hpack_decode_header_block(HpackIndexingTable &indexing_table, HTTPHdr *hdr, cons
       return HPACK_ERROR_SIZE_EXCEEDED_ERROR;
     }
 
-    // Store to HdrHeap
-    mime_hdr_field_attach(hh->m_fields_impl, field, 1, nullptr);
+    mime_hdr_field_attach(hh->m_fields_impl, header.field_get(), 1, nullptr);
   }
   // Parsing all headers is done
   if (has_http2_violation) {
@@ -774,12 +796,13 @@ hpack_encode_header_block(HpackIndexingTable &indexing_table, uint8_t *out_buf, 
 
   // Update dynamic table size
   if (maximum_table_size >= 0) {
-    indexing_table.update_maximum_size(maximum_table_size);
     int64_t written = encode_dynamic_table_size_update(cursor, out_buf_end, maximum_table_size);
     if (written == HPACK_ERROR_COMPRESSION_ERROR) {
       return HPACK_ERROR_COMPRESSION_ERROR;
     }
     cursor += written;
+    // Encoded successfully; update the dynamic table.
+    indexing_table.update_maximum_size(maximum_table_size);
   }
 
   for (auto &field : *hdr) {
@@ -789,9 +812,7 @@ hpack_encode_header_block(HpackIndexingTable &indexing_table, uint8_t *out_buf, 
     int                   name_len      = original_name.size();
     ts::LocalBuffer<char> local_buffer(name_len);
     char                 *lower_name = local_buffer.data();
-    for (int i = 0; i < name_len; i++) {
-      lower_name[i] = ParseRules::ink_tolower(original_name[i]);
-    }
+    ts::ascii::tolower_copy(lower_name, original_name.data(), name_len);
 
     std::string_view name{lower_name, static_cast<size_t>(name_len)};
     std::string_view value = field.value_get();

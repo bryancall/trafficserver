@@ -2,7 +2,7 @@
 
   Server side connection management.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -35,6 +35,11 @@ class ConnectingEntry : public Continuation
 public:
   ConnectingEntry() = default;
   ~ConnectingEntry() override;
+  /** Retain a connection-tracker reservation until the connection completes.
+   *
+   * @param group Reserved outbound connection group owned by this entry.
+   */
+  void                    enable_outbound_connection_tracking(std::shared_ptr<ConnectionTracker::Group> group);
   void                    remove_entry();
   int                     state_http_server_open(int event, void *data);
   static PoolableSession *create_server_session(HttpSM *root_sm, NetVConnection *netvc, MIOBuffer *netvc_read_buffer,
@@ -51,10 +56,10 @@ public:
   bool               is_no_plugin_tunnel = false;
 
 private:
-  MIOBuffer      *_netvc_read_buffer = nullptr;
-  IOBufferReader *_netvc_reader      = nullptr;
-  Action         *_pending_action    = nullptr;
-  NetVCOptions    opt;
+  std::shared_ptr<ConnectionTracker::Group> _conn_track_group;
+  MIOBuffer                                *_netvc_read_buffer = nullptr;
+  IOBufferReader                           *_netvc_reader      = nullptr;
+  Action                                   *_pending_action    = nullptr;
 };
 
 struct IpHelper {

@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -32,10 +32,11 @@ public:
 
   // Http3FrameHandler
 
-  std::vector<Http3FrameType>
+  std::vector<Http3FrameType> const &
   interests() override
   {
-    return {Http3FrameType::DATA, Http3FrameType::SETTINGS};
+    static std::vector<Http3FrameType> const types = {Http3FrameType::DATA, Http3FrameType::SETTINGS};
+    return types;
   }
 
   Http3ErrorUPtr

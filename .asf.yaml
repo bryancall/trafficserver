@@ -24,12 +24,14 @@ github:
     issues: true
     # Enable projects for project management boards
     projects: true
+  pull_requests:
+    allow_auto_merge: true
   enabled_merge_buttons:
     # Enable squash button:
     squash: true
     # Disable rebase button:
     rebase: false
-    # Disable merge button:
+    # Disable merge commit button:
     merge: false
   collaborators:
     - mtorluemke
@@ -38,19 +40,22 @@ github:
     - lzx404243
     - phongn
     - jasmine-nahrain
+  copilot_code_review:
+    enabled: true
+    review_on_push: true
   protected_branches:
     master:
       required_status_checks:
         # strict means "Require branches to be up to date before merging"
         strict: false
         contexts:
-          - AuTest 0of4
-          - AuTest 1of4
-          - AuTest 2of4
-          - AuTest 3of4
+          - URTest 1of3
+          - URTest 2of3
+          - URTest 3of3
           - Rocky
           - CentOS
           - Clang-Analyzer
+          - Clang-Tidy
           - Format
           - Debian
           - Docs
@@ -58,7 +63,6 @@ github:
           - RAT
           - Ubuntu
           - OSX
-          - FreeBSD
       required_pull_request_reviews:
         dismiss_stale_reviews: true
         required_approving_review_count: 1

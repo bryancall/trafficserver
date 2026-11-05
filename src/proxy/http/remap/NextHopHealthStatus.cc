@@ -2,7 +2,7 @@
 
   Implementation of nexthop consistent hash selections strategies.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -30,7 +30,7 @@
 void
 NextHopHealthStatus::insert(std::vector<std::shared_ptr<HostRecord>> &hosts)
 {
-  for (auto h : hosts) {
+  for (auto const &h : hosts) {
     for (auto protocol = h->protocols.begin(); protocol != h->protocols.end(); ++protocol) {
       const std::string host_port = h->getHostPort((*protocol)->port);
       host_map.emplace(std::make_pair(host_port, h));
@@ -120,8 +120,12 @@ NextHopHealthStatus::markNextHop(TSHttpTxn txn, const char *hostname, const int 
             new_fail_count = h->failCount = 1;
           }
         } else if (result.retry == true) {
-          h->failedAt    = _now;
-          new_fail_count = h->failCount += 1;
+          h->failedAt = _now;
+          if (h->failCount < UINT32_MAX) {
+            new_fail_count = ++h->failCount;
+          } else {
+            new_fail_count = UINT32_MAX;
+          }
         }
       } // end lock guard
 
@@ -132,19 +136,25 @@ NextHopHealthStatus::markNextHop(TSHttpTxn txn, const char *hostname, const int 
       { // lock guard
         std::lock_guard<std::mutex> lock(h->_mutex);
         if ((h->failedAt.load() + retry_time) < _now) {
+          h->failedAt    = _now;
           new_fail_count = h->failCount = 1;
-          h->failedAt                   = _now;
         } else {
-          new_fail_count = h->failCount += 1;
+          if (h->failCount < UINT32_MAX) {
+            new_fail_count = ++h->failCount;
+          } else {
+            new_fail_count = UINT32_MAX;
+          }
         }
       } // end of lock_guard
-      NH_Dbg(NH_DBG_CTL, "[%" PRId64 "] Parent fail count increased to %d for %s", sm_id, new_fail_count, h->hostname.c_str());
+      NH_Dbg(NH_DBG_CTL, "[%" PRId64 "] Parent fail count increased to %" PRIu32 " for %s", sm_id, new_fail_count,
+             h->hostname.c_str());
     }
 
     if (new_fail_count >= fail_threshold) {
       h->set_unavailable();
-      NH_Note("[%" PRId64 "] Failure threshold met failcount:%d >= threshold:%" PRId64 ", http parent proxy %s marked down", sm_id,
-              new_fail_count, fail_threshold, h->hostname.c_str());
+      NH_Note("[%" PRId64 "] Failure threshold met failcount:%" PRIu32 " >= threshold:%" PRId64
+              ", http parent proxy %s marked down",
+              sm_id, new_fail_count, fail_threshold, h->hostname.c_str());
       NH_Dbg(NH_DBG_CTL, "[%" PRId64 "] NextHop %s marked unavailable, h->available=%s", sm_id, h->hostname.c_str(),
              (h->available.load()) ? "true" : "false");
     }

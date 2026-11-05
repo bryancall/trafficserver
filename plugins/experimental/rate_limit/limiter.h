@@ -180,7 +180,7 @@ template <class T> class RateLimiter
   using self_type = RateLimiter;
 
 public:
-  RateLimiter()                           = default;
+  RateLimiter() { _metrics.fill(TS_ERROR); }
   RateLimiter(self_type &&)               = delete;
   self_type &operator=(const self_type &) = delete;
   self_type &operator=(self_type &&)      = delete;
@@ -224,8 +224,8 @@ public:
       std::string prefix = metrics["prefix"] ? metrics["prefix"].as<std::string>() : RATE_LIMITER_METRIC_PREFIX;
       std::string tag    = metrics["tag"] ? metrics["tag"].as<std::string>() : name();
 
-      Dbg(dbg_ctl, "Metrics for selector rule: %s(%s, %s)", name().c_str(), prefix.c_str(), tag.c_str());
-      initializeMetrics(RATE_LIMITER_TYPE_SNI, prefix, tag);
+      Dbg(dbg_ctl, "Metrics for selector rule: %s (prefix=%s, tag=%s)", name().c_str(), prefix.c_str(), tag.c_str());
+      initializeMetrics(RATE_LIMITER_TYPE_SNI, tag, prefix);
     }
 
     return true;
@@ -325,6 +325,30 @@ public:
     }
 
     return item;
+  }
+
+  // Remove a still-queued element (e.g. a connection that closed before it was resumed).
+  // Returns true if it was found in the queue, so the caller can tell a queued element
+  // (which never reserved a slot) from one that was already resumed.
+  //
+  // Linear in the queue depth, and only reached when an element closes while queued, which
+  // requires the limiter to be at its limit. The depth is bounded by the configured queue size;
+  // note that a "queue" without a "size" leaves _max_queue at UINT32_MAX, in which case the only
+  // bound is proxy.config.net.connections_throttle.
+  bool
+  remove(const T &elem)
+  {
+    std::lock_guard<std::mutex> lock(_queue_lock);
+
+    for (auto it = _queue.begin(); it != _queue.end(); ++it) {
+      if (std::get<0>(*it) == elem) {
+        _queue.erase(it);
+        --_size;
+        return true;
+      }
+    }
+
+    return false;
   }
 
   void

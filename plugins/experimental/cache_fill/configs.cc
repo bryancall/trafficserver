@@ -157,17 +157,21 @@ BgFetchConfig::readConfig(const char *config_file)
           swoc::bwprint(ts::bw_dbg, "adding background_fetch address range rule {} for {}: {}", exclude, cfg_name, cfg_value);
           Dbg(dbg_ctl, "%s", ts::bw_dbg.c_str());
         } else if ("Content-Length"_tv == cfg_name) {
-          BgFetchRule::size_cmp_type::OP op;
+          BgFetchRule::size_cmp_type::OP op{BgFetchRule::size_cmp_type::LESS_THAN_OR_EQUAL};
           if (cfg_value[0] == '<') {
             op = BgFetchRule::size_cmp_type::LESS_THAN_OR_EQUAL;
           } else if (cfg_value[0] == '>') {
-            op = BgFetchRule::size_cmp_type::LESS_THAN_OR_EQUAL;
+            op = BgFetchRule::size_cmp_type::GREATER_THAN_OR_EQUAL;
           } else {
             TSError("[%s] invalid Content-Length condition %.*s, skipping config value", PLUGIN_NAME, int(cfg_value.size()),
                     cfg_value.data());
             continue;
           }
           ++cfg_value; // Drop leading character.
+          if (cfg_value.empty()) {
+            TSError("[%s] missing Content-Length size value, skipping config value", PLUGIN_NAME);
+            continue;
+          }
           swoc::TextView parsed;
           auto           n = swoc::svtou(cfg_value, &parsed);
           if (parsed.size() != cfg_value.size()) {
@@ -213,11 +217,14 @@ BgFetchConfig::bgFetchAllowed(TSHttpTxn txnp) const
     if (TSHttpTxnClientReqGet(txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
       bool hasRangeHdrs = false;
       for (auto const &header : FILTER_HEADERS) {
-        if (TSMimeHdrFieldFind(bufp, hdr_loc, header.data(), header.size() == TS_SUCCESS)) {
+        TSMLoc field_loc = TSMimeHdrFieldFind(bufp, hdr_loc, header.data(), static_cast<int>(header.size()));
+        if (field_loc != TS_NULL_MLOC) {
+          TSHandleMLocRelease(bufp, hdr_loc, field_loc);
           hasRangeHdrs = true;
           break;
         }
       }
+      TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
       if (!hasRangeHdrs && _range_req_only) {
         Dbg(dbg_ctl, "_range_req_only=true; This transaction is not a range request");
         return false;

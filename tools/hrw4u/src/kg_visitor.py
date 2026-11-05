@@ -242,6 +242,8 @@ class KnowledgeGraphVisitor(hrw4uVisitor, BaseHRWVisitor):
         with self.debug_context("visitSection"):
             if ctx.varSection():
                 return self.visitVarSection(ctx.varSection())
+            if ctx.sessionVarSection():
+                return self.visitSessionVarSection(ctx.sessionVarSection())
 
             if ctx.name is None:
                 return
@@ -294,6 +296,25 @@ class KnowledgeGraphVisitor(hrw4uVisitor, BaseHRWVisitor):
 
             self.current_section_id = old_section_id
 
+    def visitSessionVarSection(self, ctx) -> None:
+        with self.debug_context("visitSessionVarSection"):
+            vars_section_id = self._add_node(
+                "VarSection", {
+                    "scope": "session",
+                    "line_start": ctx.start.line if ctx.start else None,
+                    "line_end": ctx.stop.line if ctx.stop else None
+                }, f"{self.filename}:SESSION_VARS")
+
+            if self.current_file_id:
+                self._add_edge(self.current_file_id, vars_section_id, "CONTAINS")
+
+            old_section_id = self.current_section_id
+            self.current_section_id = vars_section_id
+
+            self.visit(ctx.variables())
+
+            self.current_section_id = old_section_id
+
     def visitVariableDecl(self, ctx) -> None:
         with self.debug_context("visitVariableDecl"):
             if ctx.name is None or ctx.typeName is None:
@@ -330,9 +351,6 @@ class KnowledgeGraphVisitor(hrw4uVisitor, BaseHRWVisitor):
 
                 case _ if ctx.EQUAL():
                     stmt_id = self._process_assignment_statement(ctx, stmt_properties)
-
-                case _ if ctx.op:
-                    stmt_id = self._add_node("Statement", {**stmt_properties, "type": "operator", "operator": ctx.op.text})
 
                 case _:
                     stmt_id = self._add_node("Statement", {**stmt_properties, "type": "unknown"})

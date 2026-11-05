@@ -2,7 +2,7 @@
 
   Class to execute one (or more) remap plugin(s).
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -58,6 +58,8 @@ RemapPlugins::run_plugin(RemapPluginInst *plugin)
   if (_cur == 0) {
     _s->os_response_plugin_inst = plugin;
   }
+
+  plugin->_plugin.countInvocation();
 
   HttpTransact::milestone_start_api_time(_s);
   plugin_retcode = plugin->doRemap(reinterpret_cast<TSHttpTxn>(_s->state_machine), &rri);

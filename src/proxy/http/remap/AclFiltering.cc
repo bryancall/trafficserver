@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -94,6 +94,12 @@ acl_filter_rule::add_argv(int _argc, char *_argv[])
     }
   }
   return real_cnt;
+}
+
+void
+acl_filter_rule::add_node(const YAML::Node &_node)
+{
+  node = _node;
 }
 
 void

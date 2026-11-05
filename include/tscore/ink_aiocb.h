@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -49,6 +49,4 @@ struct ink_aiocb {
   off_t  aio_offset; /* file offset */
 
   int aio_lio_opcode; /* listio operation */
-  int aio_state;      /* state flag for List I/O */
-  int aio__pad[1];    /* extension padding */
 };

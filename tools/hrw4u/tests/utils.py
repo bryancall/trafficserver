@@ -40,12 +40,15 @@ __all__: Final[list[str]] = [
     "collect_output_test_files",
     "collect_ast_test_files",
     "collect_failing_inputs",
+    "collect_reverse_failing_inputs",
     "collect_sandbox_deny_test_files",
     "collect_sandbox_allow_test_files",
     "collect_sandbox_warn_test_files",
+    "sandbox_file_for",
     "run_output_test",
     "run_ast_test",
     "run_failing_test",
+    "run_reverse_failing_test",
     "run_sandbox_deny_test",
     "run_sandbox_allow_test",
     "run_sandbox_warn_test",
@@ -128,14 +131,31 @@ def collect_failing_inputs(group: str) -> Iterator[pytest.param]:
         yield pytest.param(input_file, id=test_id)
 
 
-def _collect_sandbox_test_files(group: str, result_suffix: str) -> Iterator[pytest.param]:
-    """Collect sandbox test files: (input, result, sandbox_config).
-
-    Uses a per-test `{name}.sandbox.yaml` if present, otherwise falls back
-    to a shared `sandbox.yaml` in the same directory.
-    """
+def collect_reverse_failing_inputs(group: str) -> Iterator[pytest.param]:
+    # Reverse-fail fixtures use *.reverse.fail.hrw.txt (u4wrh input that must error)
+    # paired with *.reverse.fail.error.txt (expected error phrase). Forward-fail
+    # fixtures use *.fail.input.txt for the hrw4u compiler, which is why the glob
+    # here excludes them.
     base_dir = Path("tests/data") / group
-    shared_sandbox = base_dir / "sandbox.yaml"
+    for input_file in base_dir.glob("*.reverse.fail.hrw.txt"):
+        test_id = input_file.stem
+        yield pytest.param(input_file, id=test_id)
+
+
+def sandbox_file_for(input_file: Path) -> Path | None:
+    """A per-test `{name}.sandbox.yaml` if present, otherwise a shared `sandbox.yaml` in the same directory."""
+    per_test_sandbox = input_file.with_suffix("").with_suffix("").with_suffix(".sandbox.yaml")
+    if per_test_sandbox.exists():
+        return per_test_sandbox
+    shared_sandbox = input_file.parent / "sandbox.yaml"
+    if shared_sandbox.exists():
+        return shared_sandbox
+    return None
+
+
+def _collect_sandbox_test_files(group: str, result_suffix: str) -> Iterator[pytest.param]:
+    """Collect sandbox test files: (input, result, sandbox_config)."""
+    base_dir = Path("tests/data") / group
 
     for input_file in sorted(base_dir.glob("*.input.txt")):
         base = input_file.with_suffix("").with_suffix("")
@@ -144,10 +164,9 @@ def _collect_sandbox_test_files(group: str, result_suffix: str) -> Iterator[pyte
         if not result_file.exists():
             continue
 
-        per_test_sandbox = base.with_suffix(".sandbox.yaml")
-        sandbox_file = per_test_sandbox if per_test_sandbox.exists() else shared_sandbox
+        sandbox_file = sandbox_file_for(input_file)
 
-        if not sandbox_file.exists():
+        if sandbox_file is None:
             continue
 
         yield pytest.param(input_file, result_file, sandbox_file, id=base.name)
@@ -195,10 +214,10 @@ def collect_sandbox_warn_test_files(group: str) -> Iterator[pytest.param]:
         yield pytest.param(input_file, warning_file, output_file, sandbox_file, id=base.name)
 
 
-def run_output_test(input_file: Path, output_file: Path) -> None:
+def run_output_test(input_file: Path, output_file: Path, debug: bool = False) -> None:
     input_text = input_file.read_text()
     parser, tree = parse_input_text(input_text)
-    visitor = HRW4UVisitor()
+    visitor = HRW4UVisitor(debug=debug)
     actual_output = "\n".join(visitor.visit(tree)).strip()
     expected_output = output_file.read_text().strip()
     assert actual_output == expected_output, f"Output mismatch in {input_file}"
@@ -361,16 +380,45 @@ def run_sandbox_warn_test(input_file: Path, warning_file: Path, output_file: Pat
     assert actual_output == expected_output, f"Output mismatch in {input_file}"
 
 
-def run_reverse_test(input_file: Path, output_file: Path) -> None:
+def run_reverse_test(input_file: Path, output_file: Path, debug: bool = False) -> None:
     output_text = output_file.read_text()
     lexer = u4wrhLexer(InputStream(output_text))
     stream = CommonTokenStream(lexer)
     parser = u4wrhParser(stream)
     tree = parser.program()
-    visitor = HRWInverseVisitor(filename=str(output_file))
+    visitor = HRWInverseVisitor(filename=str(output_file), debug=debug)
     actual_hrw4u = "\n".join(visitor.visit(tree)).strip()
     expected_hrw4u = input_file.read_text().strip()
     assert actual_hrw4u == expected_hrw4u, f"Reverse conversion mismatch for {output_file}"
+
+
+def run_reverse_failing_test(input_file: Path) -> None:
+    hrw_text = input_file.read_text()
+    lexer = u4wrhLexer(InputStream(hrw_text))
+    stream = CommonTokenStream(lexer)
+    parser = u4wrhParser(stream)
+    tree = parser.program()
+
+    error_file = input_file.with_name(input_file.name.replace(".reverse.fail.hrw.txt", ".reverse.fail.error.txt"))
+    if not error_file.exists():
+        raise RuntimeError(f"Missing expected error file: {error_file}")
+
+    expected_error_content = error_file.read_text().strip()
+
+    error_collector = ErrorCollector()
+    visitor = HRWInverseVisitor(filename=str(input_file), error_collector=error_collector)
+    visitor.visit(tree)
+
+    assert error_collector.has_errors(), f"Expected reverse errors but none were raised for {input_file}"
+
+    actual_summary = error_collector.get_error_summary()
+    for line in expected_error_content.splitlines():
+        line = line.strip()
+        if line:
+            assert line in actual_summary, (
+                f"Expected phrase not found in error summary for {input_file}:\n"
+                f"  Missing: {line!r}\n"
+                f"Actual summary:\n{actual_summary}")
 
 
 def create_output_test(group: str):

@@ -125,6 +125,11 @@ TEST_CASE("Basic IP", "[libswoc][ip]") {
   REQUIRE(alpha[3] == 135);
 
   CHECK(IP6Addr().load("ffee:1f2d:c587:24c3:9128:3349:3cee:143"));
+  CHECK(IP6Addr().load("ffff::1"));
+  CHECK_FALSE(IP6Addr().load("10000::1"));
+  CHECK_FALSE(IP6Addr().load("[10000::1]"));
+  CHECK_FALSE(IP6Addr().load("-1::1"));
+  CHECK_FALSE(IP6Addr().load("+1::1"));
 
   IP4Addr lo{"127.0.0.1"};
   CHECK(lo.is_loopback());
@@ -408,6 +413,37 @@ TEST_CASE("IP Net and Mask", "[libswoc][ip][ipnet]") {
 
     swoc::IPNet n5{"BEEF:1337:dead::/FFFF:FFFF:FFFF:000C::"};
     REQUIRE(n5.empty()); // mask address isn't a valid mask.
+  }
+
+  SECTION("prefix bounds") {
+    CHECK(IPMask().load("128"));
+    CHECK_FALSE(IPMask().load("129"));
+    CHECK_FALSE(IPMask().load("256"));
+
+    CHECK(swoc::IP4Range().load("127.0.0.1/32"));
+    CHECK_FALSE(swoc::IP4Range().load("127.0.0.1/33"));
+    CHECK_FALSE(swoc::IP4Range().load("127.0.0.1/256"));
+    CHECK(swoc::IP6Range().load("::1/128"));
+    CHECK_FALSE(swoc::IP6Range().load("::1/129"));
+    CHECK_FALSE(swoc::IP6Range().load("::1/256"));
+    CHECK_FALSE(swoc::IPRange().load("127.0.0.1/256"));
+    CHECK_FALSE(swoc::IPRange().load("::1/256"));
+
+    CHECK(swoc::IP4Net().load("127.0.0.1/32"));
+    CHECK_FALSE(swoc::IP4Net().load("127.0.0.1/33"));
+    CHECK_FALSE(swoc::IP6Net().load("::1/129"));
+    CHECK_FALSE(swoc::IPNet().load("127.0.0.1/33"));
+    CHECK_FALSE(swoc::IPNet().load("::1/129"));
+    // 4294967040 is also the decimal form of the address 255.255.255.0.
+    CHECK_FALSE(swoc::IP4Range().load("127.0.0.1/4294967040"));
+    CHECK_FALSE(swoc::IP4Net().load("127.0.0.1/4294967040"));
+    CHECK_FALSE(swoc::IP6Net().load("::1/4294967040"));
+    CHECK_FALSE(swoc::IPNet().load("127.0.0.1/4294967040"));
+    CHECK_FALSE(swoc::IPNet().load("::1/4294967040"));
+    CHECK_FALSE(swoc::IP4Net().load("127.0.0.1/ 4294967040"));
+    CHECK_FALSE(swoc::IP4Net().load("127.0.0.1/4294967040 "));
+    CHECK_FALSE(swoc::IPNet().load("127.0.0.1/ 4294967040"));
+    CHECK_FALSE(swoc::IPNet().load("127.0.0.1/4294967040 "));
   }
 
   swoc::IP4Net n1{"0/1"};

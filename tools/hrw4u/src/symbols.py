@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from dataclasses import dataclass
 from hrw4u.validation import Validator
 from hrw4u.errors import SymbolResolutionError
 import hrw4u.types as types
@@ -26,6 +26,29 @@ from hrw4u.debugging import Dbg
 from hrw4u.symbols_base import SymbolResolverBase
 from hrw4u.suggestions import SuggestionEngine
 from hrw4u.sandbox import SandboxConfig
+
+
+def _sections_of(params: types.MapParams | None) -> set[SectionType] | None:
+    if params:
+        return params.sections
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class CondLookup:
+    key: str | None
+    entry: types.MapParams | None
+    arg: str | None
+    symbol: types.Symbol | None
+    existence: bool
+
+
+@dataclass(frozen=True, slots=True)
+class OpLookup:
+    key: str
+    entry: types.MapParams | None
+    qualifier: str | None
+    symbol: types.Symbol | None
 
 
 class SymbolResolver(SymbolResolverBase):
@@ -40,13 +63,8 @@ class SymbolResolver(SymbolResolverBase):
     def symbol_for(self, name: str) -> types.Symbol | None:
         return self._symbols.get(name)
 
-    def get_statement_spec(self, name: str) -> tuple[str, Callable[[str], None] | None]:
-        # Use cached lookup from base class
-        if params := self._lookup_statement_function_cached(name):
-            return params.target, params.validate
-        raise SymbolResolutionError(name, "Unknown operator or invalid standalone use")
-
-    def declare_variable(self, name: str, type_name: str, explicit_slot: int | None = None) -> str:
+    def declare_variable(
+            self, name: str, type_name: str, explicit_slot: int | None = None, scope: types.VarScope = types.VarScope.TXN) -> str:
         try:
             var_type = types.VarType.from_str(type_name)
         except ValueError as e:
@@ -54,29 +72,29 @@ class SymbolResolver(SymbolResolverBase):
             error.add_note(f"Available types: {', '.join([vt.name for vt in types.VarType])}")
             raise error
 
-        # Determine slot number
+        # Determine slot number (separate slot pools per scope)
         if explicit_slot is not None:
             if explicit_slot < 0 or explicit_slot >= var_type.limit:
                 raise SymbolResolutionError(
                     name, f"Slot @{explicit_slot} out of range for type '{type_name}' (valid: 0-{var_type.limit-1})")
             for var_name, sym in self._symbols.items():
-                if sym.var_type == var_type and sym.slot == explicit_slot:
+                if sym.var_type == var_type and sym.scope == scope and sym.slot == explicit_slot:
                     raise SymbolResolutionError(name, f"Slot @{explicit_slot} already used by variable '{var_name}'")
 
             slot = explicit_slot
         else:
-            used_slots = {sym.slot for sym in self._symbols.values() if sym.var_type == var_type}
+            used_slots = {sym.slot for sym in self._symbols.values() if sym.var_type == var_type and sym.scope == scope}
             slot = next((i for i in range(var_type.limit) if i not in used_slots), None)
 
             if slot is None:
                 raise SymbolResolutionError(name, f"No available slots for type '{type_name}' (max {var_type.limit})")
 
-        symbol = types.Symbol(var_type, slot)
+        symbol = types.Symbol(var_type, slot, scope)
         self._symbols[name] = symbol
         return symbol.as_cond()
 
     def resolve_assignment(self, name: str, value: str, section: SectionType | None = None) -> str:
-        with self.debug_context("resolve_assignment", name, value, section):
+        with self.debug_context("resolve_assignment", name, value, section), self._warnings_on_success():
             self._collect_warning(self._sandbox.check_operator(name))
 
             for op_key, params in self._operator_map.items():
@@ -106,6 +124,7 @@ class SymbolResolver(SymbolResolverBase):
                     return f"{params.target if params else None} {value}"
 
             if resolved_lhs := self.symbol_for(name):
+                self._collect_warning(self._sandbox.check_language("variables"))
                 if resolved_rhs := self.symbol_for(value):
                     if resolved_rhs.var_type != resolved_lhs.var_type:
                         raise SymbolResolutionError(value, f"Type mismatch: {resolved_lhs.var_type} vs {resolved_rhs.var_type}")
@@ -122,7 +141,7 @@ class SymbolResolver(SymbolResolverBase):
 
     def resolve_add_assignment(self, name: str, value: str, section: SectionType | None = None) -> str:
         """Resolve += assignment, if it is supported for the given operator."""
-        with self.debug_context("resolve_add_assignment", name, value, section):
+        with self.debug_context("resolve_add_assignment", name, value, section), self._warnings_on_success():
             self._collect_warning(self._sandbox.check_operator(name))
 
             for op_key, params in self._operator_map.items():
@@ -141,7 +160,7 @@ class SymbolResolver(SymbolResolverBase):
             raise error
 
     def resolve_condition(self, name: str, section: SectionType | None = None) -> tuple[str, bool]:
-        with self.debug_context("resolve_condition", name, section):
+        with self.debug_context("resolve_condition", name, section), self._warnings_on_success():
             if symbol := self.symbol_for(name):
                 self._collect_warning(self._sandbox.check_language("variables"))
                 return symbol.as_cond(), False
@@ -179,7 +198,9 @@ class SymbolResolver(SymbolResolverBase):
             raise error
 
     def resolve_function(self, func_name: str, args: list[str], strip_quotes: bool = False) -> str:
-        with self.debug_context("resolve_function", func_name, args):
+        with self.debug_context("resolve_function", func_name, args), self._warnings_on_success():
+            self._collect_warning(self._sandbox.check_function(func_name))
+
             if params := self._lookup_function_cached(func_name):
                 tag = params.target
                 validator = params.validate
@@ -201,7 +222,7 @@ class SymbolResolver(SymbolResolverBase):
             raise error
 
     def resolve_statement_func(self, func_name: str, args: list[str], section: SectionType | None = None) -> str:
-        with self.debug_context("resolve_statement_func", func_name, args, section):
+        with self.debug_context("resolve_statement_func", func_name, args, section), self._warnings_on_success():
             self._collect_warning(self._sandbox.check_function(func_name))
 
             if params := self._lookup_statement_function_cached(func_name):
@@ -240,3 +261,114 @@ class SymbolResolver(SymbolResolverBase):
                 valid_sections = [s.value for s in SectionType]
                 error.add_symbol_suggestion(valid_sections)
                 raise error
+
+    def lookup_condition(self, name: str, section: SectionType | None = None) -> CondLookup:
+        with self.debug_context("lookup_condition", name, section), self._warnings_on_success():
+            if symbol := self.symbol_for(name):
+                self._collect_warning(self._sandbox.check_language("variables"))
+                return CondLookup(key=None, entry=None, arg=None, symbol=symbol, existence=False)
+
+            self._collect_warning(self._sandbox.check_condition(name))
+
+            if params := self._lookup_condition_cached(name):
+                self.validate_section_access(name, section, params.sections)
+                return CondLookup(key=name, entry=params, arg=None, symbol=None, existence=False)
+
+            for prefix, params in self.find_prefix_matches(name, self._condition_map):
+                self.validate_section_access(name, section, _sections_of(params))
+                suffix_norm = name[len(prefix):]
+                if params and params.upper:
+                    suffix_norm = suffix_norm.upper()
+                if params and params.validate:
+                    params.validate(suffix_norm)
+                return CondLookup(key=prefix, entry=params, arg=suffix_norm, symbol=None, existence=bool(params and params.prefix))
+
+            error = SymbolResolutionError(name, "Unknown condition symbol")
+            suggestions = self._suggestion_engine.get_suggestions(name, 'condition', section, list(self._symbols.keys()))
+            if suggestions:
+                error.add_symbol_suggestion(suggestions)
+            raise error
+
+    def lookup_operator(self, name: str, value_text: str, section: SectionType | None = None, *, add: bool = False) -> OpLookup:
+        with self.debug_context("lookup_operator", name, value_text, section, add), self._warnings_on_success():
+            self._collect_warning(self._sandbox.check_operator(name))
+
+            for op_key, params in self._operator_map.items():
+                if op_key.endswith("."):
+                    if not name.startswith(op_key):
+                        continue
+                    if add and not (params and params.add):
+                        continue
+                    self.validate_section_access(name, section, _sections_of(params))
+                    qualifier = name[len(op_key):]
+                    # resolve_add_assignment does not case-normalize, so += must not either.
+                    if params and params.upper and not add:
+                        qualifier = qualifier.upper()
+                    if params and params.validate:
+                        params.validate(qualifier)
+                    if op_key == "http.cntl.":
+                        types.SuffixGroup.BOOL_FIELDS.validate(value_text)
+                    return OpLookup(key=op_key, entry=params, qualifier=qualifier, symbol=None)
+
+                if not add and name == op_key:
+                    self.validate_section_access(name, section, _sections_of(params))
+                    if params and params.validate:
+                        params.validate(value_text)
+                    return OpLookup(key=op_key, entry=params, qualifier=None, symbol=None)
+
+            if add:
+                error = SymbolResolutionError(name, "+= operator is not supported for this assignment")
+                error.add_note("Only operators with 'add' flag support +=")
+                raise error
+
+            if resolved_lhs := self.symbol_for(name):
+                self._collect_warning(self._sandbox.check_language("variables"))
+                if resolved_rhs := self.symbol_for(value_text):
+                    if resolved_rhs.var_type != resolved_lhs.var_type:
+                        raise SymbolResolutionError(
+                            value_text, f"Type mismatch: {resolved_lhs.var_type} vs {resolved_rhs.var_type}")
+                else:
+                    Validator.validate_assignment(resolved_lhs.var_type, value_text, name)
+                return OpLookup(key=name, entry=None, qualifier=None, symbol=resolved_lhs)
+
+            error = SymbolResolutionError(name, "Unknown assignment symbol")
+            suggestions = self._suggestion_engine.get_suggestions(name, 'assignment', section)
+            if suggestions:
+                error.add_symbol_suggestion(suggestions)
+            raise error
+
+    def lookup_function(self, func_name: str, args: list[str]) -> tuple[str, types.MapParams]:
+        with self.debug_context("lookup_function", func_name, args), self._warnings_on_success():
+            self._collect_warning(self._sandbox.check_function(func_name))
+
+            if params := self._lookup_function_cached(func_name):
+                if params.validate:
+                    params.validate(args)
+                return func_name, params
+
+            error = SymbolResolutionError(func_name, f"Unknown function: '{func_name}'")
+            error.add_note(f"Arguments provided: {len(args)}")
+            suggestions = self._suggestion_engine.get_suggestions(func_name, 'function')
+            if suggestions:
+                error.add_symbol_suggestion(suggestions)
+            raise error
+
+    def lookup_statement_function(self,
+                                  func_name: str,
+                                  args: list[str],
+                                  section: SectionType | None = None) -> tuple[str, types.MapParams]:
+        with self.debug_context("lookup_statement_function", func_name, args, section), self._warnings_on_success():
+            self._collect_warning(self._sandbox.check_function(func_name))
+
+            if params := self._lookup_statement_function_cached(func_name):
+                self.validate_section_access(func_name, section, params.sections)
+                if params.validate:
+                    params.validate(args)
+                return func_name, params
+
+            error = SymbolResolutionError(func_name, f"Unknown statement function: '{func_name}'")
+            error.add_note(f"Arguments provided: {len(args)}")
+            suggestions = self._suggestion_engine.get_suggestions(func_name, 'statement_function')
+            if suggestions:
+                error.add_symbol_suggestion(suggestions)
+            raise error

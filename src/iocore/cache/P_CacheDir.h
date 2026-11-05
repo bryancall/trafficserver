@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -30,6 +30,8 @@
 #include "tscore/Version.h"
 #include "tscore/hugepages.h"
 
+#include <ts/ats_probe.h>
+
 #include <cstdint>
 #include <ctime>
 
@@ -38,8 +40,6 @@ class StripeSM;
 struct InterimCacheVol;
 struct CacheVC;
 class CacheEvacuateDocVC;
-
-// #define LOOP_CHECK_MODE 1
 
 /*
   Directory layout
@@ -286,7 +286,9 @@ struct StripeHeaderFooter {
   uint16_t          freelist[1];
 };
 
-struct Directory {
+class Directory
+{
+public:
   char               *raw_dir{nullptr};
   Dir                *dir{};
   StripeHeaderFooter *header{};
@@ -304,31 +306,38 @@ struct Directory {
    */
   Dir *get_segment(int s) const;
 
-  int      probe(const CacheKey *, StripeSM *, Dir *, Dir **);
-  int      insert(const CacheKey *key, StripeSM *stripe, Dir *to_part);
-  int      overwrite(const CacheKey *key, StripeSM *stripe, Dir *to_part, Dir *overwrite, bool must_overwrite = true);
-  int      remove(const CacheKey *key, StripeSM *stripe, Dir *del);
-  void     free_entry(Dir *e, int s);
-  int      check();
+  /* Longest chain a bucket can legitimately hold.
+   *
+   * init_segment() frees rows 1..DIR_DEPTH-1 of every bucket onto the segment free list and never row 0, so one
+   * chain holds at most every free entry of the segment plus its own head. Past it the chain is corrupt, though not
+   * necessarily looping: a link into another bucket's row 0 stays acyclic, so repairs confirm with bucket_loop_fix().
+   */
+  int max_bucket_depth() const;
+
+  int  probe(const CacheKey *, StripeSM *, Dir *, Dir **) const;
+  int  insert(const CacheKey *key, StripeSM *stripe, Dir *to_part);
+  int  overwrite(const CacheKey *key, StripeSM *stripe, Dir *to_part, Dir *overwrite, bool must_overwrite = true);
+  int  remove(const CacheKey *key, StripeSM *stripe, Dir *del);
+  void free_entry(Dir *e, int s);
+  int  check() const;
+  /// check() for one segment, so a caller already walking segments need not stream the whole directory a second time.
+  int      check_segment(int s) const;
   void     cleanup(StripeSM *stripe);
   void     clear_range(off_t start, off_t end, StripeSM *stripe);
   uint64_t entries_used();
-  int      bucket_length(Dir *b, int s);
+  int      bucket_length(Dir *b, int s) const;
   int      freelist_length(int s);
   void     clean_segment(int s, StripeSM *stripe);
+  /// @a stripe owns the used-entry gauges to debit; null when the caller is itself counting for them.
+  void init_segment(int s, Stripe *stripe);
+  int  bucket_loop_fix(Dir *start_dir, int s, Stripe *stripe);
+  Dir *delete_entry(Dir *e, Dir *p, int s);
+
+private:
+  void unlink_from_freelist(Dir *e, int s);
+  /// Counted over the segment's rows: the chains are corrupt wherever this is used.
+  int segment_entries_used(int s) const;
 };
-
-inline int
-Directory::entries() const
-{
-  return this->buckets * DIR_DEPTH * this->segments;
-}
-
-inline Dir *
-Directory::get_segment(int s) const
-{
-  return reinterpret_cast<Dir *>((reinterpret_cast<char *>(this->dir)) + (s * this->buckets) * DIR_DEPTH * SIZEOF_DIR);
-}
 
 // Global Functions
 
@@ -393,4 +402,71 @@ inline Dir *
 dir_bucket_row(Dir *b, int64_t i)
 {
   return dir_in_seg(b, i);
+}
+
+inline int
+Directory::entries() const
+{
+  return this->buckets * DIR_DEPTH * this->segments;
+}
+
+inline Dir *
+Directory::get_segment(int s) const
+{
+  return reinterpret_cast<Dir *>((reinterpret_cast<char *>(this->dir)) + (s * this->buckets) * DIR_DEPTH * SIZEOF_DIR);
+}
+
+inline int
+Directory::max_bucket_depth() const
+{
+  return (DIR_DEPTH - 1) * this->buckets + 1;
+}
+
+inline void
+Directory::unlink_from_freelist(Dir *e, int s)
+{
+  Dir *seg = this->get_segment(s);
+  Dir *p   = dir_from_offset(dir_prev(e), seg);
+  if (p) {
+    dir_set_next(p, dir_next(e));
+  } else {
+    this->header->freelist[s] = dir_next(e);
+  }
+  Dir *n = dir_from_offset(dir_next(e), seg);
+  if (n) {
+    dir_set_prev(n, dir_prev(e));
+  }
+}
+
+inline Dir *
+Directory::delete_entry(Dir *e, Dir *p, int s)
+{
+  Dir *seg            = this->get_segment(s);
+  int  no             = dir_next(e);
+  this->header->dirty = 1;
+  if (p) {
+    unsigned int fo = this->header->freelist[s];
+    unsigned int eo = dir_to_offset(e, seg);
+    dir_clear(e);
+    dir_set_next(p, no);
+    dir_set_next(e, fo);
+    if (fo) {
+      dir_set_prev(dir_from_offset(fo, seg), eo);
+    }
+    this->header->freelist[s] = eo;
+  } else {
+    Dir *n = next_dir(e, seg);
+    if (n) {
+      // "Shuffle" here means that we're copying the second entry's data to the head entry's location, and removing the second entry
+      // - because the head entry can't be moved.
+      ATS_PROBE3(cache_dir_shuffle, s, dir_to_offset(e, seg), dir_to_offset(n, seg));
+      dir_assign(e, n);
+      this->delete_entry(n, e, s);
+      return e;
+    } else {
+      dir_clear(e);
+      return nullptr;
+    }
+  }
+  return dir_from_offset(no, seg);
 }

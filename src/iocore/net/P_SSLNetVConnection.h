@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -45,6 +45,13 @@
 #include "P_SSLUtils.h"
 #include "P_SSLConfig.h"
 
+#include "tscore/ink_config.h"
+
+#if TS_USE_QMUX
+#include "iocore/net/QUICSupport.h"
+#include "iocore/net/qmux/QMuxConnection.h"
+#endif
+
 #include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -81,9 +88,8 @@ constexpr int      SSL_DEF_TLS_RECORD_MSEC_THRESHOLD = 1000;
 struct SSLCertLookup;
 
 enum class SslVConnOp {
-  SSL_HOOK_OP_DEFAULT,  ///< Null / initialization value. Do normal processing.
-  SSL_HOOK_OP_TUNNEL,   ///< Switch to blind tunnel
-  SSL_HOOK_OP_TERMINATE ///< Termination connection / transaction.
+  SSL_HOOK_OP_DEFAULT, ///< Null / initialization value. Do normal processing.
+  SSL_HOOK_OP_TUNNEL   ///< Switch to blind tunnel
 };
 
 enum class SSLHandshakeStatus { SSL_HANDSHAKE_ONGOING, SSL_HANDSHAKE_DONE, SSL_HANDSHAKE_ERROR };
@@ -104,8 +110,14 @@ class SSLNetVConnection : public UnixNetVConnection,
                           public TLSCertSwitchSupport,
                           public TLSEventSupport,
                           public TLSBasicSupport
+#if TS_USE_QMUX
+  ,
+                          public QUICSupport
+#endif
 {
   using super = UnixNetVConnection; ///< Parent type.
+
+  friend struct SSLNetVConnectionAsyncEpTestAccess;
 
 public:
   void clear() override;
@@ -254,13 +266,10 @@ public:
   SSLNetVConnection(const SSLNetVConnection &)            = delete;
   SSLNetVConnection &operator=(const SSLNetVConnection &) = delete;
 
-  bool          protocol_mask_set = false;
-  unsigned long protocol_mask     = 0;
-
   bool
   peer_provided_cert() const override
   {
-#ifdef OPENSSL_IS_OPENSSL3
+#ifdef OPENSSL_IS_AT_LEAST_OPENSSL3
     X509 *cert = SSL_get1_peer_certificate(this->ssl);
 #else
     X509 *cert = SSL_get_peer_certificate(this->ssl);
@@ -322,12 +331,22 @@ protected:
   }
   ssl_curve_id     _get_tls_curve() const override;
   std::string_view _get_tls_group() const override;
-  int              _verify_certificate(X509_STORE_CTX *ctx) override;
+  bool
+  _is_tls_handshake_complete() const override
+  {
+    return this->getSSLHandShakeComplete();
+  }
+  int _verify_certificate(X509_STORE_CTX *ctx) override;
 
   // TLSSessionResumptionSupport
   const IpEndpoint &
-  _getLocalEndpoint() override
+  _getCertLookupEndpoint() override
   {
+    // The certificate is chosen by the PROXY destination address when there is one, and the
+    // session ticket keys have to follow the certificate.
+    if (IpEndpoint const *dst = this->_proxy_protocol_dst_endpoint(); dst != nullptr) {
+      return *dst;
+    }
     return local_addr;
   }
 
@@ -337,6 +356,9 @@ protected:
   bool           _isTryingRenegotiation() const override;
   shared_SSL_CTX _lookupContextByName(const std::string &servername, SSLCertContextType ctxType) override;
   shared_SSL_CTX _lookupContextByIP() override;
+
+  /// @return The PROXY protocol destination address, or null if the connection did not carry one.
+  IpEndpoint const *_proxy_protocol_dst_endpoint() const;
 
   // TLSEventSupport
   bool
@@ -417,6 +439,17 @@ private:
   bool            _early_data_finish = false;
   MIOBuffer      *_early_data_buf    = nullptr;
   IOBufferReader *_early_data_reader = nullptr;
+#endif
+
+#if TS_USE_QMUX
+  // QUICSupport
+  QUICConnection *
+  get_quic_connection() override
+  {
+    return _qmux_connection.get();
+  }
+
+  std::unique_ptr<QMuxConnection> _qmux_connection;
 #endif
 
 private:

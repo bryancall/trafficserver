@@ -143,6 +143,7 @@ trafficserver ............. Top src dir
 ├── lib ................... Third-party libraries
 │   ├── Catch2 ............ Unit testing framework
 │   ├── fastlz ............ Fast compression library
+│   ├── highway ........... Portable SIMD/vector intrinsics
 │   ├── ls-hpack .......... HPACK compression for HTTP/2
 │   ├── swoc .............. Solid Wall of Code utility library
 │   ├── systemtap ......... SystemTap integration
@@ -204,7 +205,7 @@ trafficserver ............. Top src dir
   distributions. This may be out of date compared to the on-line
   requirements at
 
-  <https://cwiki.apache.org/confluence/display/TS/Building>.
+  <https://docs.trafficserver.apache.org/en/latest/admin-guide/installation/index.en.html>.
 
   As of ATS v9.0.0 and later, gcc 7 or later is required, since we now use and require the C++17 standard.
 
@@ -391,5 +392,5 @@ cmake --build build
 ## ADDITIONAL INFO
 
 - Web page: https://trafficserver.apache.org/
-- Wiki: https://cwiki.apache.org/confluence/display/TS/
+- Documentation: https://docs.trafficserver.apache.org/
 - User mailing list: users@trafficserver.apache.org

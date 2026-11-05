@@ -21,94 +21,7 @@ preferences and working conventions. This file is gitignored and optional.
 
 ## Build Commands
 
-### Basic Build
-```bash
-# Configure (creates out-of-source build directory)
-cmake -B build
-
-# Build everything
-cmake --build build
-
-# Install (default: /usr/local)
-cmake --install build
-```
-
-### Common Build Presets
-```bash
-# Development build with compile_commands.json for IDE support
-cmake --preset dev
-cmake --build build-dev
-
-# Release build
-cmake --preset release
-cmake --build build-release
-
-# Build with autests enabled
-cmake --preset ci-fedora-autest
-cmake --build build-autest
-```
-
-### Useful Build Options
-```bash
-# Specify dependency locations (like autotools --with-*)
-cmake -B build -Djemalloc_ROOT=/opt/jemalloc -DOPENSSL_ROOT_DIR=/opt/boringssl
-
-# Build specific targets
-cmake --build build -t traffic_server
-cmake --build build -t format  # Format code before committing
-```
-
-### Key CMake Options
-- `BUILD_EXPERIMENTAL_PLUGINS=ON` - Enable experimental plugins
-- `ENABLE_QUICHE=ON` - QUIC/HTTP3 support
-- `ENABLE_CRIPTS=ON` - Cripts scripting API
-- `BUILD_REGRESSION_TESTING=ON` - Enable test suite
-- `ENABLE_ASAN=ON` - Configure ASan instrumentation
-
-## Testing
-
-### Unit Tests (Catch2)
-Built automatically with the project. Run via ctest:
-```bash
-ctest --test-dir build -j4
-```
-
-### Running a Single Unit Test
-Unit tests are built into executables. Find the test binary and run it directly:
-```bash
-# Unit tests are typically in build/src/<component>/
-./build/src/tscore/test_tscore
-```
-
-### End-to-End Tests (AuTest)
-
-**Enable autests during configuration:**
-```bash
-cmake -B build -DENABLE_AUTEST=ON
-cmake --build build
-cmake --install build
-```
-
-**Run all autests:**
-```bash
-cmake --build build -t autest
-```
-
-**Run specific test(s):**
-```bash
-cd build/tests
-pipenv install  # First time only
-./autest.sh --sandbox /tmp/sbcursor --clean=none -f <test_name_without_test_py>
-```
-
-For example, to run `cache-auth.test.py`:
-```bash
-./autest.sh --sandbox /tmp/sbcursor --clean=none -f cache-auth
-```
-
-Most end-to-end test coverage is in `tests/gold_tests/`. The CI system uses the
-Docker image `ci.trafficserver.apache.org/ats/fedora:43` (Fedora version updated
-regularly).
+Use the ats-build skill for building, testing, and formatting, unless instructed otherwise.
 
 ### Writing Autests
 
@@ -266,6 +179,18 @@ SMDebug(dbg_ctl, "Processing request for URL: %s", url);
 - This includes `.cc`, `.h`, `.py`, and other code files
 - Follow the existing license header format used in the codebase
 
+### Comments
+In general, comments should explain "why" and not "what"; no narration,
+restated signatures, review-round residue, tracker tags or agent names, and
+never previous behavior — what the code used to do and why it changed go in
+the PR and commit message. Functions and classes should state their
+responsibilities and the semantics of the variables - do not restate the type
+of the variable. For instance, "Returns a std::string" is worse than useless -
+the reader of the code can see the return type. Explain what the string is and
+means in the context of its use in the codebase, such as "Returns the parsed
+URL", for example. These comment instructions apply to the whole code base,
+including production code, tests, Python, CMake and replay YAML files.
+
 ### Code Style
 - C++20 standard (nothing from C++23 or later)
 - Use RAII principles
@@ -273,7 +198,6 @@ SMDebug(dbg_ctl, "Processing request for URL: %s", url);
 - Don't use templates unless needed and appropriate
 - Run `cmake --build build -t format` before committing
 - Line length: 132 characters maximum
-- Don't add comments where the code documents itself, don't comment claude interactions
 
 **C++ Formatting (Mozilla-based style):**
 - Indentation: 2 spaces for C/C++
@@ -333,7 +257,7 @@ MIOBuffer *buffer = (MIOBuffer*)malloc(sizeof(MIOBuffer));
 ## Resources
 
 - Official docs: https://trafficserver.apache.org/
-- Developer wiki: https://cwiki.apache.org/confluence/display/TS/
+- Developer wiki: https://github.com/apache/trafficserver/wiki
 - CI dashboard: https://ci.trafficserver.apache.org/
 - AuTest framework: https://autestsuite.bitbucket.io/
 - Proxy Verifier: https://github.com/yahoo/proxy-verifier

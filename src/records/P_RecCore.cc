@@ -2,7 +2,7 @@
 
   Private record core definitions
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -543,4 +543,10 @@ RecSetSyncRequired(const char *name, bool lock)
   }
 
   return err;
+}
+
+void
+RecFlushConfigUpdateCbs()
+{
+  RecExecConfigUpdateCbs(REC_PROCESS_UPDATE_REQUIRED);
 }

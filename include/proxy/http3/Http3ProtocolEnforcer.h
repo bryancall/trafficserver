@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -32,9 +32,10 @@ public:
   Http3ProtocolEnforcer(){};
 
   // Http3FrameHandler
-  std::vector<Http3FrameType> interests() override;
+  std::vector<Http3FrameType> const &interests() override;
   Http3ErrorUPtr handle_frame(std::shared_ptr<const Http3Frame> frame, Http3StreamType s_type = Http3StreamType::UNKNOWN) override;
 
 private:
   bool _is_first_frame_received_on_control = false;
+  bool _is_headers_frame_received          = false;
 };

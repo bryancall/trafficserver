@@ -2,7 +2,7 @@
 
   Support class for describing the local machine.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -77,7 +77,7 @@ Machine::init(char const *name, sockaddr const *ip)
 
 Machine::Machine(char const *the_hostname, sockaddr const *addr)
 {
-  // Initialize the machine IP infomation
+  // Initialize the machine IP information
   bzero(&ip, sizeof(ip));
   bzero(&ip4, sizeof(ip4));
   bzero(&ip6, sizeof(ip6));

@@ -163,7 +163,7 @@ Pattern::process(const String &subject, StringVector &result)
     /* Replacement pattern was provided in the configuration - capture and replace. */
     String element;
     if (replace(subject, element)) {
-      result.push_back(element);
+      result.push_back(std::move(element));
     } else {
       return false;
     }
@@ -242,7 +242,7 @@ Pattern::capture(const String &subject, StringVector &result)
     String           dst(match_view.data(), match_view.size());
 
     AccessControlDebug("capturing '%s' %d", dst.c_str(), i);
-    result.push_back(dst);
+    result.push_back(std::move(dst));
   }
 
   return true;
@@ -318,7 +318,7 @@ Pattern::compile()
                      _replacement.c_str());
 
   _re = std::make_unique<Regex>();
-  if (!_re->compile(_pattern, error, errOffset, 0)) {
+  if (!_re->compile(_pattern, error, errOffset, 0, "access_control uri path scope")) {
     AccessControlError("compile of regex '%s' at char %d: %s", _pattern.c_str(), errOffset, error.c_str());
     _re.reset();
     return false;

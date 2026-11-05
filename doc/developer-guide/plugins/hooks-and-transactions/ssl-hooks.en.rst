@@ -78,13 +78,18 @@ information.
 
 TLS handshake processing will pause until the hook callback executes :func:`TSVConnReenable()`.
 
+A plugin that switches the connection's ``SSL_CTX`` should do so from TS_SSL_CERT_HOOK rather than
+this hook. The TLS library looks up its handshake callbacks on the connection's current context, so
+switching from this hook to a context that Traffic Server did not create can skip the remaining
+ClientHello hooks and later handshake hooks.
+
 TS_SSL_SERVERNAME_HOOK
 ----------------------
 
 This hook is called if the client provides SNI information in the SSL handshake. If called it will
 always be called after TS_VCONN_START_HOOK.
 
-The Traffic Server core first evaluates the settings in the ssl_multicert.config file based on the
+The Traffic Server core first evaluates the settings in the ssl_multicert.yaml file based on the
 server name. Then the core SNI callback executes the plugin registered SNI callback code. The plugin
 callback can access the servername by calling the OpenSSL function SSL_get_servername().
 

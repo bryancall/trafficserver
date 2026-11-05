@@ -2,7 +2,7 @@
 
   Http1ServerTransaction.h - The Server Transaction class for Http1*
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -44,10 +44,4 @@ public:
   void transaction_done() override;
 
   void force_close();
-
-  ////////////////////
-  // Variables
-
-protected:
-  bool outbound_transparent{false};
 };

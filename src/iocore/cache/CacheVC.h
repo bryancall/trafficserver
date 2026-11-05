@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -201,13 +201,19 @@ struct CacheVC : public CacheVConnection {
       or @c nullptr if there is no fragment table.
   */
   virtual HTTPInfo::FragOffset *get_frag_table();
-  /** Load alt pointers and do fixups if needed.
+  /** Unmarshal every alt in @a doc's header block, selecting the decoder for the
+      version @a doc was written with and repairing anything that version left stale.
+      @return @c true if the whole block was unmarshalled.
+   */
+  static bool unmarshal_http_info(struct Doc *doc, Ptr<IOBufferData> &buf);
+  /** Load alt pointers from an already unmarshalled header block.
+      The block may be shared with other readers, so it must not be modified here.
       @return Length of header data used for alternates.
    */
-  virtual uint32_t load_http_info(CacheHTTPInfoVector *info, struct Doc *doc, RefCountObj *block_ptr = nullptr);
-  bool             is_pread_capable() override;
-  bool             set_pin_in_cache(time_t time_pin) override;
-  time_t           get_pin_in_cache() override;
+  uint32_t load_http_info(CacheHTTPInfoVector *info, struct Doc *doc, RefCountObj *block_ptr = nullptr);
+  bool     is_pread_capable() override;
+  bool     set_pin_in_cache(time_t time_pin) override;
+  time_t   get_pin_in_cache() override;
 
   // number of bytes to memset to 0 in the CacheVC when we free
   // it. All member variables starting from vio are memset to 0.
@@ -268,7 +274,6 @@ struct CacheVC : public CacheVConnection {
   ink_hrtime                start_time;
   int                       op_type; // Index into the metrics array for this operation, rather than a CacheOpType (fewer casts)
   int                       recursive;
-  int                       read_recursive;
   int                       closed;
   uint64_t                  seek_to;       // pread offset
   int64_t                   offset;        // offset into 'blocks' of data to write
@@ -289,26 +294,26 @@ struct CacheVC : public CacheVConnection {
   union {
     uint32_t flags;
     struct {
-      unsigned int use_first_key           : 1;
-      unsigned int overwrite               : 1; // overwrite first_key Dir if it exists
-      unsigned int close_complete          : 1; // WRITE_COMPLETE is final
-      unsigned int sync                    : 1; // write to be committed to durable storage before WRITE_COMPLETE
-      unsigned int evacuator               : 1;
-      unsigned int single_fragment         : 1;
-      unsigned int evac_vector             : 1;
-      unsigned int lookup                  : 1;
-      unsigned int update                  : 1;
-      unsigned int remove                  : 1;
-      unsigned int remove_aborted_writers  : 1;
-      unsigned int open_read_timeout       : 1; // UNUSED
-      unsigned int data_done               : 1;
-      unsigned int read_from_writer_called : 1;
-      unsigned int rewrite_resident_alt    : 1;
-      unsigned int readers                 : 1;
-      unsigned int doc_from_ram_cache      : 1;
-      unsigned int hit_evacuate            : 1;
-      unsigned int compressed_in_ram       : 1; // compressed state in ram cache
-      unsigned int allow_empty_doc         : 1; // used for cache empty http document
+      unsigned int use_first_key            : 1;
+      unsigned int overwrite                : 1; // overwrite first_key Dir if it exists
+      unsigned int close_complete           : 1; // WRITE_COMPLETE is final
+      unsigned int sync                     : 1; // write to be committed to durable storage before WRITE_COMPLETE
+      unsigned int evacuator                : 1;
+      unsigned int single_fragment          : 1;
+      unsigned int evac_vector              : 1;
+      unsigned int lookup                   : 1;
+      unsigned int update                   : 1;
+      unsigned int remove                   : 1;
+      unsigned int remove_aborted_writers   : 1;
+      unsigned int unused_open_read_timeout : 1; // UNUSED, reserved for bitfield layout
+      unsigned int data_done                : 1;
+      unsigned int read_from_writer_called  : 1;
+      unsigned int rewrite_resident_alt     : 1;
+      unsigned int readers                  : 1;
+      unsigned int doc_from_ram_cache       : 1;
+      unsigned int hit_evacuate             : 1;
+      unsigned int compressed_in_ram        : 1; // compressed state in ram cache
+      unsigned int allow_empty_doc          : 1; // used for cache empty http document
     } f;
   };
   // BTF optimization used to skip reading stuff in cache partition that doesn't contain any

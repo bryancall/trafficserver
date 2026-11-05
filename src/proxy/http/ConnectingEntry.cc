@@ -2,7 +2,7 @@
 
   Server side connection management.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,9 +23,11 @@
  */
 
 #include "../../iocore/net/P_UnixNetVConnection.h"
+#include "../../iocore/net/P_SSLClientUtils.h"
 #include "tsutil/DbgCtl.h"
 #include "proxy/http/ConnectingEntry.h"
 #include "proxy/http/HttpSM.h"
+#include "proxy/http/HttpSessionManager.h"
 
 namespace
 {
@@ -36,10 +38,21 @@ DbgCtl dbg_ctl_http_connect{"http_connect"};
 
 ConnectingEntry::~ConnectingEntry()
 {
+  if (_conn_track_group) {
+    // coverity[exn_spec_violation] - release() throws only on a broken table mutex or a Dbg format error; terminate is fine
+    _conn_track_group->release();
+  }
   if (_netvc_read_buffer != nullptr) {
     free_MIOBuffer(_netvc_read_buffer);
     _netvc_read_buffer = nullptr;
   }
+}
+
+void
+ConnectingEntry::enable_outbound_connection_tracking(std::shared_ptr<ConnectionTracker::Group> group)
+{
+  ink_assert(!_conn_track_group);
+  _conn_track_group = std::move(group);
 }
 
 int
@@ -84,20 +97,48 @@ ConnectingEntry::state_http_server_open(int event, void *data)
       auto prime_iter = connect_sms.rbegin();
       ink_release_assert(prime_iter != connect_sms.rend());
       PoolableSession *new_session = (*prime_iter)->create_server_session(*netvc, _netvc_read_buffer, _netvc_reader);
-      netvc                        = nullptr;
-      _netvc_read_buffer           = nullptr;
+      if (_conn_track_group) {
+        new_session->enable_outbound_connection_tracking(std::move(_conn_track_group));
+      }
+      netvc              = nullptr;
+      _netvc_read_buffer = nullptr;
 
       // Did we end up with a multiplexing session?
       int count = 0;
       if (new_session->is_multiplexing()) {
         // Hand off to all queued up ConnectSM's.
+        bool session_handed_off = false;
         while (!connect_sms.empty()) {
-          Dbg(dbg_ctl_http_connect, "ConnectingEntry Pass along CONNECT_EVENT_TXN %d", count++);
-          auto entry = connect_sms.begin();
+          auto  entry      = connect_sms.begin();
+          auto  event      = CONNECT_EVENT_TXN;
+          void *event_data = new_session;
 
+          NetVConnection *session_netvc = new_session->get_netvc();
+          // Only a pinned key set can vouch for a raw public key origin, so a transaction joins this
+          // session only if validate_pinned_origin() accepts it for the transaction's own set and
+          // policy.
+          bool const acceptable =
+            origin_presented_raw_public_key(session_netvc) ?
+              ServerSessionPool::validate_pinned_origin(*entry, session_netvc) :
+              validate_server_certificate_hostname(session_netvc, (*entry)->get_outbound_sni_for_cert_verification());
+
+          if (!acceptable) {
+            // Retry without joining another multiplexed connect queue so this
+            // transaction gets its own TLS handshake and certificate check.
+            event      = CONNECT_EVENT_DIRECT;
+            event_data = nullptr;
+          } else {
+            session_handed_off = true;
+          }
+
+          Dbg(dbg_ctl_http_connect, "ConnectingEntry Pass along %s %d",
+              event == CONNECT_EVENT_TXN ? "CONNECT_EVENT_TXN" : "CONNECT_EVENT_DIRECT", count++);
           SCOPED_MUTEX_LOCK(lock, (*entry)->mutex, this_ethread());
-          (*entry)->handleEvent(CONNECT_EVENT_TXN, new_session);
+          (*entry)->handleEvent(event, event_data);
           connect_sms.erase(entry);
+        }
+        if (!session_handed_off) {
+          new_session->do_io_close();
         }
       } else {
         // Hand off to one and tell all of the others to connect directly

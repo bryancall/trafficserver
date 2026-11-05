@@ -21,14 +21,22 @@
   limitations under the License.
  */
 
+#include <memory>
+#include <string>
 #include <string_view>
+#include <vector>
+#include <cstdio>
+#include <cstring>
 
 using namespace std::string_view_literals;
 
 #include "tscore/Diags.h"
+#include "tscore/InkErrno.h"
 #include "tsutil/PostScript.h"
 
+#include "proxy/http/HttpConfig.h"
 #include "proxy/http/HttpTransact.h"
+#include "proxy/http/remap/RemapProcessor.h"
 #include "records/RecordsConfig.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -38,6 +46,15 @@ TEST_CASE("HttpTransact", "[http]")
   url_init();
   mime_init();
   http_init();
+
+  SECTION("RemapProcessor tolerates a missing remap table")
+  {
+    HttpTransact::State state;
+    RemapProcessor      processor;
+
+    CHECK_FALSE(processor.setup_for_remap(&state, nullptr));
+    CHECK_FALSE(processor.finish_remap(&state, nullptr));
+  }
 
   SECTION("HttpTransact::merge_response_header_with_cached_header")
   {
@@ -121,7 +138,7 @@ TEST_CASE("HttpTransact", "[http]")
       CHECK(field->has_dups() == false);
     }
 
-    SECTION("Have comon headers")
+    SECTION("Have common headers")
     {
       HTTPHdr        hdr1;
       HTTPHdr        hdr2;
@@ -267,6 +284,171 @@ TEST_CASE("HttpTransact", "[http]")
       str = field->value_get();
       CHECK(str == "555"sv);
       CHECK(field->has_dups() == true);
+    }
+
+    SECTION("Connection-named header from 304 is not merged")
+    {
+      HTTPHdr        cached_headers;
+      HTTPHdr        response_headers;
+      ts::PostScript cached_headers_defer([&]() -> void { cached_headers.destroy(); });
+      ts::PostScript response_headers_defer([&]() -> void { response_headers.destroy(); });
+
+      MIMEField *field;
+
+      struct header {
+        std::string_view name;
+        std::string_view value;
+      };
+
+      struct header cached[] = {
+        {"AAA", "111"},
+        {"BBB", "222"},
+      };
+      struct header response[] = {
+        {"Connection", "X-Evil"  },
+        {"X-Evil",     "injected"},
+        {"CCC",        "333"     },
+      };
+
+      cached_headers.create(HTTPType::RESPONSE);
+      for (auto &&entry : cached) {
+        field = cached_headers.field_create(entry.name);
+        cached_headers.field_attach(field);
+        cached_headers.field_value_set(field, entry.value.data(), entry.value.length());
+      }
+
+      response_headers.create(HTTPType::RESPONSE);
+      for (auto &&entry : response) {
+        field = response_headers.field_create(entry.name);
+        response_headers.field_attach(field);
+        response_headers.field_value_set(field, entry.value.data(), entry.value.length());
+      }
+
+      HttpTransact::merge_response_header_with_cached_header(&cached_headers, &response_headers);
+
+      CHECK(cached_headers.fields_count() == 3);
+
+      field = cached_headers.field_find("Connection"sv);
+      CHECK(field == nullptr);
+
+      field = cached_headers.field_find("X-Evil"sv);
+      CHECK(field == nullptr);
+
+      field = cached_headers.field_find("CCC"sv);
+      REQUIRE(field != nullptr);
+      auto str{field->value_get()};
+      CHECK(str == "333"sv);
+      CHECK(field->has_dups() == false);
+    }
+
+    SECTION("Multiple Connection tokens are all skipped")
+    {
+      HTTPHdr        cached_headers;
+      HTTPHdr        response_headers;
+      ts::PostScript cached_headers_defer([&]() -> void { cached_headers.destroy(); });
+      ts::PostScript response_headers_defer([&]() -> void { response_headers.destroy(); });
+
+      MIMEField *field;
+
+      struct header {
+        std::string_view name;
+        std::string_view value;
+      };
+
+      struct header cached[] = {
+        {"AAA", "111"},
+      };
+      struct header response[] = {
+        {"Connection", "X-Foo, X-Bar"},
+        {"X-Foo",      "a"           },
+        {"X-Bar",      "b"           },
+        {"DDD",        "444"         },
+      };
+
+      cached_headers.create(HTTPType::RESPONSE);
+      for (auto &&entry : cached) {
+        field = cached_headers.field_create(entry.name);
+        cached_headers.field_attach(field);
+        cached_headers.field_value_set(field, entry.value.data(), entry.value.length());
+      }
+
+      response_headers.create(HTTPType::RESPONSE);
+      for (auto &&entry : response) {
+        field = response_headers.field_create(entry.name);
+        response_headers.field_attach(field);
+        response_headers.field_value_set(field, entry.value.data(), entry.value.length());
+      }
+
+      HttpTransact::merge_response_header_with_cached_header(&cached_headers, &response_headers);
+
+      CHECK(cached_headers.fields_count() == 2);
+
+      field = cached_headers.field_find("X-Foo"sv);
+      CHECK(field == nullptr);
+
+      field = cached_headers.field_find("X-Bar"sv);
+      CHECK(field == nullptr);
+
+      field = cached_headers.field_find("DDD"sv);
+      REQUIRE(field != nullptr);
+      auto str{field->value_get()};
+      CHECK(str == "444"sv);
+      CHECK(field->has_dups() == false);
+    }
+
+    SECTION("Connection: TE keeps cached TE and merges normal headers")
+    {
+      HTTPHdr        cached_headers;
+      HTTPHdr        response_headers;
+      ts::PostScript cached_headers_defer([&]() -> void { cached_headers.destroy(); });
+      ts::PostScript response_headers_defer([&]() -> void { response_headers.destroy(); });
+
+      MIMEField *field;
+
+      struct header {
+        std::string_view name;
+        std::string_view value;
+      };
+
+      struct header cached[] = {
+        {"AAA", "111"     },
+        {"TE",  "trailers"},
+      };
+      struct header response[] = {
+        {"Connection", "TE"      },
+        {"TE",         "trailers"},
+        {"BBB",        "222"     },
+      };
+
+      cached_headers.create(HTTPType::RESPONSE);
+      for (auto &&entry : cached) {
+        field = cached_headers.field_create(entry.name);
+        cached_headers.field_attach(field);
+        cached_headers.field_value_set(field, entry.value.data(), entry.value.length());
+      }
+
+      response_headers.create(HTTPType::RESPONSE);
+      for (auto &&entry : response) {
+        field = response_headers.field_create(entry.name);
+        response_headers.field_attach(field);
+        response_headers.field_value_set(field, entry.value.data(), entry.value.length());
+      }
+
+      HttpTransact::merge_response_header_with_cached_header(&cached_headers, &response_headers);
+
+      CHECK(cached_headers.fields_count() == 3);
+
+      field = cached_headers.field_find("TE"sv);
+      REQUIRE(field != nullptr);
+      auto str{field->value_get()};
+      CHECK(str == "trailers"sv);
+      CHECK(field->has_dups() == false);
+
+      field = cached_headers.field_find("BBB"sv);
+      REQUIRE(field != nullptr);
+      str = field->value_get();
+      CHECK(str == "222"sv);
+      CHECK(field->has_dups() == false);
     }
 
     SECTION("Have dup headers 2")
@@ -426,6 +608,7 @@ TEST_CASE("HttpTransact", "[http]")
       CHECK(str == "999"sv);
       CHECK(field->has_dups() == false);
     }
+
     SECTION("Response has superset")
     {
       HTTPHdr        cached_headers;
@@ -540,5 +723,438 @@ TEST_CASE("HttpTransact", "[http]")
       CHECK(field->has_dups() == false);
       ///////////////////////////////////////
     }
+
+    // Regression: repeated 304 revalidation must not grow the cached header
+    // without bound (see merge_response_header_with_cached_header). The
+    // yardstick is HdrHeap::marshal_length() -- the size that gates the cache
+    // write -- NOT fields_count(): dead MIMEField slots grow the heap even
+    // while the live field count stays constant.
+    SECTION("Repeated revalidation does not grow the cached header heap")
+    {
+      struct header {
+        std::string_view name;
+        std::string_view value;
+      };
+
+      auto build = [](HTTPHdr &h, const std::vector<header> &fields) {
+        h.create(HTTPType::RESPONSE);
+        for (auto &&e : fields) {
+          MIMEField *f = h.field_create(e.name);
+          h.field_attach(f);
+          h.field_value_set(f, e.value);
+        }
+      };
+
+      // Merge `response` into a copy of `cached0` `iterations` times and return
+      // the growth in the cached header's marshalled heap size. A correct merge
+      // is idempotent, so the growth must be bounded (independent of iterations).
+      auto merge_growth = [&](const std::vector<header> &cached0, const std::vector<header> &response, int iterations) -> int {
+        HTTPHdr        cached;
+        HTTPHdr        resp;
+        ts::PostScript cached_defer([&]() -> void { cached.destroy(); });
+        ts::PostScript resp_defer([&]() -> void { resp.destroy(); });
+        build(cached, cached0);
+        build(resp, response);
+        // One warm-up merge so any one-time restructuring settles before measuring.
+        HttpTransact::merge_response_header_with_cached_header(&cached, &resp);
+        int const before = cached.m_heap->marshal_length();
+        for (int i = 0; i < iterations; ++i) {
+          HttpTransact::merge_response_header_with_cached_header(&cached, &resp);
+        }
+        return cached.m_heap->marshal_length() - before;
+      };
+
+      // No duplicated fields: pure in-place replacement, bounded.
+      CHECK(merge_growth(
+              {
+                {"Date",    "d0"},
+                {"Expires", "e0"},
+                {"Etag",    "t0"}
+      },
+              {{"Date", "d1"}, {"Expires", "e1"}, {"Etag", "t1"}}, 4000) <= 2048);
+
+      // A duplicated field (e.g. Cache-Control: max-age=60, public) ahead of
+      // single-valued fields must not force those single-valued fields down an
+      // appending path. Before the fix the sticky "dups_seen" flag did exactly
+      // that and this grew ~132 bytes per merge (megabytes over a day).
+      CHECK(merge_growth(
+              {
+                {"Cache-Control", "max-age=60"},
+                {"Cache-Control", "public"    },
+                {"Expires",       "e0"        },
+                {"Etag",          "t0"        }
+      },
+              {{"Cache-Control", "max-age=60"}, {"Cache-Control", "public"}, {"Expires", "e0"}, {"Etag", "t0"}}, 4000) <= 2048);
+
+      // Response carries a duplicated field the cached copy does not yet have.
+      CHECK(merge_growth(
+              {
+                {"Date",    "d0"},
+                {"Expires", "e0"},
+                {"Etag",    "t0"}
+      },
+              {{"Date", "d0"}, {"Vary", "A"}, {"Vary", "B"}, {"Expires", "e0"}, {"Etag", "t0"}}, 4000) <= 2048);
+
+      // A response value that changes length every merge (as Expires does on a
+      // real 304) must still be bounded: value_set frees the old string (self-
+      // coalesced) and reuses the slot.
+      {
+        HTTPHdr        cached;
+        HTTPHdr        resp;
+        ts::PostScript cached_defer([&]() -> void { cached.destroy(); });
+        ts::PostScript resp_defer([&]() -> void { resp.destroy(); });
+        build(cached, {
+                        {"Server",        "ATS"       },
+                        {"Cache-Control", "max-age=60"},
+                        {"Date",          "d0"        },
+                        {"Expires",       "e0"        },
+                        {"Etag",          "t0"        }
+        });
+        resp.create(HTTPType::RESPONSE);
+        MIMEField *rf = resp.field_create("Expires"sv);
+        resp.field_attach(rf);
+        resp.field_value_set(rf, "e0"sv);
+        HttpTransact::merge_response_header_with_cached_header(&cached, &resp);
+        int const before = cached.m_heap->marshal_length();
+        char      buf[64];
+        for (int i = 0; i < 2000; ++i) {
+          int n = std::snprintf(buf, sizeof(buf), "Sat, 18 Jul 2026 05:%02d:%02d GMT-%d", i % 60, (i * 7) % 60, i % 1000);
+          resp.field_value_set(rf, std::string_view(buf, n));
+          HttpTransact::merge_response_header_with_cached_header(&cached, &resp);
+        }
+        MIMEField *exp = cached.field_find("Expires"sv);
+        REQUIRE(exp != nullptr);
+        CHECK(exp->has_dups() == false);
+        CHECK(cached.m_heap->marshal_length() - before <= 4096);
+      }
+
+      // Correctness: merging a response that DROPS one of two duplicate values
+      // must leave the cached header with exactly the response's values.
+      {
+        HTTPHdr        cached;
+        HTTPHdr        resp;
+        ts::PostScript cached_defer([&]() -> void { cached.destroy(); });
+        ts::PostScript resp_defer([&]() -> void { resp.destroy(); });
+        build(cached, {
+                        {"Vary", "A" },
+                        {"Vary", "B" },
+                        {"Vary", "C" },
+                        {"Etag", "t0"}
+        });
+        build(resp, {
+                      {"Vary", "X" },
+                      {"Vary", "Y" },
+                      {"Etag", "t1"}
+        });
+        HttpTransact::merge_response_header_with_cached_header(&cached, &resp);
+        int              count = 0;
+        std::string_view v0, v1;
+        for (MIMEField *d = cached.field_find("Vary"sv); d != nullptr; d = d->m_next_dup) {
+          if (count == 0) {
+            v0 = d->value_get();
+          } else if (count == 1) {
+            v1 = d->value_get();
+          }
+          ++count;
+        }
+        CHECK(count == 2); // surplus cached "C" removed
+        CHECK(v0 == "X"sv);
+        CHECK(v1 == "Y"sv);
+        MIMEField *etag = cached.field_find("Etag"sv);
+        REQUIRE(etag != nullptr);
+        CHECK(etag->value_get() == "t1"sv);
+        CHECK(etag->has_dups() == false);
+      }
+
+      // The production caller sequence: merge_and_update_headers_for_cache_update
+      // deletes a caching header only when the 304 OMITS it, then merges. This
+      // exercises the conditional-delete + the cooked WKS headers
+      // (Cache-Control/Expires/Age) end to end, over many revalidations with a
+      // changing Expires. The cached header heap and the cooked freshness values
+      // must stay correct and bounded.
+      {
+        HTTPHdr        cached;
+        ts::PostScript cached_defer([&]() -> void { cached.destroy(); });
+        build(cached, {
+                        {"Server",        "ATS"       },
+                        {"Cache-Control", "max-age=60"},
+                        {"Date",          "d0"        },
+                        {"Expires",       "e0"        },
+                        {"Etag",          "t0"        }
+        });
+
+        int settled = 0;
+        for (int i = 0; i < 2000; ++i) {
+          HTTPHdr        resp;
+          ts::PostScript resp_defer([&]() -> void { resp.destroy(); });
+          resp.create(HTTPType::RESPONSE);
+          MIMEField *f = resp.field_create("Cache-Control"sv);
+          resp.field_attach(f);
+          resp.field_value_set(f, "max-age=60"sv);
+          char buf[64];
+          int  n = std::snprintf(buf, sizeof(buf), "Sat, 18 Jul 2026 05:%02d:%02d GMT", i % 60, (i * 7) % 60);
+          f      = resp.field_create("Expires"sv);
+          resp.field_attach(f);
+          resp.field_value_set(f, std::string_view(buf, n));
+
+          // Mirror merge_and_update_headers_for_cache_update: delete a caching
+          // header only if the response omits it, then merge.
+          if (!resp.presence(MIME_PRESENCE_AGE)) {
+            cached.field_delete(static_cast<std::string_view>(MIME_FIELD_AGE));
+          }
+          if (!resp.presence(MIME_PRESENCE_ETAG)) {
+            cached.field_delete(static_cast<std::string_view>(MIME_FIELD_ETAG));
+          }
+          if (!resp.presence(MIME_PRESENCE_EXPIRES)) {
+            cached.field_delete(static_cast<std::string_view>(MIME_FIELD_EXPIRES));
+          }
+          HttpTransact::merge_response_header_with_cached_header(&cached, &resp);
+          if (i == 0) {
+            settled = cached.m_heap->marshal_length();
+          }
+        }
+        // Etag was omitted by every 304, so it must have been dropped from cache.
+        CHECK(cached.field_find("Etag"sv) == nullptr);
+        // Expires stays single-valued and the cooked max-age is intact.
+        MIMEField *exp = cached.field_find("Expires"sv);
+        REQUIRE(exp != nullptr);
+        CHECK(exp->has_dups() == false);
+        CHECK(cached.get_cooked_cc_max_age() == 60);
+        // Heap stays bounded across 2000 revalidations.
+        CHECK(cached.m_heap->marshal_length() - settled <= 4096);
+      }
+    }
+  }
+
+  SECTION("HttpTransact::strip_at_headers removes duplicate internal headers")
+  {
+    static constexpr char raw_request[] = "GET / HTTP/1.1\r\n"
+                                          "Host: example.test\r\n"
+                                          "@Ats-Internal: first\r\n"
+                                          "X-Keep: ok\r\n"
+                                          "@Ats-Internal: second\r\n"
+                                          "@Another: third\r\n"
+                                          "\r\n";
+
+    HTTPHdr        hdr;
+    ts::PostScript hdr_defer([&]() -> void { hdr.destroy(); });
+    HTTPParser     parser;
+
+    if (http_rsb.client_request_at_headers_stripped == nullptr) {
+      http_rsb.client_request_at_headers_stripped =
+        Metrics::Counter::createPtr("proxy.process.http.client_request_at_headers_stripped");
+    }
+    if (http_rsb.origin_response_at_headers_stripped == nullptr) {
+      http_rsb.origin_response_at_headers_stripped =
+        Metrics::Counter::createPtr("proxy.process.http.origin_response_at_headers_stripped");
+    }
+    auto const client_request_stripped_before  = Metrics::Counter::load(http_rsb.client_request_at_headers_stripped);
+    auto const origin_response_stripped_before = Metrics::Counter::load(http_rsb.origin_response_at_headers_stripped);
+
+    hdr.create(HTTPType::REQUEST);
+    http_parser_init(&parser);
+
+    auto       *start = raw_request;
+    auto const *end   = raw_request + sizeof(raw_request) - 1;
+    ParseResult err;
+
+    while (true) {
+      err = hdr.parse_req(&parser, &start, end, true);
+      if (err != ParseResult::CONT) {
+        break;
+      }
+    }
+
+    REQUIRE(err == ParseResult::DONE);
+    HttpTransact::strip_at_headers(hdr, HttpTransact::AtHeaderSource::CLIENT_REQUEST, 1);
+
+    CHECK(Metrics::Counter::load(http_rsb.client_request_at_headers_stripped) == client_request_stripped_before + 3);
+    CHECK(Metrics::Counter::load(http_rsb.origin_response_at_headers_stripped) == origin_response_stripped_before);
+    CHECK(hdr.field_find("@Ats-Internal"sv) == nullptr);
+    CHECK(hdr.field_find("@Another"sv) == nullptr);
+    CHECK(hdr.field_find("Host"sv) != nullptr);
+
+    MIMEField *field = hdr.field_find("X-Keep"sv);
+    REQUIRE(field != nullptr);
+    CHECK(field->value_get() == "ok"sv);
+  }
+}
+
+namespace
+{
+std::string
+print_header(HTTPHdr &h)
+{
+  std::string out(h.length_get(), '\0');
+  int         index  = 0;
+  int         offset = 0;
+
+  REQUIRE(h.print(out.data(), out.size(), &index, &offset) == 1);
+  out.resize(index);
+  return out;
+}
+
+int
+field_block_count(HTTPHdr &h)
+{
+  int blocks = 0;
+
+  for (MIMEFieldBlockImpl const *fblock = &h.m_mime->m_first_fblock; fblock != nullptr; fblock = fblock->m_next) {
+    ++blocks;
+  }
+  return blocks;
+}
+
+void
+add_field(HTTPHdr &h, std::string_view name, std::string_view value)
+{
+  MIMEField *f = h.field_create(name);
+  h.field_value_set(f, value);
+  h.field_attach(f);
+}
+
+void
+build_response(HTTPHdr &h)
+{
+  h.create(HTTPType::RESPONSE);
+  h.version_set(HTTP_1_1);
+  h.status_set(HTTPStatus::OK);
+  h.reason_set("OK"sv);
+  add_field(h, "Server"sv, "origin/3"sv);
+  add_field(h, "Date"sv, "Wed, 30 Sep 2026 17:07:26 GMT"sv);
+  add_field(h, "Content-Type"sv, "application/ocsp-response"sv);
+  add_field(h, "Cache-Control"sv, "max-age=21600"sv);
+  add_field(h, "Cache-Control"sv, "public"sv);
+  add_field(h, "Last-Modified"sv, "Wed, 30 Sep 2026 06:10:51 GMT"sv);
+  add_field(h, "Vary"sv, "Accept-Encoding"sv);
+  add_field(h, "Vary"sv, "Origin"sv);
+  add_field(h, "X-Served-By"sv, "origin-7.example.test"sv);
+  add_field(h, "ETag"sv, "\"t0\""sv);
+  add_field(h, "Expires"sv, "Wed, 30 Sep 2026 23:07:26 GMT"sv);
+}
+} // namespace
+
+TEST_CASE("HttpTransact compacts a bloated cached response header", "[http]")
+{
+  url_init();
+  mime_init();
+  http_init();
+
+  HTTPHdr        cached;
+  ts::PostScript cached_defer([&]() -> void { cached.destroy(); });
+
+  build_response(cached);
+
+  SECTION("an ordinary header is left alone")
+  {
+    std::string const before = print_header(cached);
+
+    CHECK(HttpTransact::compact_cached_response_header(&cached) == false);
+    CHECK(print_header(cached) == before);
+  }
+
+  // 17 live fields need two blocks; pad the chain with deleted slots to the given block count.
+  auto pad_to_blocks = [&](int blocks) {
+    for (int i = 0; i < 6; ++i) {
+      add_field(cached, "X-Live"sv, "v"sv);
+    }
+    for (int i = cached.fields_count(); i < blocks * MIME_FIELD_BLOCK_SLOTS; ++i) {
+      add_field(cached, "X-Churn"sv, "v"sv);
+    }
+    cached.field_delete("X-Churn"sv);
+    REQUIRE(field_block_count(cached) == blocks);
+    REQUIRE(cached.fields_count() == 17);
+  };
+
+  SECTION("two blocks beyond what the live fields need are tolerated")
+  {
+    pad_to_blocks(4);
+    CHECK(HttpTransact::compact_cached_response_header(&cached) == false);
+  }
+
+  SECTION("three blocks beyond what the live fields need are compacted")
+  {
+    pad_to_blocks(5);
+    CHECK(HttpTransact::compact_cached_response_header(&cached) == true);
+    CHECK(field_block_count(cached) == 2);
+  }
+
+  SECTION("a header with hundreds of dead field blocks is rebuilt unchanged and small")
+  {
+    // The state an object cached by older builds can be in: a long field-block chain holding
+    // a few live fields. Freed slots are reused but blocks are never released, so fields added and
+    // then deleted leave that chain behind, and it survives the round trip through the cache.
+    for (int i = 0; i < 5000; ++i) {
+      add_field(cached, "X-Churn"sv, "v"sv);
+    }
+    cached.field_delete("X-Churn"sv);
+
+    struct PinnedRef : public RefCountObj {
+      void
+      free() override
+      {
+      }
+    } ref;
+    ref.refcount_inc();
+
+    int const len = cached.m_heap->marshal_length();
+    auto      buf = std::make_unique<uint64_t[]>(len / sizeof(uint64_t) + 1);
+    HTTPHdr   read_back;
+    HTTPHdr   stored;
+
+    REQUIRE(cached.m_heap->marshal(reinterpret_cast<char *>(buf.get()), len) > 0);
+    REQUIRE(read_back.unmarshal(reinterpret_cast<char *>(buf.get()), len, &ref) > 0);
+    stored.copy(&read_back);
+    ts::PostScript stored_defer([&]() -> void { stored.destroy(); });
+
+    int const         bloated_size = stored.m_heap->marshal_length();
+    std::string const before       = print_header(stored);
+
+    REQUIRE(field_block_count(stored) > 300);
+    REQUIRE(stored.fields_count() == 11);
+
+    CHECK(HttpTransact::compact_cached_response_header(&stored) == true);
+    CHECK(print_header(stored) == before);
+    CHECK(stored.status_get() == HTTPStatus::OK);
+    CHECK(stored.reason_get() == "OK"sv);
+    CHECK(stored.version_get() == HTTP_1_1);
+    CHECK(stored.fields_count() == 11);
+    CHECK(field_block_count(stored) == 1);
+    CHECK(stored.m_heap->marshal_length() < bloated_size / 20);
+
+    MIMEField *cc = stored.field_find("Cache-Control"sv);
+    REQUIRE(cc != nullptr);
+    CHECK(cc->value_get() == "max-age=21600"sv);
+    REQUIRE(cc->m_next_dup != nullptr);
+    CHECK(cc->m_next_dup->value_get() == "public"sv);
+    CHECK(stored.presence(MIME_PRESENCE_EXPIRES));
+    CHECK(stored.presence(MIME_PRESENCE_ETAG));
+    CHECK(stored.presence(MIME_PRESENCE_VARY));
+
+    // Fields can still be added afterwards, and doing so does not re-trigger compaction.
+    add_field(stored, "Age"sv, "0"sv);
+    CHECK(stored.fields_count() == 12);
+    CHECK(HttpTransact::compact_cached_response_header(&stored) == false);
+  }
+}
+
+TEST_CASE("HttpTransact::get_error_string", "[http]")
+{
+  SECTION("OS errno")
+  {
+    CHECK(HttpTransact::get_error_string(EADDRNOTAVAIL) == std::string_view{strerror(EADDRNOTAVAIL)});
+  }
+
+  SECTION("internal errno decoded from NET_EVENT_OPEN_FAILED")
+  {
+    CHECK(HttpTransact::get_error_string(ESOCK_DENIED) == "socks error - denied"sv);
+    CHECK(HttpTransact::get_error_string(ESOCK_TIMEOUT) == "socks error - timeout"sv);
+    CHECK(HttpTransact::get_error_string(ESOCK_NO_SOCK_SERVER_CONN) == "socks error - no server connection"sv);
+  }
+
+  SECTION("negated internal errno")
+  {
+    CHECK(HttpTransact::get_error_string(-ESOCK_DENIED) == "socks error - denied"sv);
+    CHECK(HttpTransact::get_error_string(-ENET_CONNECT_FAILED) == "connect failed"sv);
   }
 }

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -31,6 +31,7 @@
  ****************************************************************************/
 
 #include "tscore/ink_platform.h"
+#include "tscore/ink_config.h"
 #include "tscore/Diags.h"
 #include "proxy/hdrs/HdrHeap.h"
 #include "proxy/hdrs/URL.h"
@@ -38,6 +39,8 @@
 #include "proxy/hdrs/HTTP.h"
 #include "iocore/eventsystem/EThread.h"
 #include "iocore/eventsystem/Thread.h"
+
+#include <cstdlib>
 
 static constexpr size_t   MAX_LOST_STR_SPACE      = 1024;
 static constexpr uint32_t MAX_HDR_HEAP_OBJ_LENGTH = (1 << 20) - 1; ///< m_length is 20 bit
@@ -48,6 +51,101 @@ Allocator strHeapAllocator("hdrStrHeap", HdrStrHeap::DEFAULT_SIZE);
 namespace
 {
 DbgCtl dbg_ctl_http{"http"};
+
+#if TS_HAS_TESTS
+// Test hook: how far to rotate the well-known string indexes written into a marshalled heap.
+// Zero, the default, leaves marshalling alone.
+int const test_wks_idx_shift = []() -> int {
+  char const *const value = std::getenv("ATS_TEST_WKS_IDX_SHIFT");
+
+  return value != nullptr ? atoi(value) : 0;
+}();
+
+int16_t
+test_shift_wks_idx(int16_t wks_idx)
+{
+  if (wks_idx < 0) {
+    return wks_idx;
+  }
+  // Fold the configured shift into [0, hdrtoken_num_wks) here rather than where it is read:
+  // hdrtoken_num_wks is initialized in another translation unit, so it is not dependable during
+  // this one's static initialization. Folding also keeps a negative or oversized environment value
+  // from producing an index that is not in the table.
+  int const shift = ((test_wks_idx_shift % hdrtoken_num_wks) + hdrtoken_num_wks) % hdrtoken_num_wks;
+
+  return static_cast<int16_t>((wks_idx + shift) % hdrtoken_num_wks);
+}
+
+/** Make a marshalled heap look like one written by a build with a different well-known string
+ * table: rotate every stored index, and drop the presence bits and slot accelerators that a build
+ * lacking some of this build's strings would never have set.
+ *
+ * There is no way to run two well-known string tables in one process now that the table is built at
+ * compile time, so this stands in for the case the reader has to survive. Reading such a heap back
+ * has to reproduce the header the writer had, because HTTPHdrImpl::recompute_wks_indices() rebuilds
+ * all of it from the header strings the heap also carries. See the ATS_TEST_WKS_IDX_SHIFT autest.
+ */
+void
+test_shift_marshalled_wks_indices(HdrHeap *marshal_hdr)
+{
+  if (test_wks_idx_shift == 0) {
+    return;
+  }
+
+  char *obj_data = reinterpret_cast<char *>(marshal_hdr) + HDR_HEAP_HDR_SIZE;
+  char *heap_end = reinterpret_cast<char *>(marshal_hdr) + marshal_hdr->m_size;
+
+  while (obj_data < heap_end) {
+    HdrHeapObjImpl *obj = reinterpret_cast<HdrHeapObjImpl *>(obj_data);
+
+    switch (static_cast<HdrHeapObjType>(obj->m_type)) {
+    case HdrHeapObjType::URL: {
+      URLImpl *url          = reinterpret_cast<URLImpl *>(obj);
+      url->m_scheme_wks_idx = test_shift_wks_idx(url->m_scheme_wks_idx);
+      break;
+    }
+    case HdrHeapObjType::HTTP_HEADER: {
+      HTTPHdrImpl *hh = reinterpret_cast<HTTPHdrImpl *>(obj);
+      if (hh->m_polarity == HTTPType::REQUEST) {
+        hh->u.req.m_method_wks_idx = test_shift_wks_idx(hh->u.req.m_method_wks_idx);
+      }
+      break;
+    }
+    case HdrHeapObjType::FIELD_BLOCK: {
+      MIMEFieldBlockImpl *fblock = reinterpret_cast<MIMEFieldBlockImpl *>(obj);
+      for (uint32_t i = 0; i < fblock->m_freetop; ++i) {
+        MIMEField &field = fblock->m_field_slots[i];
+        if (field.is_live()) {
+          field.m_wks_idx = test_shift_wks_idx(field.m_wks_idx);
+        }
+      }
+      break;
+    }
+    case HdrHeapObjType::MIME_HEADER: {
+      MIMEHdrImpl *mh     = reinterpret_cast<MIMEHdrImpl *>(obj);
+      mh->m_presence_bits = MIME_PRESENCE_NONE;
+      for (uint32_t &accelerator : mh->m_slot_accelerators) {
+        accelerator = 0xFFFFFFFF;
+      }
+      for (uint32_t i = 0; i < mh->m_first_fblock.m_freetop; ++i) {
+        MIMEField &field = mh->m_first_fblock.m_field_slots[i];
+        if (field.is_live()) {
+          field.m_wks_idx = test_shift_wks_idx(field.m_wks_idx);
+        }
+      }
+      break;
+    }
+    default:
+      break;
+    }
+
+    if (obj->m_length <= 0) {
+      return;
+    }
+    obj_data += obj->m_length;
+  }
+}
+#endif
 
 } // end anonymous namespace
 
@@ -817,6 +915,10 @@ HdrHeap::marshal(char *buf, int len)
     }
   }
 
+#if TS_HAS_TESTS
+  test_shift_marshalled_wks_indices(marshal_hdr);
+#endif
+
   // Add up the total bytes used
   used = ptr_heap_size + str_size + HDR_HEAP_HDR_SIZE;
   used = HdrHeapMarshalBlocks(swoc::round_up(used));
@@ -855,7 +957,11 @@ HdrHeap::check_marshalled(uint32_t buf_length)
     return false;
   }
 
-  if ((uintptr_t)(this->m_size + m_ronly_heap[0].m_heap_start) > buf_length) {
+  if (m_ronly_heap[0].m_heap_len < 0) {
+    return false;
+  }
+
+  if (static_cast<uint64_t>(this->m_size) + static_cast<uint64_t>(m_ronly_heap[0].m_heap_len) > buf_length) {
     return false;
   }
 
@@ -898,11 +1004,15 @@ HdrHeap::unmarshal(int buf_length, int obj_type, HdrHeapObjImpl **found_obj, Ref
     return -1;
   }
 
-  int unmarshal_size = this->unmarshal_size();
-  if (unmarshal_size > buf_length) {
+  if (m_size < static_cast<uint32_t>(HDR_HEAP_HDR_SIZE) || // heap too small for header
+      m_size != (uintptr_t)m_ronly_heap[0].m_heap_start || // string heap offset inconsistent
+      m_ronly_heap[0].m_heap_len < 0 ||                    // invalid string heap length
+      buf_length < 0 ||                                    // invalid buf_length
+      static_cast<uint64_t>(m_size) + static_cast<uint64_t>(m_ronly_heap[0].m_heap_len) > static_cast<uint64_t>(buf_length)) {
     ink_assert(!"HdrHeap::unmarshal truncated header");
     return -1;
   }
+  int unmarshal_size = this->unmarshal_size();
 #ifdef HDR_HEAP_CHECKSUMS
   if (m_free_start != NULL) {
     uint32_t stored_sum = (uint32_t)m_free_start;
@@ -1029,7 +1139,7 @@ HdrHeap::attach_str_heap(char const *h_start, int h_len, RefCountObj *h_ref_obj,
   return true;
 }
 
-// void HdrHeap::inhertit_string_heaps(const HdrHeap* inherit_from)
+// void HdrHeap::inherit_string_heaps(const HdrHeap* inherit_from)
 //
 //    Inherits all of inherit_from's string heaps as read-only
 //     string heaps

@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -25,6 +25,7 @@
 #include "proxy/hdrs/XPACK.h"
 #include "proxy/http3/QPACK.h"
 #include "tscore/ink_defs.h"
+#include "tscore/ink_ascii_tolower.h"
 #include "tscore/ink_memory.h"
 
 #define QPACKDebug(fmt, ...)   Dbg(dbg_ctl_qpack, "[%s] " fmt, this->_qc->cids().data(), ##__VA_ARGS__)
@@ -69,7 +70,7 @@ const QPACK::Header QPACK::StaticTable::STATIC_HEADER_FIELDS[] = {
   {":status",                          "503"                                                  },
   {"accept",                           "*/*"                                                  },
   {"accept",                           "application/dns-message"                              },
-  {"accept-encoding",                  "gzip, deflate, br, zstd"                              },
+  {"accept-encoding",                  "gzip, deflate, br"                                    },
   {"accept-ranges",                    "bytes"                                                },
   {"access-control-allow-headers",     "cache-control"                                        },
   {"access-control-allow-headers",     "content-type"                                         },
@@ -80,7 +81,6 @@ const QPACK::Header QPACK::StaticTable::STATIC_HEADER_FIELDS[] = {
   {"cache-control",                    "no-cache"                                             },
   {"cache-control",                    "no-store"                                             },
   {"cache-control",                    "public, max-age=31536000"                             },
-  {"content-encoding",                 "zstd"                                                 },
   {"content-encoding",                 "br"                                                   },
   {"content-encoding",                 "gzip"                                                 },
   {"content-type",                     "application/dns-message"                              },
@@ -140,10 +140,12 @@ const QPACK::Header QPACK::StaticTable::STATIC_HEADER_FIELDS[] = {
   {"x-frame-options",                  "sameorigin"                                           }
 };
 
-QPACK::QPACK(QUICConnection *qc, uint32_t max_field_section_size, uint16_t max_table_size, uint16_t max_blocking_streams)
+QPACK::QPACK(QUICConnection *qc, uint32_t max_field_section_size, uint16_t max_table_size, uint16_t max_blocking_streams,
+             uint32_t header_field_max_size)
   : QUICApplication(qc),
     _dynamic_table(max_table_size),
     _max_field_section_size(max_field_section_size),
+    _header_field_max_size(header_field_max_size),
     _max_table_size(max_table_size),
     _max_blocking_streams(max_blocking_streams)
 {
@@ -164,32 +166,34 @@ QPACK::~QPACK()
 void
 QPACK::on_stream_open(QUICStream &stream)
 {
-  auto *info = new QUICStreamVCAdapter::IOInfo(stream);
+  auto  ret  = this->_streams.emplace(stream.id(), stream);
+  auto &info = ret.first->second;
 
   switch (stream.direction()) {
   case QUICStreamDirection::BIDIRECTIONAL:
     // ink_assert(!"QPACK does not use bidirectional streams");
     // QPACK offline interop uses stream 0 as a encoder stream.
-    info->setup_write_vio(this);
-    info->setup_read_vio(this);
+    info.setup_write_vio(this);
+    info.setup_read_vio(this);
     break;
   case QUICStreamDirection::SEND:
-    info->setup_write_vio(this);
+    info.setup_write_vio(this);
     break;
   case QUICStreamDirection::RECEIVE:
-    info->setup_read_vio(this);
+    info.setup_read_vio(this);
     break;
   default:
     ink_assert(false);
     break;
   }
 
-  stream.set_io_adapter(&info->adapter);
+  stream.set_io_adapter(&info.adapter);
 }
 
 void
-QPACK::on_stream_close(QUICStream & /* stream ATS_UNUSED */)
+QPACK::on_stream_close(QUICStream &stream)
 {
+  this->_streams.erase(stream.id());
 }
 
 int
@@ -283,18 +287,20 @@ QPACK::decode(uint64_t stream_id, const uint8_t *header_block, size_t header_blo
 
   uint64_t tmp = 0;
   int64_t  ret = xpack_decode_integer(tmp, header_block, header_block + header_block_len, 8);
-  if (ret < 0 && tmp > 0xFFFF) {
+  if (ret < 0 || tmp > 0xFFFF) {
     return -1;
   }
   uint16_t largest_reference = tmp;
 
   if (largest_reference != 0 && (this->_dynamic_table.is_empty() || this->_dynamic_table.largest_index() < largest_reference)) {
     // Blocked
-    if (this->_add_to_blocked_list(
-          new DecodeRequest(largest_reference, thread, cont, stream_id, header_block, header_block_len, hdr))) {
+    auto *decode_request = new DecodeRequest(largest_reference, thread, cont, stream_id, header_block, header_block_len, hdr);
+
+    if (this->_add_to_blocked_list(decode_request)) {
       return 1;
     } else {
       // Number of blocked streams exceed the limit
+      delete decode_request;
       return -2;
     }
   }
@@ -369,9 +375,7 @@ QPACK::_encode_header(const MIMEField &field, uint16_t base_index, IOBufferBlock
 {
   auto  name{field.name_get()};
   char *lowered_name = this->_arena.str_store(name.data(), name.length());
-  for (size_t i = 0; i < name.length(); i++) {
-    lowered_name[i] = ParseRules::ink_tolower(lowered_name[i]);
-  }
+  ts::ascii::tolower_inplace(lowered_name, name.length());
   auto value{field.value_get()};
 
   // TODO Set never_index flag on/off according to encoding headers
@@ -764,7 +768,7 @@ QPACK::_decode_literal_header_field_with_name_ref(int16_t base_index, const uint
   // Read value
   char    *value;
   uint64_t value_len;
-  if ((ret = xpack_decode_string(this->_arena, &value, value_len, buf + read_len, buf + buf_len, 7)) < 0) {
+  if ((ret = xpack_decode_string(this->_arena, &value, value_len, buf + read_len, buf + buf_len, _header_field_max_size, 7)) < 0) {
     return -1;
   }
   read_len += ret;
@@ -796,14 +800,15 @@ QPACK::_decode_literal_header_field_without_name_ref(const uint8_t *buf, size_t 
   int64_t  ret;
   char    *name;
   uint64_t name_len;
-  if ((ret = xpack_decode_string(this->_arena, &name, name_len, buf, buf + buf_len, 3)) < 0) {
+  if ((ret = xpack_decode_string(this->_arena, &name, name_len, buf, buf + buf_len, _header_field_max_size, 3)) < 0) {
     return -1;
   }
   read_len += ret;
 
   char    *value;
   uint64_t value_len;
-  if ((ret = xpack_decode_string(this->_arena, &value, value_len, buf + read_len, buf + buf_len, 7)) < 0) {
+  if ((ret = xpack_decode_string(this->_arena, &value, value_len, buf + read_len, buf + buf_len, _header_field_max_size, 7)) < 0) {
+    this->_arena.str_free(name);
     return -1;
   }
   read_len += ret;
@@ -815,8 +820,9 @@ QPACK::_decode_literal_header_field_without_name_ref(const uint8_t *buf, size_t 
   QPACKDebug("Decoded Literal Header Field Without Name Ref: name=%.*s, value=%.*s", static_cast<uint16_t>(name_len), name,
              static_cast<uint16_t>(value_len), value);
 
-  this->_arena.str_free(name);
+  // Free in reverse allocation order so Arena can rewind both entries.
   this->_arena.str_free(value);
+  this->_arena.str_free(name);
 
   return read_len;
 }
@@ -893,7 +899,7 @@ QPACK::_decode_literal_header_field_with_postbase_name_ref(int16_t base_index, c
   // Read value
   char    *value;
   uint64_t value_len;
-  if ((ret = xpack_decode_string(this->_arena, &value, value_len, buf + read_len, buf + buf_len, 7)) < 0) {
+  if ((ret = xpack_decode_string(this->_arena, &value, value_len, buf + read_len, buf + buf_len, _header_field_max_size, 7)) < 0) {
     return -1;
   }
   read_len += ret;
@@ -919,15 +925,16 @@ QPACK::_decode_header(const uint8_t *header_block, size_t header_block_len, HTTP
 
   // Decode Header Data Prefix
   uint64_t tmp;
-  if ((ret = xpack_decode_integer(tmp, pos, pos + remain_len, 8)) < 0 && tmp > 0xFFFF) {
+  if ((ret = xpack_decode_integer(tmp, pos, pos + remain_len, 8)) < 0 || tmp > 0xFFFF) {
     return -1;
   }
   pos                        += ret;
+  remain_len                 -= ret;
   uint16_t largest_reference  = tmp;
 
   uint64_t delta_base_index;
   uint16_t base_index;
-  if ((ret = xpack_decode_integer(delta_base_index, pos, pos + remain_len, 7)) < 0 && delta_base_index < 0xFFFF) {
+  if ((ret = xpack_decode_integer(delta_base_index, pos, pos + remain_len, 7)) < 0 || delta_base_index > 0xFFFF) {
     return -2;
   }
 
@@ -939,7 +946,8 @@ QPACK::_decode_header(const uint8_t *header_block, size_t header_block_len, HTTP
   } else {
     base_index = largest_reference + delta_base_index;
   }
-  pos += ret;
+  pos        += ret;
+  remain_len -= ret;
 
   uint32_t decoded_header_list_size = 0;
 
@@ -969,7 +977,8 @@ QPACK::_decode_header(const uint8_t *header_block, size_t header_block_len, HTTP
       break;
     }
 
-    pos += ret;
+    pos        += ret;
+    remain_len -= ret;
   }
 
   return ret;
@@ -1011,18 +1020,24 @@ QPACK::_update_largest_known_received_index_by_insert_count(uint16_t insert_coun
 void
 QPACK::_update_largest_known_received_index_by_stream_id(uint64_t stream_id)
 {
-  uint16_t largest_ref_index = this->_references[stream_id].largest;
-  if (largest_ref_index > this->_largest_known_received_index) {
-    this->_largest_known_received_index = largest_ref_index;
+  auto it = this->_references.find(stream_id);
+  if (it == this->_references.end()) {
+    return;
+  }
+  if (it->second.largest > this->_largest_known_received_index) {
+    this->_largest_known_received_index = it->second.largest;
   }
 }
 
 void
 QPACK::_update_reference_counts(uint64_t stream_id)
 {
-  uint16_t smallest_ref_index = this->_references[stream_id].smallest;
-  if (smallest_ref_index) {
-    this->_dynamic_table.unref_entry(smallest_ref_index);
+  auto it = this->_references.find(stream_id);
+  if (it == this->_references.end()) {
+    return;
+  }
+  if (it->second.smallest) {
+    this->_dynamic_table.unref_entry(it->second.smallest);
   }
 }
 
@@ -1136,21 +1151,41 @@ QPACK::_on_encoder_stream_read_ready(IOBufferReader &reader)
     reader.memcpy(&buf, 1);
     if (buf & 0x80) { // Insert With Name Reference
       bool        is_static;
-      uint16_t    index;
-      const char *name;
-      size_t      name_len;
-      const char *dummy;
-      size_t      dummy_len;
+      uint64_t    index;
+      const char *name      = nullptr;
+      size_t      name_len  = 0;
+      const char *dummy     = nullptr;
+      size_t      dummy_len = 0;
       char       *value;
       size_t      value_len;
       if (this->_read_insert_with_name_ref(reader, is_static, index, this->_arena, &value, value_len) < 0) {
         this->_abort_decode();
         return EVENT_DONE;
       }
-      QPACKDebug("Received Insert With Name Ref: is_static=%d, index=%d, value=%.*s", is_static, index, static_cast<int>(value_len),
-                 value);
-      StaticTable::lookup(index, &name, &name_len, &dummy, &dummy_len);
-      this->_dynamic_table.insert_entry(name, name_len, value, value_len);
+      QPACKDebug("Received Insert With Name Ref: is_static=%d, index=%" PRIu64 ", value=%.*s", is_static, index,
+                 static_cast<int>(value_len), value);
+      XpackLookupResult result;
+      if (is_static) {
+        result = StaticTable::lookup(index, &name, &name_len, &dummy, &dummy_len);
+      } else {
+        result = this->_dynamic_table.lookup_relative(index, &name, &name_len, &dummy, &dummy_len);
+      }
+      if (result.match_type != XpackLookupResult::MatchType::EXACT) {
+        this->_arena.str_free(value);
+        this->_abort_decode();
+        return EVENT_DONE;
+      }
+      if (is_static) {
+        this->_dynamic_table.insert_entry(name, name_len, value, value_len);
+      } else {
+        // The referenced name lives in the dynamic table's storage, which this
+        // insert may evict and overwrite (RFC 9204 Section 3.2.2), so copy it.
+        char *owned_name = this->_arena.str_store(name, name_len);
+
+        this->_dynamic_table.insert_entry(owned_name, name_len, value, value_len);
+        // Free in reverse allocation order so Arena can rewind both entries.
+        this->_arena.str_free(owned_name);
+      }
       this->_arena.str_free(value);
     } else if (buf & 0x40) { // Insert Without Name Reference
       char  *name;
@@ -1164,6 +1199,8 @@ QPACK::_on_encoder_stream_read_ready(IOBufferReader &reader)
       QPACKDebug("Received Insert Without Name Ref: name=%.*s, value=%.*s", static_cast<int>(name_len), name,
                  static_cast<int>(value_len), value);
       this->_dynamic_table.insert_entry(name, name_len, value, value_len);
+      // Free in reverse allocation order so Arena can rewind both entries.
+      this->_arena.str_free(value);
       this->_arena.str_free(name);
     } else if (buf & 0x20) { // Dynamic Table Size Update
       uint16_t max_size;
@@ -1213,23 +1250,27 @@ QPACK::estimate_header_block_size(const HTTPHdr & /* hdr ATS_UNUSED */)
 }
 
 const XpackLookupResult
-QPACK::StaticTable::lookup(uint16_t index, const char **name, size_t *name_len, const char **value, size_t *value_len)
+QPACK::StaticTable::lookup(uint64_t index, const char **name, size_t *name_len, const char **value, size_t *value_len)
 {
+  if (index >= countof(STATIC_HEADER_FIELDS)) {
+    return {0, XpackLookupResult::MatchType::NONE};
+  }
+
   const Header &header = STATIC_HEADER_FIELDS[index];
   *name                = header.name;
   *name_len            = header.name_len;
   *value               = header.value;
   *value_len           = header.value_len;
-  return {index, XpackLookupResult::MatchType::EXACT};
+  return {static_cast<uint32_t>(index), XpackLookupResult::MatchType::EXACT};
 }
 
 const XpackLookupResult
 QPACK::StaticTable::lookup(const char *name, size_t name_len, const char *value, size_t value_len)
 {
   XpackLookupResult::MatchType match_type      = XpackLookupResult::MatchType::NONE;
-  uint16_t                     i               = 0;
-  uint16_t                     candidate_index = 0;
-  int                          n               = countof(STATIC_HEADER_FIELDS);
+  uint32_t                     i               = 0;
+  uint32_t                     candidate_index = 0;
+  unsigned int                 n               = countof(STATIC_HEADER_FIELDS);
 
   for (; i < n; ++i) {
     const Header &h = STATIC_HEADER_FIELDS[i];
@@ -1494,7 +1535,7 @@ QPACK::_write_stream_cancellation(uint64_t stream_id)
 }
 
 int
-QPACK::_read_insert_with_name_ref(IOBufferReader &reader, bool &is_static, uint16_t &index, Arena &arena, char **value,
+QPACK::_read_insert_with_name_ref(IOBufferReader &reader, bool &is_static, uint64_t &index, Arena &arena, char **value,
                                   size_t &value_len)
 {
   size_t   read_len = 0;
@@ -1507,15 +1548,15 @@ QPACK::_read_insert_with_name_ref(IOBufferReader &reader, bool &is_static, uint1
   is_static = input[0] & 0x40;
 
   // Name Index
-  uint64_t tmp;
-  if ((ret = xpack_decode_integer(tmp, input, input + input_len, 6)) < 0 && tmp > 0xFFFF) {
+  if ((ret = xpack_decode_integer(index, input, input + input_len, 6)) < 0) {
     return -1;
   }
-  index     = tmp;
   read_len += ret;
 
   // Value
-  if ((ret = xpack_decode_string(arena, value, tmp, input + read_len, input + input_len, 7)) < 0 && tmp > 0xFF) {
+  uint64_t tmp = 0;
+  if ((ret = xpack_decode_string(arena, value, tmp, input + read_len, input + input_len, _header_field_max_size, 7)) < 0 ||
+      tmp > 0xFFFF) {
     return -1;
   }
   value_len  = tmp;
@@ -1538,14 +1579,16 @@ QPACK::_read_insert_without_name_ref(IOBufferReader &reader, Arena &arena, char 
 
   // Name
   uint64_t tmp;
-  if ((ret = xpack_decode_string(arena, name, tmp, input, input + input_len, 5)) < 0 && tmp > 0xFFFF) {
+  if ((ret = xpack_decode_string(arena, name, tmp, input, input + input_len, _header_field_max_size, 5)) < 0 || tmp > 0xFFFF) {
     return -1;
   }
   name_len  = tmp;
   read_len += ret;
 
   // Value
-  if ((ret = xpack_decode_string(arena, value, tmp, input + read_len, input + input_len, 7)) < 0 && tmp > 0xFFFF) {
+  if ((ret = xpack_decode_string(arena, value, tmp, input + read_len, input + input_len, _header_field_max_size, 7)) < 0 ||
+      tmp > 0xFFFF) {
+    arena.str_free(*name);
     return -1;
   }
   value_len  = tmp;
@@ -1567,7 +1610,7 @@ QPACK::_read_duplicate(IOBufferReader &reader, uint16_t &index)
 
   // Index
   uint64_t tmp;
-  if ((ret = xpack_decode_integer(tmp, input, input + input_len, 5)) < 0 && tmp > 0xFFFF) {
+  if ((ret = xpack_decode_integer(tmp, input, input + input_len, 5)) < 0 || tmp > 0xFFFF) {
     return -1;
   }
   index     = tmp;
@@ -1589,7 +1632,7 @@ QPACK::_read_dynamic_table_size_update(IOBufferReader &reader, uint16_t &max_siz
   uint64_t tmp;
 
   // Max Size
-  if ((ret = xpack_decode_integer(tmp, input, input + input_len, 5)) < 0 && tmp > 0xFFFF) {
+  if ((ret = xpack_decode_integer(tmp, input, input + input_len, 5)) < 0 || tmp > 0xFFFF) {
     return -1;
   }
   max_size  = tmp;
@@ -1611,7 +1654,7 @@ QPACK::_read_table_state_synchronize(IOBufferReader &reader, uint16_t &insert_co
   uint64_t tmp;
 
   // Insert Count
-  if ((ret = xpack_decode_integer(tmp, input, input + input_len, 6)) < 0 && tmp > 0xFFFF) {
+  if ((ret = xpack_decode_integer(tmp, input, input + input_len, 6)) < 0 || tmp > 0xFFFF) {
     return -1;
   }
   insert_count  = tmp;

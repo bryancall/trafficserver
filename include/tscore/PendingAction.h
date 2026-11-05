@@ -2,7 +2,7 @@
 
 Container for a pending @c Action.
 
-@section license License
+@par License
 
 Licensed to the Apache Software Foundation (ASF) under one
 or more contributor license agreements.  See the NOTICE file
@@ -138,11 +138,9 @@ inline bool
 PendingAction::clear_if_action_is(Action *action)
 {
   if (action != nullptr) {
-    while (action == pending_action) {
-      if (pending_action.compare_exchange_strong(action, nullptr)) {
-        // do NOT cancel - this is called when the event is handled.
-        return true;
-      }
+    if (pending_action.compare_exchange_strong(action, nullptr)) {
+      // do NOT cancel - this is called when the event is handled.
+      return true;
     }
   }
   return false;

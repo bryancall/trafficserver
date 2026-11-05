@@ -63,14 +63,23 @@ The three typical use cases are as follows:
       @pparam=regex::/etc/music.regex
 
 where music.regex is a format with PCRE (perl compatible) regular
-expressions, and unique rules for match. E.g.::
+expressions, and unique rules for match. Anchor each pattern so it
+matches only what it is meant to — an unanchored pattern matches any
+path merely containing it. E.g.::
 
-    .*\.mp3  allow  US
-    .*\.ogg  deny   US
+    ^.*\.mp3$  allow  US
+    ^.*\.ogg$  deny   US
 
 Note that the default in the case of no matches on the regular
 expressions is to "allow" the request. This can be overridden, see next
 use case.
+
+.. seealso::
+   The regex is matched against the URL path returned by
+   ``TSUrlPathGet`` (which excludes the leading ``/``). Operator-written
+   patterns can match more inputs than intended when unanchored. For
+   per-site subject definitions, common pitfalls, and recommended
+   pattern shapes, see :ref:`admin-regex-best-practices`.
 
 3. You can also combine 1) and 2), and provide defaults in the
    remap.config configuration, which then applies for the cases where no

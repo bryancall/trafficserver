@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -49,7 +49,6 @@ AggregateWriteBuffer::flush(int fd, off_t write_pos) const
 {
   int r = pwrite(fd, this->_buffer, this->_buffer_pos, write_pos);
   if (r != this->_buffer_pos) {
-    ink_assert(!"flushing agg buffer failed");
     return false;
   }
   return true;

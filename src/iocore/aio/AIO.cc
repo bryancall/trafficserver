@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -85,6 +85,11 @@ AIOCallback::io_complete(int event, void *data)
 {
   (void)event;
   (void)data;
+  // Store from_api's value ahead of time because handling the event in the
+  // midst of this function may delete `this`, making using from_api itself a
+  // use-after-free later.
+  bool const should_delete_self = from_ts_api;
+
   if (aio_err_callback && !ok()) {
     AIOCallback *err_op          = new AIOCallback();
     err_op->aiocb.aio_fildes     = this->aiocb.aio_fildes;
@@ -94,10 +99,13 @@ AIOCallback::io_complete(int event, void *data)
 
     // Take this lock in-line because we want to stop other I/O operations on this disk ASAP
     SCOPED_MUTEX_LOCK(lock, aio_err_callback->mutex, this_ethread());
-    err_op->action.continuation->handleEvent(EVENT_NONE, err_op);
+    err_op->action.call_back(EVENT_NONE, err_op);
   }
-  if (!action.cancelled && action.continuation) {
-    action.continuation->handleEvent(AIO_EVENT_DONE, this);
+  if (action.continuation) {
+    action.call_back(AIO_EVENT_DONE, this);
+  }
+  if (should_delete_self) {
+    delete this;
   }
   return EVENT_DONE;
 }
@@ -109,7 +117,6 @@ struct AIO_Reqs {
   ASLL(AIOCallback, alink) aio_temp_list;
   ink_mutex aio_mutex;
   ink_cond  aio_cond;
-  int       index           = 0;  /* position of this struct in the aio_reqs array */
   int       pending         = 0;  /* number of outstanding requests on the disk */
   int       queued          = 0;  /* total number of aio_todo requests */
   int       filedes         = -1; /* the file descriptor for the requests or status IO_NOT_IN_PROGRESS */
@@ -298,14 +305,13 @@ aio_init_fildes(int fildes, int fromAPI = 0)
   RecInt thread_num;
 
   if (fromAPI) {
-    request->index    = 0;
     request->filedes  = -1;
     aio_reqs[0]       = request;
     thread_is_created = 1;
     thread_num        = api_config_threads_per_disk;
   } else {
-    request->index        = num_filedes;
-    request->filedes      = fildes;
+    request->filedes = fildes;
+    ink_release_assert(num_filedes < MAX_DISKS_POSSIBLE);
     aio_reqs[num_filedes] = request;
     thread_num            = cache_config_threads_per_disk;
   }
@@ -445,24 +451,27 @@ cache_op(AIOCallback *op)
 {
   bool read = (op->aiocb.aio_lio_opcode == LIO_READ);
   for (; op; op = op->then) {
-    ink_aiocb *a = &op->aiocb;
-    ssize_t    err, res = 0;
+    ink_aiocb *a    = &op->aiocb;
+    size_t     done = 0;
 
-    while (a->aio_nbytes - res > 0) {
+    while (done < a->aio_nbytes) {
+      char   *buf    = static_cast<char *>(a->aio_buf) + done;
+      size_t  nbytes = a->aio_nbytes - done;
+      off_t   offset = a->aio_offset + static_cast<off_t>(done);
+      ssize_t err;
+
       do {
         if (read) {
 #ifdef AIO_FAULT_INJECTION
-          err = aioFaultInjection.pread(a->aio_fildes, (static_cast<char *>(a->aio_buf)) + res, a->aio_nbytes - res,
-                                        a->aio_offset + res);
+          err = aioFaultInjection.pread(a->aio_fildes, buf, nbytes, offset);
 #else
-          err = pread(a->aio_fildes, (static_cast<char *>(a->aio_buf)) + res, a->aio_nbytes - res, a->aio_offset + res);
+          err = pread(a->aio_fildes, buf, nbytes, offset);
 #endif
         } else {
 #ifdef AIO_FAULT_INJECTION
-          err = aioFaultInjection.pwrite(a->aio_fildes, (static_cast<char *>(a->aio_buf)) + res, a->aio_nbytes - res,
-                                         a->aio_offset + res);
+          err = aioFaultInjection.pwrite(a->aio_fildes, buf, nbytes, offset);
 #else
-          err = pwrite(a->aio_fildes, (static_cast<char *>(a->aio_buf)) + res, a->aio_nbytes - res, a->aio_offset + res);
+          err = pwrite(a->aio_fildes, buf, nbytes, offset);
 #endif
         }
       } while ((err < 0) && (errno == EINTR || errno == ENOBUFS || errno == ENOMEM));
@@ -471,9 +480,9 @@ cache_op(AIOCallback *op)
         op->aio_result = -errno;
         return (err);
       }
-      res += err;
+      done += static_cast<size_t>(err);
     }
-    op->aio_result = res;
+    op->aio_result = static_cast<int64_t>(done);
     ink_assert(op->ok());
   }
   return 1;

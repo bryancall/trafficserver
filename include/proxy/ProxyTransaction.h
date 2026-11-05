@@ -2,7 +2,7 @@
 
   ProxyTransaction - Base class for protocol client/server transactions.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -53,6 +53,10 @@ public:
   virtual void cancel_active_timeout();
   virtual bool is_read_closed() const;
   virtual bool expect_send_trailer() const;
+  /// @return @c true if this transaction can send an HTTP/2 trailer through
+  /// the delayed trailer tunnel. HTTP/1 chunked trailer pass-through is
+  /// handled by HttpTunnel and does not use this state query.
+  virtual bool can_send_h2_trailer() const;
   virtual void set_expect_send_trailer();
   virtual bool expect_receive_trailer() const;
   virtual void set_expect_receive_trailer();
@@ -142,9 +146,39 @@ public:
   virtual void set_rx_error_code(ProxyError e);
   virtual void set_tx_error_code(ProxyError e);
 
+  /** Whether the request on this transaction is known by the protocol layer to
+   *  be safe to retry on a fresh origin connection.
+   *
+   *  The default is @c false. A subclass should return @c true only when the
+   *  peer asserts that it did not process the request, as permitted by the
+   *  protocol's retry rules -- for example, when an HTTP/2 origin sends a
+   *  GOAWAY whose last_stream_id is below this transaction's stream id, or
+   *  sends a RST_STREAM with the REFUSED_STREAM error code (RFC 9113 6.8 and
+   *  8.7). HttpSM uses this to allow retrying non-idempotent methods that
+   *  would otherwise be considered too risky to replay.
+   *
+   *  @return @c true if HttpSM may safely retry the request on a different
+   *          origin connection regardless of method.
+   */
+  virtual bool is_safe_to_retry() const;
+
   bool support_sni() const;
 
   void mark_as_tunnel_endpoint() override;
+
+  /** Emit a best-effort access log entry for a request without an HttpSM.
+   *
+   * Call this when a malformed request is rejected at the protocol layer
+   * (e.g. during HTTP/2 or HTTP/3 header decoding) and no HttpSM was
+   * created.  The method populates a NonHttpSmLogData from the
+   * session and the partially decoded request, then invokes Log::access.
+   * If an HttpSM exists, callers should use the normal transaction logging
+   * path instead.
+   *
+   * @param[in] request The decoded (possibly partial) request header.
+   * @param[in] protocol_str Protocol string for the log entry (e.g. "http/2").
+   */
+  void log_non_http_sm_access(HTTPHdr const *request, const char *protocol_str);
 
   /// Variables
   //

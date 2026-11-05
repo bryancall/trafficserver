@@ -2,7 +2,7 @@
 
     Main program file for Cache Tool.
 
-    @section license License
+    @par License
 
     Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
@@ -21,6 +21,9 @@
     limitations under the License.
  */
 
+#include <cstdio>
+
+#include <algorithm>
 #include <iostream>
 #include <list>
 #include <memory>
@@ -40,6 +43,7 @@
 #include "tscore/ink_file.h"
 #include "tscore/CryptoHash.h"
 #include "tscore/ArgParser.h"
+#include "tscore/Demangle.h"
 #include <thread>
 
 #include "CacheDefs.h"
@@ -208,7 +212,7 @@ struct Cache {
   std::map<int, Volume>              _volumes;
   std::vector<StripeSM *>            globalVec_stripe;
   std::unordered_set<ts::CacheURL *> URLset;
-  unsigned short                    *stripes_hash_table;
+  ats_scoped_mem<unsigned short>     stripes_hash_table;
 };
 
 Errata
@@ -685,7 +689,13 @@ Cache::calcTotalSpanPhysicalSize()
 }
 #endif
 
-Cache::~Cache() {}
+Cache::~Cache()
+{
+  // The URL set is owned solely by this instance; the stripe hash table owns itself.
+  for (auto *url : URLset) {
+    delete url;
+  }
+}
 
 Errata
 Span::load()
@@ -1007,6 +1017,7 @@ Cache::build_stripe_hash_table()
   for (int i = 0; i < num_stripes; i++) {
     printf("build_vol_hash_table index %d mapped to %d requested %d got %d\n", i, i, forvol[i], gotvol[i]);
   }
+  // Assigning releases any table a previous call installed.
   stripes_hash_table = ttable;
 
   ats_free(forvol);
@@ -1361,7 +1372,7 @@ Scan_Cache(swoc::file::path const &regex_path)
 
 int
 main([[maybe_unused]] int argc, const char *argv[])
-{
+try {
   swoc::file::path input_url_file;
   std::string      inputFile;
 
@@ -1427,4 +1438,7 @@ main([[maybe_unused]] int argc, const char *argv[])
   }
 
   return 0;
+} catch (...) {
+  fprintf(stderr, "traffic_cache_tool: terminating on an unhandled %s\n", ts::describe_current_exception().c_str());
+  return 1;
 }

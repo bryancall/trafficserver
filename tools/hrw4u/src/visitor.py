@@ -32,12 +32,13 @@ from hrw4u.hrw4uParser import hrw4uParser
 from hrw4u.hrw4uLexer import hrw4uLexer
 from hrw4u.symbols import SymbolResolver, SymbolResolutionError
 from hrw4u.errors import hrw4u_error, Hrw4uSyntaxError, ThrowingErrorListener
-from hrw4u.states import CondState, SectionType
-from hrw4u.common import RegexPatterns, SystemDefaults
+from hrw4u.states import CondState, SectionType, VALUE_MODIFIERS
+from hrw4u.common import RegexPatterns, SystemDefaults, apply_percent_mods, parse_mods, split_interpolation_mods
 from hrw4u.visitor_base import BaseHRWVisitor
 from hrw4u.validation import Validator
 from hrw4u.procedures import resolve_use_path
 from hrw4u.sandbox import SandboxConfig, SandboxDenialError
+import hrw4u.types as types
 
 _regex_validator = Validator.regex_pattern()
 
@@ -91,6 +92,7 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
         self._proc_call_stack: list[str] = []
         self._proc_search_paths: list[Path] = list(proc_search_paths) if proc_search_paths else []
         self._source_text: str = ""
+        self._current_var_scope: types.VarScope = types.VarScope.TXN
 
     def _sandbox_check(self, ctx, check_fn) -> bool:
         """Run a sandbox check, trapping any denial error into the error collector.
@@ -111,14 +113,6 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
         """Drain any warnings accumulated in the symbol resolver."""
         for warning in self.symbol_resolver.drain_warnings():
             self._add_sandbox_warning(ctx, warning)
-
-    @lru_cache(maxsize=256)
-    def _cached_symbol_resolution(self, symbol_text: str, section_name: str) -> tuple[str, bool]:
-        try:
-            section = SectionType(section_name)
-            return self.symbol_resolver.resolve_condition(symbol_text, section)
-        except (ValueError, SymbolResolutionError):
-            return symbol_text, False
 
     @lru_cache(maxsize=128)
     def _cached_hook_mapping(self, section_name: str) -> str:
@@ -193,6 +187,13 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
 
         return args
 
+    def _check_value_mods(self, mods: list[str], ctx) -> None:
+        for mod in mods:
+            if mod not in VALUE_MODIFIERS:
+                raise SymbolResolutionError(mod, f"Not a value modifier, expected one of {', '.join(sorted(VALUE_MODIFIERS))}")
+            if warning := self._sandbox.check_modifier(mod):
+                self._add_sandbox_warning(ctx, warning)
+
     def _substitute_strings(self, s: str, ctx) -> str:
         inner = s[1:-1]
 
@@ -202,22 +203,43 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
         def repl(m: re.Match) -> str:
             try:
                 if m.group("escaped"):
-                    return m.group("escaped")
+                    payload = m.group("escaped")[2:-2]
+                    escaped_payload = []
+                    preceding_backslashes = 0
+
+                    for char in payload:
+                        if char == '"' and preceding_backslashes % 2 == 0:
+                            escaped_payload.append('\\')
+                        escaped_payload.append(char)
+                        preceding_backslashes = preceding_backslashes + 1 if char == '\\' else 0
+
+                    return "{" + "".join(escaped_payload) + "}"
                 if m.group("func"):
                     func_name = m.group("func").strip()
                     arg_str = m.group("args").strip()
+                    mods = parse_mods(m.group("func_mods"))
+                    self._check_value_mods(mods, ctx)
                     args = self._parse_function_args(arg_str) if arg_str else []
-                    replacement = self.symbol_resolver.resolve_function(func_name, args, strip_quotes=False)
+                    replacement = apply_percent_mods(
+                        self.symbol_resolver.resolve_function(func_name, args, strip_quotes=False), mods)
                     self._drain_resolver_warnings(ctx)
                     self.debug(f"substitute: {{{func_name}({arg_str})}} -> {replacement}")
                     return replacement
                 if m.group("var"):
-                    var_name = m.group("var").strip()
-                    replacement, _ = self.symbol_resolver.resolve_condition(var_name, self.current_section)
+                    var_name, mods = split_interpolation_mods(m.group("var"))
+                    self._check_value_mods(mods, ctx)
+                    resolved, _ = self.symbol_resolver.resolve_condition(var_name, self.current_section)
+                    replacement = apply_percent_mods(resolved, mods)
                     self._drain_resolver_warnings(ctx)
                     self.debug(f"substitute: {{{var_name}}} -> {replacement}")
                     return replacement
                 raise SymbolResolutionError(m.group(0), "Unrecognized substitution format")
+            except SandboxDenialError as e:
+                # Report it as a denial so the sandbox message is set.
+                e.add_note(f"String interpolation context: {s[:50]}...")
+                with self.trap(ctx):
+                    raise
+                return f"{{ERROR: {e}}}"
             except Exception as e:
                 error = hrw4u_error(self.filename, ctx, f"symbol error in {{}}: {e}")
                 if hasattr(error, 'add_note'):
@@ -237,26 +259,19 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
         if not name:
             raise SymbolResolutionError("identifier", "Missing or empty identifier text")
 
-        if entry := self.symbol_resolver.symbol_for(name):
-            return entry.as_cond(), False
-
-        symbol, default_expr = self._cached_symbol_resolution(name, self.current_section.value)
-
-        if symbol == name:
-            if '.' not in name and ':' not in name:
-                error = SymbolResolutionError(
-                    "identifier", f"Undefined variable: '{name}'. Variables must be declared in a VARS section.")
-                suggestions = self.symbol_resolver.get_variable_suggestions(name, self.current_section)
-                if suggestions:
-                    error.add_symbol_suggestion(suggestions)
-                raise error
-            else:
-                try:
-                    return self.symbol_resolver.resolve_condition(name, self.current_section)
-                except SymbolResolutionError:
-                    raise
-
-        return symbol, default_expr
+        try:
+            return self.symbol_resolver.resolve_condition(name, self.current_section)
+        except SandboxDenialError:
+            raise
+        except SymbolResolutionError:
+            if '.' in name or ':' in name:
+                raise
+            error = SymbolResolutionError(
+                "identifier", f"Undefined variable: '{name}'. Variables must be declared in a VARS section.")
+            suggestions = self.symbol_resolver.get_variable_suggestions(name, self.current_section)
+            if suggestions:
+                error.add_symbol_suggestion(suggestions)
+            raise error from None
 
     def _get_value_text(self, val_ctx) -> str:
         if val_ctx.paramRef():
@@ -725,6 +740,8 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
         with self.debug_context("visitSection"):
             if ctx.varSection():
                 return self.visitVarSection(ctx.varSection())
+            if ctx.sessionVarSection():
+                return self.visitSessionVarSection(ctx.sessionVarSection())
 
             hook = None
             with self.trap(ctx):
@@ -822,6 +839,23 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
                 return
             if not self._sandbox_check(ctx, lambda: self._sandbox.check_language("variables")):
                 return
+            self._current_var_scope = types.VarScope.TXN
+            self.visit(ctx.variables())
+
+    def visitSessionVarSection(self, ctx) -> None:
+        if self.current_section is not None:
+            error = hrw4u_error(self.filename, ctx, "Session variable section must be first in a section")
+            if self.error_collector:
+                self.error_collector.add_error(error)
+                return
+            else:
+                raise error
+        with self.debug_context("visitSessionVarSection"):
+            if not self._sandbox_check(ctx, lambda: self._sandbox.check_section("SESSION_VARS")):
+                return
+            if not self._sandbox_check(ctx, lambda: self._sandbox.check_language("variables")):
+                return
+            self._current_var_scope = types.VarScope.SESSION
             self.visit(ctx.variables())
 
     def visitCommentLine(self, ctx) -> None:
@@ -830,7 +864,7 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
         with self.debug_context("visitCommentLine"):
             comment_text = ctx.COMMENT().getText()
             self.debug(f"preserving comment: {comment_text}")
-            self.output.append(comment_text)
+            self.emit_line(comment_text, self.stmt_indent)
 
     def visitStatement(self, ctx) -> None:
         with self.debug_context("visitStatement"), self.trap(ctx):
@@ -888,14 +922,7 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
                     return
 
                 case _:
-                    if ctx.op is None:
-                        raise SymbolResolutionError("operator", "Missing operator in statement")
-                    operator = ctx.op.text
-                    self._dbg(f"standalone op: {operator}")
-                    cmd, validator = self.symbol_resolver.get_statement_spec(operator)
-                    if validator:
-                        raise SymbolResolutionError(operator, "This operator requires an argument")
-                    self.emit_statement(cmd)
+                    # Only reachable via parser error recovery, which already reported the error.
                     return
 
     def visitVariables(self, ctx) -> None:
@@ -924,7 +951,7 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
                 if '.' in name or ':' in name:
                     raise SymbolResolutionError("variable", f"Variable name '{name}' cannot contain '.' or ':' characters")
 
-                symbol = self.symbol_resolver.declare_variable(name, type_name, explicit_slot)
+                symbol = self.symbol_resolver.declare_variable(name, type_name, explicit_slot, self._current_var_scope)
                 slot_info = f" @{explicit_slot}" if explicit_slot is not None else ""
                 self._dbg(f"bind `{name}' to {symbol}{slot_info}")
             except Exception as e:
@@ -998,6 +1025,9 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
             else:
                 negate = operator.symbol.type in (hrw4uParser.NEQ, hrw4uParser.NOT_TILDE)
 
+            if negate and not self._sandbox_check(ctx, lambda: self._sandbox.check_modifier("NOT")):
+                return
+
             match ctx:
                 case _ if ctx.value():
                     rhs = self._get_value_text(ctx.value())
@@ -1020,6 +1050,8 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
                     cond_txt = f"{lhs} {regex_expr}"
 
                 case _ if ctx.iprange():
+                    if not self._sandbox_check(ctx, lambda: self._sandbox.check_language("in")):
+                        return
                     cond_txt = f"{lhs} {ctx.iprange().getText()}"
 
                 case _ if ctx.set_():
@@ -1117,6 +1149,8 @@ class HRW4UVisitor(hrw4uVisitor, BaseHRWVisitor):
             match ctx:
                 case _ if ctx.getChildCount() == 2 and ctx.getChild(0).getText() == "!":
                     self._dbg("`NOT' detected")
+                    if not self._sandbox_check(ctx, lambda: self._sandbox.check_modifier("NOT")):
+                        return
                     child = ctx.getChild(1)
                     if child.LPAREN():
                         self._dbg("GROUP-START (negated)")

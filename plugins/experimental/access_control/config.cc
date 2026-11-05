@@ -28,11 +28,12 @@
 
 #include "common.h"
 #include "config.h"
+#include "tsutil/StringCompare.h"
 
 static bool
 isTrue(const char *arg)
 {
-  return (nullptr == arg || 0 == strncasecmp("true", arg, 4) || 0 == strncasecmp("1", arg, 1) || 0 == strncasecmp("yes", arg, 3));
+  return (nullptr == arg || ts::iequals("true", arg) || ts::iequals("1", arg) || ts::iequals("yes", arg));
 }
 
 /**
@@ -100,10 +101,10 @@ loadLine<StringMap>(StringMap &map, const String &line)
   std::getline(ss, value, '=');
   trim(key);
   trim(value);
-  map[key] = value;
+  map[key] = std::move(value);
 
 #ifdef ACCESS_CONTROL_LOG_SECRETS
-  AccessControlDebug("Adding secrets[%s]='%s'", key.c_str(), value.c_str());
+  AccessControlDebug("Adding secrets[%s]='%s'", key.c_str(), map[key].c_str());
 #endif
 }
 
@@ -116,10 +117,10 @@ loadLine<StringVector>(StringVector &vector, const String &line)
 {
   String trimmedLine(line);
   trim(trimmedLine);
-  vector.push_back(trimmedLine);
+  vector.push_back(std::move(trimmedLine));
 
 #ifdef ACCESS_CONTROL_LOG_SECRETS
-  AccessControlDebug("Adding secrets[%d]='%s'", (int)(vector.size() - 1), trimmedLine.c_str());
+  AccessControlDebug("Adding secrets[%d]='%s'", (int)(vector.size() - 1), vector.back().c_str());
 #endif
 }
 

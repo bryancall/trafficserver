@@ -20,6 +20,7 @@
   limitations under the License.
 */
 
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -460,6 +461,61 @@ TEST_CASE("RegexMatches edge cases", "[libts][Regex][RegexMatches]")
     CHECK(count >= 2); // At least whole match + first group
     CHECK(matches[1] == "foo");
   }
+
+  SECTION("RegexMatches with a non-participating group before a participating one")
+  {
+    // pcre2_match() returns one past the highest participating group, so an earlier optional group
+    // that did not participate is still within that count. Its offsets are unset.
+    Regex r;
+    REQUIRE(r.compile("(a)?(b)"));
+
+    RegexMatches matches;
+    int          count = r.exec("b", matches);
+
+    CHECK(count == 3);
+    CHECK(matches[0] == "b");
+    CHECK(matches[1] == "");
+    CHECK(matches[2] == "b");
+    CHECK(matches[1].data() != nullptr);
+  }
+
+  SECTION("RegexMatches past what the match populated")
+  {
+    // The ovector holds a fixed number of pairs regardless of the pattern, and pcre2_match() writes
+    // no further than the highest participating group. Reading past that must not build a view over
+    // the uninitialized remainder of the buffer.
+    Regex r;
+    REQUIRE(r.compile("(.*-)(\\d+)(\\?.*)?$"));
+
+    RegexMatches matches;
+    int          count = r.exec("/img-7", matches);
+
+    // Three groups defined, but the trailing optional one did not participate.
+    CHECK(r.get_capture_count() == 3);
+    CHECK(count == 3);
+    CHECK(matches[1] == "/img-");
+    CHECK(matches[2] == "7");
+
+    // A group the pattern defines that the match did not reach, ...
+    CHECK(matches[3] == "");
+    CHECK(matches[3].data() != nullptr);
+
+    // ... and an index past the pattern's groups entirely, still inside the allocated ovector.
+    CHECK(matches[9] == "");
+    CHECK(matches[9].data() != nullptr);
+  }
+
+  SECTION("RegexMatches after a failed match")
+  {
+    Regex r;
+    REQUIRE(r.compile("(a)(b)"));
+
+    RegexMatches matches;
+    CHECK(r.exec("zz", matches) < 0);
+
+    CHECK(matches[0] == "");
+    CHECK(matches[0].data() != nullptr);
+  }
 }
 
 TEST_CASE("Regex with special characters", "[libts][Regex][special]")
@@ -589,6 +645,39 @@ TEST_CASE("Regex recompilation behavior", "[libts][Regex][recompile]")
     REQUIRE(r.compile("valid") == true);
     CHECK(r.empty() == false);
     CHECK(r.exec("valid") == true);
+  }
+
+  SECTION("a failed recompile leaves the working pattern in place")
+  {
+    // compile() is a transaction. A pattern that fails to compile must not disturb the
+    // pattern already held, because the alternative is worse than either outcome: freeing
+    // the old pattern before knowing the new one compiles leaves a dangling pointer that
+    // empty() reports as compiled and exec() hands to pcre2_match.
+    Regex r;
+    REQUIRE(r.compile("foo") == true);
+
+    REQUIRE(r.compile("(invalid") == false);
+
+    CHECK(r.empty() == false);
+    CHECK(r.exec("foo") == true);
+    CHECK(r.exec("bar") == false);
+
+    // And the object is still usable for a later successful compile.
+    REQUIRE(r.compile("bar") == true);
+    CHECK(r.exec("bar") == true);
+  }
+
+  SECTION("a failed recompile leaves captures working")
+  {
+    Regex r;
+    REQUIRE(r.compile("^(a+)(b+)$") == true);
+
+    REQUIRE(r.compile("(unterminated") == false);
+
+    RegexMatches matches;
+    REQUIRE(r.exec("aaabb", matches) == 3);
+    CHECK(matches[1] == "aaa");
+    CHECK(matches[2] == "bb");
   }
 
   SECTION("recompile with different flags")
@@ -857,29 +946,761 @@ TEST_CASE("Regex back reference counting", "[libts][Regex][get_backref_max]")
   REQUIRE(r.get_backref_max() == item.backref_max);
 }
 
-struct match_context_test_t {
+struct options_test_t {
   std::string_view regex;
   std::string_view str;
   bool             valid;
   int32_t          rcode;
 };
 
-std::vector<match_context_test_t> match_context_test_data{
+std::vector<options_test_t> options_test_data{
   {{"abc"},                          {"abc"},          true,  1  },
   {{"abc"},                          {"a"},            true,  -1 },
   {{R"(^(\d{3})-(\d{3})-(\d{4})$)"}, {"123-456-7890"}, true,  -47},
   {{"(."},                           {"a"},            false, -51},
 };
 
-TEST_CASE("RegexMatchContext", "[libts][Regex][RegexMatchContext]")
+TEST_CASE("Regex::Options match limit", "[libts][Regex][Options]")
 {
-  RegexMatchContext match_context;
-  match_context.set_match_limit(2);
+  Regex::Options opts;
+  opts.match_limit = 2;
   RegexMatches matches;
 
-  auto item = GENERATE(from_range(match_context_test_data));
+  auto item = GENERATE(from_range(options_test_data));
   CAPTURE(item.regex, item.str, item.valid, item.rcode);
   Regex r;
   REQUIRE(r.compile(item.regex) == item.valid);
-  REQUIRE(r.exec(item.str, matches, 0, &match_context) == item.rcode);
+  REQUIRE(r.exec(item.str, matches, 0, opts) == item.rcode);
+}
+
+TEST_CASE("Regex::Options does not leak between calls", "[libts][Regex][Options]")
+{
+  Regex r;
+  REQUIRE(r.compile(R"(^(\d{3})-(\d{3})-(\d{4})$)"));
+
+  RegexMatches   matches;
+  Regex::Options limited;
+  limited.match_limit = 2;
+
+  REQUIRE(r.exec("123-456-7890", matches, 0, limited) == -47);
+  REQUIRE(r.exec("123-456-7890", matches, 0) == 4);
+  REQUIRE(r.exec("123-456-7890", matches, 0, Regex::Options{}) == 4);
+
+  Regex::Options generous;
+  generous.match_limit = 1000;
+  REQUIRE(r.exec("123-456-7890", matches, 0, generous) == 4);
+}
+
+TEST_CASE("Regex::Options keeps the shared JIT stack", "[libts][Regex][Options]")
+{
+  Regex r;
+  REQUIRE(r.compile(R"(^(?:(a)|b)*$)"));
+
+  std::string const subject(8000, 'a');
+  RegexMatches      matches;
+  Regex::Options    opts;
+  opts.match_limit = 100000000;
+
+  int const shared_rc = r.exec(subject, matches, 0);
+  int const opts_rc   = r.exec(subject, matches, 0, opts);
+  CAPTURE(shared_rc, opts_rc);
+  REQUIRE(opts_rc > 0);
+  REQUIRE(shared_rc == opts_rc);
+}
+
+TEST_CASE("Regex reports resource exhaustion rather than crashing", "[libts][Regex]")
+{
+  // The regex_remap rule from #5762. Under PCRE1 its per character recursion overflowed the native thread stack and
+  // crashed ATS. Under PCRE2 the JIT keeps its frames on the JIT stack, and exhausting that is reported as an error.
+  Regex r;
+  REQUIRE(r.compile(R"(^/alpha/bravo/[?]((?!action=(newsfeed|calendar|contacts|notepad)).)*$)"));
+
+  std::string subject{"/alpha/bravo/?"};
+  subject.append(256 * 1024, 'x');
+  RegexMatches matches;
+
+  int const rc = r.exec(subject, matches, 0);
+  CAPTURE(rc);
+
+  // Without JIT the interpreter keeps its backtracking frames on the heap and simply matches, so there is nothing to
+  // assert beyond not crashing.
+  uint32_t has_jit = 0;
+  pcre2_config(PCRE2_CONFIG_JIT, &has_jit);
+  if (has_jit != 0) {
+    REQUIRE(rc == PCRE2_ERROR_JIT_STACKLIMIT);
+  }
+}
+
+TEST_CASE("Regex RE_FULL_MATCH rejects trailing content", "[libts][Regex][full_match]")
+{
+  Regex re;
+  REQUIRE(re.compile(R"(example\.com)", REFlags::RE_ANCHORED));
+
+  RegexMatches matches;
+
+  SECTION("exact input matches with RE_FULL_MATCH")
+  {
+    REQUIRE(re.exec("example.com", matches, REFlags::RE_FULL_MATCH) > 0);
+  }
+
+  SECTION("trailing content rejected with RE_FULL_MATCH")
+  {
+    int rc = re.exec("example.com.evil", matches, REFlags::RE_FULL_MATCH);
+    REQUIRE(rc == RE_ERROR_NOMATCH);
+  }
+
+  SECTION("trailing content still matches without RE_FULL_MATCH")
+  {
+    REQUIRE(re.exec("example.com.evil", matches) > 0);
+  }
+
+  SECTION("bool exec overload honors RE_FULL_MATCH")
+  {
+    REQUIRE(re.exec("example.com", REFlags::RE_FULL_MATCH));
+    REQUIRE_FALSE(re.exec("example.com.evil", REFlags::RE_FULL_MATCH));
+  }
+}
+
+TEST_CASE("Regex RE_FULL_MATCH preserves capture groups and combines with other flags", "[libts][Regex][full_match]")
+{
+  RegexMatches matches;
+
+  SECTION("captures available on full match")
+  {
+    Regex re;
+    REQUIRE(re.compile(R"(^([a-z]+)\.([a-z]+)$)"));
+    REQUIRE(re.exec("foo.bar", matches, REFlags::RE_FULL_MATCH) == 3);
+    REQUIRE(matches[1] == "foo");
+    REQUIRE(matches[2] == "bar");
+  }
+
+  SECTION("RE_FULL_MATCH composes with RE_CASE_INSENSITIVE")
+  {
+    Regex re;
+    REQUIRE(re.compile(R"(example\.com)", REFlags::RE_CASE_INSENSITIVE | REFlags::RE_ANCHORED));
+    REQUIRE(re.exec("EXAMPLE.COM", matches, REFlags::RE_FULL_MATCH) > 0);
+    REQUIRE(re.exec("EXAMPLE.COM.evil", matches, REFlags::RE_FULL_MATCH) == RE_ERROR_NOMATCH);
+  }
+
+  SECTION("matches._size reflects RE_ERROR_NOMATCH on length-rejected match")
+  {
+    Regex re;
+    REQUIRE(re.compile(R"(foo)"));
+    REQUIRE(re.exec("foobar", matches, REFlags::RE_FULL_MATCH) == RE_ERROR_NOMATCH);
+    REQUIRE(matches.size() == RE_ERROR_NOMATCH);
+  }
+}
+
+TEST_CASE("DFA RE_FULL_MATCH applied at compile time", "[libts][DFA][full_match]")
+{
+  SECTION("trailing content rejected when DFA compiled with RE_FULL_MATCH")
+  {
+    DFA              dfa;
+    std::string_view pattern = R"(example\.com)";
+    REQUIRE(dfa.compile(pattern, REFlags::RE_FULL_MATCH) == 1);
+
+    REQUIRE(dfa.match("example.com") == 0);
+    REQUIRE(dfa.match("example.com.evil") == -1);
+  }
+
+  SECTION("multi-pattern DFA: RE_FULL_MATCH applies to all patterns")
+  {
+    std::vector<std::string_view> patterns = {R"(foo)", R"(bar)"};
+    DFA                           dfa;
+    REQUIRE(dfa.compile(patterns.data(), patterns.size(), REFlags::RE_FULL_MATCH) == 2);
+
+    REQUIRE(dfa.match("foo") == 0);
+    REQUIRE(dfa.match("bar") == 1);
+    REQUIRE(dfa.match("foobar") == -1);
+    REQUIRE(dfa.match("barbaz") == -1);
+  }
+
+  SECTION("DFA without RE_FULL_MATCH still permits trailing content (existing behavior)")
+  {
+    DFA dfa;
+    REQUIRE(dfa.compile(R"(foo)") == 1);
+    REQUIRE(dfa.match("foobar") == 0);
+  }
+}
+
+// The anchoring policy is process-wide, so restore it around each test to keep
+// them independent regardless of Catch2 ordering.
+struct PolicyGateAnchoringGuard {
+  int32_t _saved;
+  explicit PolicyGateAnchoringGuard(int32_t enable) : _saved(Regex::policy_gate_anchoring)
+  {
+    Regex::policy_gate_anchoring = enable;
+  }
+  ~PolicyGateAnchoringGuard() { Regex::policy_gate_anchoring = _saved; }
+};
+
+TEST_CASE("Regex policy gate enforces whole-subject match when enabled", "[libts][Regex][policy_gate]")
+{
+  PolicyGateAnchoringGuard guard{true};
+
+  Regex r;
+  REQUIRE(r.compile(R"(cdn\.example\.com)", 0, "test gate"));
+
+  CHECK(r.exec("cdn.example.com"));
+  CHECK_FALSE(r.exec("cdn.example.com.evil"));
+  CHECK_FALSE(r.exec("prefix.cdn.example.com"));
+}
+
+TEST_CASE("Regex policy gate leaves matching unchanged when disabled", "[libts][Regex][policy_gate]")
+{
+  PolicyGateAnchoringGuard guard{false};
+
+  Regex r;
+  REQUIRE(r.compile(R"(cdn\.example\.com)", 0, "test gate"));
+
+  // The default must not change behavior for existing operator configurations.
+  CHECK(r.exec("cdn.example.com"));
+  CHECK(r.exec("cdn.example.com.evil"));
+  CHECK(r.exec("prefix.cdn.example.com"));
+}
+
+TEST_CASE("Regex without a policy-gate label ignores the anchoring policy", "[libts][Regex][policy_gate]")
+{
+  PolicyGateAnchoringGuard guard{true};
+
+  // Only call sites that opt in are affected; every other Regex user is untouched.
+  Regex r;
+  REQUIRE(r.compile(R"(cdn\.example\.com)"));
+
+  CHECK(r.exec("cdn.example.com"));
+  CHECK(r.exec("cdn.example.com.evil"));
+}
+
+TEST_CASE("Regex policy gate preserves capture groups", "[libts][Regex][policy_gate]")
+{
+  PolicyGateAnchoringGuard guard{true};
+
+  // Guards the PCRE2 < 10.30 rewrite: the "(?:...)" wrapper must stay
+  // non-capturing so group numbering is unchanged for callers doing
+  // substitution (regex_map $1) or reading RegexMatches (ControlMatcher).
+  Regex r;
+  REQUIRE(r.compile(R"((cdn|www)\.example\.com)", 0, "test gate"));
+
+  RegexMatches matches;
+  REQUIRE(r.exec("www.example.com", matches) == 2);
+  CHECK(matches[1] == "www");
+  CHECK(r.exec("cdn.example.com", matches) == 2);
+  CHECK(matches[1] == "cdn");
+}
+
+TEST_CASE("Regex policy gate backtracks through alternation", "[libts][Regex][policy_gate]")
+{
+  PolicyGateAnchoringGuard guard{true};
+
+  // A shorter alternative listed first must not shadow a longer one that spans
+  // the whole subject. This is why the gate anchors via PCRE2 rather than by
+  // length-checking the first match pcre2 happens to return.
+  Regex r;
+  REQUIRE(r.compile(R"(cdn\.example\.com|cdn\.example\.com\.edge)", 0, "test gate"));
+
+  CHECK(r.exec("cdn.example.com"));
+  CHECK(r.exec("cdn.example.com.edge"));
+  CHECK_FALSE(r.exec("cdn.example.com.evil"));
+}
+
+TEST_CASE("Regex policy gate composes with case-insensitive matching", "[libts][Regex][policy_gate]")
+{
+  PolicyGateAnchoringGuard guard{true};
+
+  // map_with_referer compiles with RE_CASE_INSENSITIVE; the gate must add to
+  // the caller's flags rather than replace them.
+  Regex r;
+  REQUIRE(r.compile(R"(CDN\.EXAMPLE\.COM)", RE_CASE_INSENSITIVE, "test gate"));
+
+  CHECK(r.exec("cdn.example.com"));
+  CHECK_FALSE(r.exec("cdn.example.com.evil"));
+}
+
+// Captures the anchor reports emitted while in scope, keeping the two kinds apart.
+struct DiagCapture {
+  static std::vector<std::string> captured;
+  static std::vector<std::string> enforced;
+  Regex::PolicyGateReportHandler  _saved;
+
+  DiagCapture() : _saved(Regex::policy_gate_report_handler)
+  {
+    captured.clear();
+    enforced.clear();
+    Regex::policy_gate_report_handler = [](Regex::PolicyGateReport kind, std::string_view message) {
+      if (kind == Regex::PolicyGateReport::ENFORCED) {
+        enforced.emplace_back(message);
+      } else {
+        captured.emplace_back(message);
+      }
+    };
+  }
+  ~DiagCapture() { Regex::policy_gate_report_handler = _saved; }
+
+  size_t
+  count() const
+  {
+    return captured.size();
+  }
+  size_t
+  enforced_count() const
+  {
+    return enforced.size();
+  }
+  std::string const &
+  last() const
+  {
+    return captured.back();
+  }
+  std::string const &
+  last_enforced() const
+  {
+    return enforced.back();
+  }
+};
+
+std::vector<std::string> DiagCapture::captured;
+std::vector<std::string> DiagCapture::enforced;
+
+TEST_CASE("Regex warns when a policy-gate pattern is not a whole-subject match", "[libts][Regex][policy_gate]")
+{
+  PolicyGateAnchoringGuard guard{0}; // not enforcing, so the operator gets a warning instead
+
+  SECTION("unanchored gate pattern warns and names the site")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(cdn\.example\.com)", 0, "url_sig excl_regex"));
+
+    REQUIRE(diags.count() == 1);
+    CHECK(diags.last().find("[regex-anchor]") != std::string::npos);
+    CHECK(diags.last().find("url_sig excl_regex") != std::string::npos);
+    CHECK(diags.last().find(R"(cdn\.example\.com)") != std::string::npos);
+  }
+
+  SECTION("start anchor alone still warns")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^cdn\.example\.com)", 0, "test gate"));
+    CHECK(diags.count() == 1);
+  }
+
+  SECTION("end anchor alone still warns")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(cdn\.example\.com$)", 0, "test gate"));
+    CHECK(diags.count() == 1);
+  }
+
+  // Anchors written into the pattern do suppress the report, but only when every
+  // top-level alternative carries them.
+  SECTION("pattern anchored at both ends does not warn")
+  {
+    // The form operators are told to use. Reporting it would name most rules in a
+    // typical configuration, and a report that fires on the correct form is one that
+    // gets ignored.
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^cdn\.example\.com$)", 0, "test gate"));
+    CHECK(diags.count() == 0);
+  }
+
+  SECTION("trailing backslash-z does not warn")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^cdn\.example\.com\z)", 0, "test gate"));
+    CHECK(diags.count() == 0);
+  }
+
+  SECTION("backslash-A counts as a start anchor")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(\Acdn\.example\.com$)", 0, "test gate"));
+    CHECK(diags.count() == 0);
+  }
+
+  SECTION("alternation with every branch anchored does not warn")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^trusted\.example\.com$|^partner\.example\.com$)", 0, "test gate"));
+    CHECK(diags.count() == 0);
+  }
+
+  SECTION("alternation inside a group is one anchored alternative")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^(trusted|partner)\.example\.com$)", 0, "test gate"));
+    CHECK(diags.count() == 0);
+  }
+
+  SECTION("partially anchored alternation warns")
+  {
+    // The case a whole-pattern check misses. PCRE2 reports PCRE2_ANCHORED when every
+    // branch is start anchored, and the pattern text ends in '$', so checking the last
+    // character reads this as exact at both ends. It is not: the first branch has no
+    // end anchor, which is why the check is per alternative.
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^trusted\.example\.com|^partner\.example\.com$)", 0, "test gate"));
+    CHECK(diags.count() == 1);
+
+    // The reason the warning is warranted.
+    CHECK(r.exec("trusted.example.com.other.net/x"));
+  }
+
+  SECTION("alternation anchored at the end but not the start warns")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^trusted\.example\.com$|partner\.example\.com$)", 0, "test gate"));
+    CHECK(diags.count() == 1);
+    CHECK(r.exec("x.partner.example.com"));
+  }
+
+  SECTION("an escaped anchor is a literal, not an anchor")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^price\$)", 0, "test gate"));
+    CHECK(diags.count() == 1);
+  }
+
+  SECTION("an escaped pipe does not split alternatives")
+  {
+    // "^a\|b$" is one alternative matching the literal "a|b", fully anchored.
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^a\|b$)", 0, "test gate"));
+    CHECK(diags.count() == 0);
+  }
+
+  SECTION("a pipe inside a character class does not split alternatives")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^cdn[.|-]example$)", 0, "test gate"));
+    CHECK(diags.count() == 0);
+  }
+
+  SECTION("a backtracking verb is not reasoned about")
+  {
+    // (*ACCEPT) can end the match before the trailing anchor is reached, so the
+    // pattern is reported rather than cleared on the strength of its '$'.
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^cdn(*ACCEPT)\.example\.com$)", 0, "test gate"));
+    CHECK(diags.count() == 1);
+  }
+
+  SECTION("RE_ANCHORED alone still warns, since the end is unconstrained")
+  {
+    // tls_bridge compiles with RE_ANCHORED today; it should still be told the
+    // end is not required to be reached.
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(cdn\.example\.com)", RE_ANCHORED, "tls_bridge service"));
+    CHECK(diags.count() == 1);
+  }
+
+  SECTION("RE_ANCHORED plus a written end anchor still warns")
+  {
+    // The flags and the pattern are not combined: a report is cleared by the pattern
+    // being anchored at both ends, or by the caller asking for both. Uniform advice --
+    // write "^...$" -- rather than a rule that depends on the call site's flags.
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(cdn\.example\.com$)", RE_ANCHORED, "tls_bridge service"));
+    CHECK(diags.count() == 1);
+  }
+
+  SECTION("RE_ANCHORED with the anchor written out does not warn")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(^cdn\.example\.com$)", RE_ANCHORED, "tls_bridge service"));
+    CHECK(diags.count() == 0);
+  }
+
+  SECTION("caller already requiring a whole-subject match does not warn")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(cdn\.example\.com)", RE_ANCHORED | RE_ENDANCHORED, "test gate"));
+    CHECK(diags.count() == 0);
+  }
+
+  SECTION("pattern with no gate label never warns")
+  {
+    DiagCapture diags;
+    Regex       r;
+    REQUIRE(r.compile(R"(cdn\.example\.com)"));
+    CHECK(diags.count() == 0);
+  }
+}
+
+TEST_CASE("Regex policy gate enforcement is stricter than a trailing dollar", "[libts][Regex][policy_gate]")
+{
+  // A subject reaching a *_regex rule in cache.config, parent.config or splitdns.config
+  // has been through unescapifyStr(), which decodes %0A into a real newline. '$' is
+  // satisfied before that byte; PCRE2_ENDANCHORED is not.
+  //
+  // This is the accepted limitation of clearing '$' terminated patterns from the report:
+  // an anchored rule is not reported, and can still change under enforcement for a
+  // subject carrying a newline. The migration guidance states it rather than reporting
+  // every anchored rule, which would name most rules in a configuration and train
+  // operators to ignore the report.
+  std::string_view const subject{"https://example.com/private/secret\n"};
+  std::string_view const pattern{R"(^https?://example\.com/private/.*$)"};
+
+  SECTION("matches with the policy off, and is not reported")
+  {
+    PolicyGateAnchoringGuard guard{0};
+    DiagCapture              diags;
+    Regex                    r;
+
+    REQUIRE(r.compile(pattern, 0, "cache.config url_regex"));
+    CHECK(r.exec(subject));
+    CHECK(diags.count() == 0);
+  }
+
+  SECTION("does not match with the policy on")
+  {
+    PolicyGateAnchoringGuard guard{1};
+    Regex                    r;
+
+    REQUIRE(r.compile(pattern, 0, "cache.config url_regex"));
+    CHECK_FALSE(r.exec(subject));
+  }
+}
+
+TEST_CASE("Regex policy gate anchors every alternation branch", "[libts][Regex][policy_gate]")
+{
+  // The partially anchored alternation from the warning tests. Enforcement is applied
+  // by PCRE2, not by inspecting the pattern, so the unanchored branch is covered too.
+  PolicyGateAnchoringGuard guard{1};
+  Regex                    r;
+
+  REQUIRE(r.compile(R"(^trusted\.example\.com|^partner\.example\.com$)", 0, "test gate"));
+
+  CHECK(r.exec("trusted.example.com"));
+  CHECK(r.exec("partner.example.com"));
+  CHECK_FALSE(r.exec("trusted.example.com.other.net/x"));
+}
+
+// The migration guidance in admin-guide/configuration/regex-best-practices tells an
+// operator how to rewrite a reported pattern so enabling enforcement does not change
+// which subjects the rule matches. A wrong recipe silently turns a deny rule inert or
+// widens an exact one, so each documented rewrite is pinned here: the rewrite under
+// enforcement must accept exactly what the original accepts today.
+TEST_CASE("Regex policy gate documented rewrites preserve behavior", "[libts][Regex][policy_gate]")
+{
+  auto matches_the_same = [](std::string_view deployed, std::string_view rewrite, std::string_view subject) {
+    bool before = false;
+    bool after  = false;
+
+    {
+      PolicyGateAnchoringGuard guard{0};
+      Regex                    r;
+
+      REQUIRE(r.compile(deployed, 0, "test gate"));
+      before = r.exec(subject);
+    }
+    {
+      PolicyGateAnchoringGuard guard{1};
+      Regex                    r;
+
+      REQUIRE(r.compile(rewrite, 0, "test gate"));
+      after = r.exec(subject);
+    }
+    return before == after;
+  };
+
+  // The documented rewrites preserve behavior for any subject without a newline, which
+  // is the contract the guidance states. Newline-bearing subjects are pinned separately
+  // below, as a known limitation rather than something the recipe handles.
+  auto const preserved = [&matches_the_same](std::string_view deployed, std::string_view rewrite,
+                                             std::vector<std::string> const &subjects) {
+    for (auto const &subject : subjects) {
+      CHECK(matches_the_same(deployed, rewrite, subject));
+    }
+  };
+
+  SECTION("unanchored pattern gains .* at each end")
+  {
+    // "^.*\.pdf$" would be the tempting rewrite and is wrong -- it means "ends with
+    // .pdf", so a rule covering "/report.pdf?v=2" would quietly stop firing.
+    constexpr std::string_view deployed{R"(\.pdf)"};
+    constexpr std::string_view rewrite{R"(^.*\.pdf.*$)"};
+
+    preserved(deployed, rewrite, {"/report.pdf", "/report.pdf?v=2", "/a/report.pdf", "/x.pdf.bak", "/notes.txt", "/pdf/x", ""});
+
+    // Dropping either ".*" changes the rule, in the direction that makes it inert.
+    CHECK_FALSE(matches_the_same(deployed, R"(^.*\.pdf$)", "/report.pdf?v=2"));
+    CHECK_FALSE(matches_the_same(deployed, R"(^\.pdf.*$)", "/report.pdf"));
+  }
+
+  SECTION("single-anchored patterns gain .* only at the open end")
+  {
+    preserved(R"(^cdn\.example\.com)", R"(^cdn\.example\.com.*$)",
+              {"cdn.example.com", "cdn.example.com/x", "x.cdn.example.com", "cdn.example.com.net", "other.net"});
+    preserved(R"(cdn\.example\.com$)", R"(^.*cdn\.example\.com$)",
+              {"cdn.example.com", "x.cdn.example.com", "cdn.example.com.net", "other.net"});
+  }
+
+  SECTION("a pattern anchored at both ends needs no rewrite")
+  {
+    // It is reported because the report covers every gate rule, not because it is
+    // wrong, so the guidance says to leave these alone.
+    preserved(R"(^cdn\.example\.com$)", R"(^cdn\.example\.com$)",
+              {"cdn.example.com", "cdn.example.com/x", "x.cdn.example.com", "cdn.example.com.net", "other.net"});
+    preserved(R"(^https?://example\.com/private/.*$)", R"(^https?://example\.com/private/.*$)",
+              {"https://example.com/private/secret", "https://example.com/private/a/b", "https://example.com/public/x"});
+  }
+
+  SECTION("a subject containing a newline is the documented limitation")
+  {
+    // A %0A in a request URL is decoded by unescapifyStr() before the *_regex rules in
+    // cache.config, parent.config and splitdns.config are matched, and neither "." nor
+    // "$" treats a newline as an ordinary byte. So enforcement can change these, which
+    // is why the guidance says to check such rules individually rather than claiming the
+    // rewrites cover them.
+    CHECK_FALSE(matches_the_same(R"(\.pdf)", R"(^.*\.pdf.*$)", "/a\nb/report.pdf"));
+    CHECK_FALSE(matches_the_same(R"(^cdn\.example\.com$)", R"(^cdn\.example\.com$)", "cdn.example.com\n"));
+  }
+}
+
+TEST_CASE("Regex reports informationally when the anchoring policy is enforcing", "[libts][Regex][policy_gate]")
+{
+  PolicyGateAnchoringGuard guard{1};
+
+  SECTION("an anchored gate pattern is recorded, not warned about")
+  {
+    // Enforcing makes the pattern safe, so this is not a warning. It is still reported,
+    // so a gate rule added long after the migration is named rather than silently going
+    // inert.
+    DiagCapture diags;
+    Regex       r;
+
+    REQUIRE(r.compile(R"(cdn\.example\.com)", 0, "test gate"));
+
+    CHECK(diags.count() == 0); // nothing at warning severity
+    REQUIRE(diags.enforced_count() == 1);
+    CHECK(diags.last_enforced().find("[regex-anchor]") != std::string::npos);
+    CHECK(diags.last_enforced().find("test gate") != std::string::npos);
+    CHECK(diags.last_enforced().find("anchored to the whole subject") != std::string::npos);
+
+    CHECK_FALSE(r.exec("cdn.example.com.evil"));
+  }
+
+  SECTION("a caller already requiring a whole-subject match is not reported")
+  {
+    // The policy changed nothing for it, so there is nothing to record.
+    DiagCapture diags;
+    Regex       r;
+
+    REQUIRE(r.compile(R"(cdn\.example\.com)", RE_ANCHORED | RE_ENDANCHORED, "test gate"));
+
+    CHECK(diags.count() == 0);
+    CHECK(diags.enforced_count() == 0);
+  }
+
+  SECTION("a pattern with no gate label is never reported")
+  {
+    DiagCapture diags;
+    Regex       r;
+
+    REQUIRE(r.compile(R"(cdn\.example\.com)"));
+
+    CHECK(diags.count() == 0);
+    CHECK(diags.enforced_count() == 0);
+  }
+}
+
+// Regression: RE_ANCHORED | RE_ENDANCHORED on an alternation where a shorter
+// alternative is a prefix of a longer one must backtrack to the longer alt
+// when only the longer alt spans the full subject. On modern PCRE2 this is
+// handled by the native PCRE2_ENDANCHORED flag; on PCRE2 < 10.30 the pattern
+// is rewritten to "(?:pattern)\z" so pcre2 does the same backtracking. A
+// naive post-match length check on the first successful pcre2_match would
+// stop at the shorter alt and incorrectly report no match.
+TEST_CASE("Regex end-anchor with alternation", "[libts][Regex]")
+{
+  Regex r;
+  REQUIRE(r.compile(R"(cdn\.example\.com|cdn\.example\.com\.edge)", RE_ANCHORED | RE_ENDANCHORED) == true);
+
+  RegexMatches matches;
+  CHECK(r.exec("cdn.example.com", matches) > 0);      // shorter alt spans fully
+  CHECK(r.exec("cdn.example.com.edge", matches) > 0); // longer alt spans fully -- requires backtracking
+  CHECK(r.exec("cdn.example.com.evil", matches) == RE_ERROR_NOMATCH);
+  CHECK(r.exec("cdn.example.com.evil.com", matches) == RE_ERROR_NOMATCH);
+  CHECK(r.exec("prefix.cdn.example.com", matches) == RE_ERROR_NOMATCH);
+}
+
+// pcre2_code_copy() copies the compiled pattern but not the machine code the JIT produced
+// for it, because that code is position dependent. A copy that is not passed back through
+// pcre2_jit_compile() therefore matches on the interpreter: the same answers, far more
+// slowly, and under a different set of resource limits, so a subject one of them reports
+// as too expensive the other quietly matches.
+//
+// The subject below is sized past the JIT engine's stack bound for this pattern, which is
+// what makes the two engines disagree. The assertion is that a copy answers the same as
+// its original, whatever that answer is, so the test needs no knowledge of whether this
+// build has a JIT.
+TEST_CASE("Regex copies answer the same as their original", "[libts][Regex][copy]")
+{
+  Regex original;
+  REQUIRE(original.compile(R"(^/alpha/bravo/[?]((?!action=(newsfeed|calendar|contacts|notepad)).)*$)"));
+
+  std::string subject{"/alpha/bravo/?"};
+  subject.append(256 * 1024, 'x');
+
+  RegexMatches original_matches;
+  int const    original_rc = original.exec(subject, original_matches);
+  CAPTURE(original_rc);
+
+  SECTION("copy constructor")
+  {
+    Regex        copy(original);
+    RegexMatches matches;
+    int const    rc = copy.exec(subject, matches);
+    CAPTURE(rc);
+    CHECK(rc == original_rc);
+  }
+
+  SECTION("copy assignment")
+  {
+    Regex copy;
+    REQUIRE(copy.compile("unrelated"));
+    copy = original;
+
+    RegexMatches matches;
+    int const    rc = copy.exec(subject, matches);
+    CAPTURE(rc);
+    CHECK(rc == original_rc);
+  }
+
+  SECTION("a copy of a copy")
+  {
+    Regex        first(original);
+    Regex        second(first);
+    RegexMatches matches;
+    int const    rc = second.exec(subject, matches);
+    CAPTURE(rc);
+    CHECK(rc == original_rc);
+  }
+
+  SECTION("a copy still matches what the original matches")
+  {
+    Regex             copy(original);
+    std::string const ordinary{"/alpha/bravo/?action=weather"};
+
+    RegexMatches original_ordinary;
+    RegexMatches copy_ordinary;
+    CHECK(original.exec(ordinary, original_ordinary) == copy.exec(ordinary, copy_ordinary));
+  }
 }

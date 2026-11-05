@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -24,6 +24,12 @@
 #pragma once
 
 #include <atomic>
+#include <bitset>
+#include <cstdint>
+#include <limits>
+
+#include "tscore/ink_assert.h"
+#include "tscore/TimerWheel.h"
 
 #include "iocore/eventsystem/Continuation.h"
 #include "iocore/eventsystem/EThread.h"
@@ -100,10 +106,16 @@ public:
   Event   *trigger_event = nullptr;
   QueM(NetEvent, NetState, read, ready_link) read_ready_list;
   QueM(NetEvent, NetState, write, ready_link) write_ready_list;
+  /// Every NetEvent on this thread. Not walked for timeouts any more - the
+  /// timer wheel does that - but it is the only enumeration of all NetEvents on
+  /// the thread, and it backs startCop's double-registration assert. The wheel
+  /// cannot substitute: a NetEvent with no deadline is not scheduled in it.
   Que(NetEvent, open_link) open_list;
-  DList(NetEvent, cop_link) cop_list;
+  TimerWheel<NetEvent> timer_wheel;
   ASLLM(NetEvent, NetState, read, enable_link) read_enable_list;
   ASLLM(NetEvent, NetState, write, enable_link) write_enable_list;
+  /// NetEvents other threads need this thread to act on; see process_handoffs().
+  ASLL(NetEvent, handoff_link) handoff_list;
   Que(NetEvent, keep_alive_queue_link) keep_alive_queue;
   uint32_t keep_alive_queue_size = 0;
   Que(NetEvent, active_queue_link) active_queue;
@@ -111,25 +123,52 @@ public:
 
   /// configuration settings for managing the active and keep-alive queues
   struct Config {
-    uint32_t max_connections_in                 = 0;
-    uint32_t max_requests_in                    = 0;
-    uint32_t inactive_threshold_in              = 0;
-    uint32_t transaction_no_activity_timeout_in = 0;
-    uint32_t keep_alive_no_activity_timeout_in  = 0;
-    uint32_t default_inactivity_timeout         = 0;
+    /// Identifies a config value, so an update can name it instead of passing a pointer.
+    /// @note The underlying type is fixed and must not be narrowed. The index arrives as
+    /// an untyped event cookie, and a value that wrapped would look like a valid index.
+    enum class Index : int {
+      MAX_CONNECTIONS_IN,
+      MAX_REQUESTS_IN,
+      DEFAULT_INACTIVITY_TIMEOUT,
+      INACTIVITY_COP_BUDGET,
+      COUNT ///< Number of config values, not a valid index.
+    };
 
-    /** Return the address of the first value in this struct.
+    uint32_t max_connections_in         = 0;
+    uint32_t max_requests_in            = 0;
+    uint32_t default_inactivity_timeout = 0;
 
-        Doing updates is much easier if we treat this config struct as an array.
-        Making it a method means the knowledge of which member is the first one
-        is localized to this struct, not scattered about.
-     */
+    /// Most timeouts one inactivity cop pass may fire before yielding.
+    ///
+    /// Tunable because it is a latency policy, not a correctness setting. A cop
+    /// pass runs on an event thread, so a pass that fires N timeouts delays that
+    /// thread's poll loop for as long as those N closes take. Reaping idle
+    /// connections is low priority work, so trading a longer total reap for
+    /// smaller slices is usually the right call: anything left over is picked up
+    /// a millisecond later rather than waiting for the next tick.
+    uint32_t inactivity_cop_budget = 4096;
+
+    /// The config value identified by @a idx.
     uint32_t &
-    operator[](int n)
+    operator[](Index idx)
     {
-      return *(&max_connections_in + n);
+      switch (idx) {
+      case Index::MAX_CONNECTIONS_IN:
+        return max_connections_in;
+      case Index::MAX_REQUESTS_IN:
+        return max_requests_in;
+      case Index::DEFAULT_INACTIVITY_TIMEOUT:
+        return default_inactivity_timeout;
+      case Index::INACTIVITY_COP_BUDGET:
+        return inactivity_cop_budget;
+      case Index::COUNT:
+        break;
+      }
+      ink_release_assert(!"invalid NetHandler::Config index");
+      return max_connections_in;
     }
   };
+
   /** Static global config, set and updated per process.
 
       This is updated asynchronously and then events are sent to the NetHandler
@@ -146,7 +185,7 @@ public:
   uint32_t max_connections_per_thread_in = 0;
   uint32_t max_requests_per_thread_in    = 0;
   /// Number of configuration items in @c Config.
-  static constexpr int CONFIG_ITEM_COUNT = sizeof(Config) / sizeof(uint32_t);
+  static constexpr int CONFIG_ITEM_COUNT = static_cast<int>(Config::Index::COUNT);
   /// Which members of @c Config the per thread values depend on.
   /// If one of these is updated, the per thread values must also be updated.
   static const std::bitset<CONFIG_ITEM_COUNT> config_value_affects_per_thread_value;
@@ -159,6 +198,7 @@ public:
   int        mainNetEvent(int event, Event *data);
   int        waitForActivity(ink_hrtime timeout) override;
   void       process_enabled_list();
+  void       process_handoffs();
   void       process_ready_list();
   void       manage_keep_alive_queue();
   bool       manage_active_queue(NetEvent *ne, bool ignore_queue_size);
@@ -192,28 +232,62 @@ public:
     stopCop(ne) first.
 
     @param ne NetEvent to be released.
-    @return ne->nh set to nullptr.
+    @post @a ne has its @c nh pointer set to nullptr.
    */
   void stopIO(NetEvent *ne);
 
   /**
     Start to handle active timeout and inactivity timeout on a NetEvent.
-    Put the ne into open_list. All NetEvents in the open_list is checked for
-    timeout by InactivityCop. Only be called when holding the mutex of this
-    NetHandler and must call startIO(ne) first.
+    Put the ne into open_list and schedule it in the timer wheel. Only be
+    called when holding the mutex of this NetHandler and must call startIO(ne)
+    first.
 
-    @param ne NetEvent to be managed by InactivityCop
+    @param ne NetEvent to be managed for timeouts.
    */
   void startCop(NetEvent *ne);
   /**
     Stop to handle active timeout and inactivity on a NetEvent.
-    Remove the ne from open_list and cop_list.
+    Remove the ne from open_list and cancel it in the timer wheel.
     Also remove the ne from keep_alive_queue and active_queue if its context is
     IN. Only be called when holding the mutex of this NetHandler.
 
     @param ne NetEvent to be released.
    */
   void stopCop(NetEvent *ne);
+
+  /** Re-arm @a ne's slot in the timer wheel from its current deadline fields.
+   *
+   * Must be called after any change that makes @a ne's deadline earlier. Owning
+   * thread only; other threads go through NetEvent::rearm_timer(), which hands
+   * the re-arm over with defer_rearm().
+   */
+  void rearm_timer(NetEvent *ne);
+
+  /** Ask this handler's thread to re-arm @a ne on its next loop.
+   *
+   * Safe from any thread. The deadline is re-read when the owner gets to it, so
+   * any number of changes before then cost one re-arm.
+   */
+  void defer_rearm(NetEvent *ne);
+
+  /** Mark @a ne closed from a thread other than this handler's, and hand it to
+   * this thread to free.
+   *
+   * Only the owning thread may touch the timer wheel, so a foreign close can
+   * neither unschedule nor free @a ne. Without this it would sit at its old
+   * deadline, or forever if it had none. @a ne is claimed before it is marked
+   * closed, so the owner cannot free it while this is still using it; the caller
+   * must not touch @a ne once this returns.
+   *
+   * @param[in] ne The event to close; ownership passes to this handler's thread.
+   * @param[in] closed_value The value to store in NetEvent::closed.
+   */
+  void close_from_foreign_thread(NetEvent *ne, int closed_value);
+
+  /// The single source of truth for @a ne's next deadline: the non-zero minimum
+  /// of its inactivity and activity deadlines, or 0 if neither is set. Also used
+  /// by InactivityCop's wheel fire functor to agree with what armed the element.
+  ink_hrtime _earliest_deadline(NetEvent *ne) const;
 
   // Signal the epoll_wait to terminate.
   void signalActivity() override;

@@ -2,7 +2,7 @@
 
   Header file for a class that deals with plugin Dynamic Shared Objects (DSO)
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -20,7 +20,7 @@
   See the License for the specific language governing permissions and
   limitations under the License.
 
-  @section details Details
+  @par Details
 
   Implements code necessary for Reverse Proxy which mostly consists of
   general purpose hostname substitution in URLs.
@@ -46,17 +46,14 @@
 namespace fs = swoc::file;
 
 #include "tscore/Ptr.h"
+#include "tsutil/Metrics.h"
 #include "iocore/eventsystem/EventSystem.h"
 
 #include "proxy/Plugin.h"
+#include "proxy/PluginThreadContext.h"
 
-class PluginThreadContext : public RefCountObjInHeap
-{
-public:
-  virtual void                       acquire() = 0;
-  virtual void                       release() = 0;
-  static constexpr const char *const _tag      = "plugin_context"; /** @brief log tag used by this class */
-};
+#include <string>
+#include <string_view>
 
 class PluginDso : public PluginThreadContext
 {
@@ -125,7 +122,7 @@ public:
      *  @brief Add the plugin's path to the opt out table in order to let the Plugin Factory
      *         that this plugin is not interested in taking part of the dynamic reloading.
      *         This function will store the plugin's canonical path.
-     * @param effectivePath  Plugin's path.
+     * @param[in] pluginPath  Plugin's path.
      * @return false if any errors converting the plugin's path to a canonical path, true otherwise.
      */
     bool addPluginPathToDsoOptOutTable(std::string_view pluginPath);

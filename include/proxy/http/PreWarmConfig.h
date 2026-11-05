@@ -2,7 +2,7 @@
 
   Configs for PreWarming Tunnel
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -43,14 +43,13 @@ public:
 
   static void startup();
 
-  // ConfigUpdateContinuation interface
-  static void reconfigure();
+  // ConfigRegistry reload handler
+  static void reconfigure(ConfigContext ctx = {});
 
   // ConfigProcessor::scoped_config interface
   static PreWarmConfigParams *acquire();
   static void                 release(PreWarmConfigParams *params);
 
 private:
-  inline static int                                                 _config_id = 0;
-  inline static std::unique_ptr<ConfigUpdateHandler<PreWarmConfig>> _config_update_handler;
+  inline static int _config_id = 0;
 };

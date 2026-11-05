@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -32,7 +32,7 @@
 
 #pragma once
 
-#include <atomic>
+#include <memory>
 
 #include "records/RecProcess.h"
 
@@ -41,13 +41,19 @@
 #include "proxy/http/remap/RemapPluginInfo.h"
 #include "proxy/http/remap/UrlRewrite.h"
 #include "proxy/http/remap/UrlMapping.h"
+#include "mgmt/config/ConfigContext.h"
+
+#include "tsutil/AtomicSharedPtr.h"
 
 #define EMPTY_PORT_MAPPING (int32_t) ~0
 
 class url_mapping;
 struct host_hdr_info;
 
-extern std::atomic<UrlRewrite *> rewrite_table;
+extern AtomicSharedPtr<UrlRewrite> rewrite_table;
+
+// Wrap a freshly built table in a shared_ptr with the standard UrlRewrite deleter.
+std::shared_ptr<UrlRewrite> make_managed_url_rewrite(std::unique_ptr<UrlRewrite> table);
 
 // API Functions
 int init_reverse_proxy();
@@ -56,8 +62,13 @@ mapping_type request_url_remap_redirect(HTTPHdr *request_header, URL *redirect_u
 bool         response_url_remap(HTTPHdr *response_header, UrlRewrite *table);
 
 // Reload Functions
-bool reloadUrlRewrite();
+bool reloadUrlRewrite(ConfigContext ctx);
 bool urlRewriteVerify();
+
+// Synchronously drops rewrite_table.  Call from a Continuation context
+// before TSSystemState::shut_down_event_system() so plugin doneInstance()
+// has this_ethread() for TSMutexLock.
+void shutdown_url_rewrite();
 
 void init_remap_volume_host_records();
 int  url_rewrite_CB(const char *name, RecDataT data_type, RecData data, void *cookie);

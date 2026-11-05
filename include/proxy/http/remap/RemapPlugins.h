@@ -2,7 +2,7 @@
 
   Declarations for the RemapPlugins class.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -26,7 +26,6 @@
 
 #include "tscore/ink_platform.h"
 #include "iocore/eventsystem/EventSystem.h"
-#include "proxy/http/remap/RemapProcessor.h"
 #include "proxy/http/remap/RemapPluginInfo.h"
 #include "proxy/http/HttpTransact.h"
 #include "proxy/ReverseProxy.h"

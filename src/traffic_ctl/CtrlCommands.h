@@ -1,5 +1,5 @@
 /**
-@section license License
+@par License
 
 Licensed to the Apache Software Foundation (ASF) under one
 or more contributor license agreements.  See the NOTICE file
@@ -32,13 +32,17 @@ protected:
   /// @brief Invoke the remote server. This is the very basic function which does not play or interact with any codec. Request
   ///        and message should be already en|de coded.
   /// @param request A string representation of the json/yaml request.
+  /// @param[in] timeout_ms Timeout for each RPC attempt.
+  /// @param[in] attempts Maximum number of RPC attempts.
   /// @return a string with the json/yaml response.
   /// @note This function does print the raw string if requested by the "--format". No printer involved, standard output.
   std::string invoke_rpc(std::string const &request, std::chrono::milliseconds timeout_ms, int attempts);
 
   /// @brief Function that calls the rpc server. This function takes a json objects and uses the defined coded to convert them to a
   ///        string. This function will call invoke_rpc(string) overload.
-  /// @param A Client request.
+  /// @param[in] request Client request.
+  /// @param[in] timeout_ms Timeout for each RPC attempt.
+  /// @param[in] attempts Maximum number of RPC attempts.
   /// @return A server response.
   shared::rpc::JSONRPCResponse invoke_rpc(shared::rpc::ClientRequest const &request, std::chrono::milliseconds timeout_ms,
                                           int attempts);
@@ -120,7 +124,9 @@ protected:
   /// @param argData argument's data.
   /// @param isRegex if the request should be done by regex or name.
   /// @param recQueryType Config or Metric.
-  shared::rpc::JSONRPCResponse record_fetch(ts::ArgumentData argData, bool isRegex, RecordQueryType recQueryType);
+  /// @param includeHidden if true, also match hidden (internal, normally unpublished) metrics. Only meaningful for METRIC.
+  shared::rpc::JSONRPCResponse record_fetch(ts::ArgumentData argData, bool isRegex, RecordQueryType recQueryType,
+                                            bool includeHidden = false);
 };
 // -----------------------------------------------------------------------------------------------------------------------------------
 class ConfigCommand : public RecordCommand
@@ -147,13 +153,34 @@ class ConfigCommand : public RecordCommand
   void config_reload();
   void config_show_file_registry();
 
+  // Helper functions for config reload
+  ConfigReloadResponse fetch_config_reload(std::string const &token, std::string const &count = "1");
+  void                 track_config_reload_progress(std::string const &token, std::chrono::milliseconds refresh_interval,
+                                                    std::chrono::milliseconds timeout, std::string const &timeout_str);
+  ConfigReloadResponse config_reload(std::string const &token, bool force, YAML::Node const &configs);
+
+  // Helper to read data from file, stdin, or inline string
+  std::string read_data_input(std::string const &data_arg);
+
 public:
   ConfigCommand(ts::Arguments *args);
+};
+// -----------------------------------------------------------------------------------------------------------------------------------
+class CacheCommand : public CtrlCommand
+{
+public:
+  CacheCommand(ts::Arguments *args);
+
+private:
+  static inline const std::string CLEAR_STR{"clear"};
+
+  void clear();
 };
 // -----------------------------------------------------------------------------------------------------------------------------------
 class MetricCommand : public RecordCommand
 {
   static inline const std::string MONITOR_STR{"monitor"};
+  static inline const std::string INCLUDE_HIDDEN_STR{"include-hidden"};
 
   void metric_get();
   void metric_match();
@@ -187,8 +214,10 @@ public:
 
 private:
   static inline const std::string STATUS_STR{"status"};
+  static inline const std::string CLEAR_STR{"clear"};
 
   void status_get();
+  void clear();
 };
 // -----------------------------------------------------------------------------------------------------------------------------------
 class PluginCommand : public CtrlCommand
@@ -198,7 +227,9 @@ public:
 
 private:
   static inline const std::string MSG_STR{"msg"};
+  static inline const std::string LIST_STR{"list"};
   void                            plugin_msg();
+  void                            plugin_list();
 };
 // -----------------------------------------------------------------------------------------------------------------------------------
 class DirectRPCCommand : public CtrlCommand

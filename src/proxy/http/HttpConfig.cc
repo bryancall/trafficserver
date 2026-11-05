@@ -3,7 +3,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -28,6 +28,7 @@
 #include "tscore/Filenames.h"
 #include "tscore/Tokenizer.h"
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include "proxy/http/HttpConfig.h"
 #include "proxy/hdrs/HTTP.h"
@@ -127,8 +128,8 @@ static const ConfigEnumPair<TSServerSessionSharingMatchType> SessionSharingMatch
 bool
 HttpConfig::load_server_session_sharing_match(std::string_view key, MgmtByte &mask)
 {
-  MgmtByte value;
-  mask = 0;
+  MgmtByte value = 0;
+  mask           = 0;
   // Parse through and build up mask
   size_t start  = 0;
   size_t offset = 0;
@@ -150,8 +151,13 @@ HttpConfig::load_server_session_sharing_match(std::string_view key, MgmtByte &ma
     if (value < TS_SERVER_SESSION_SHARING_MATCH_NONE) {
       mask |= (1 << value);
     } else if (value == TS_SERVER_SESSION_SHARING_MATCH_BOTH) {
+      // MASK_CERT is included so a pooled TLS session is only reused for a
+      // transaction that would present the same client certificate. The
+      // outbound certificate is overridable per transaction, so without this
+      // bit a session authenticated as one identity can serve a transaction
+      // configured for another, which the origin sees as the wrong client.
       mask |= TS_SERVER_SESSION_SHARING_MATCH_MASK_IP | TS_SERVER_SESSION_SHARING_MATCH_MASK_HOSTONLY |
-              TS_SERVER_SESSION_SHARING_MATCH_MASK_HOSTSNISYNC;
+              TS_SERVER_SESSION_SHARING_MATCH_MASK_HOSTSNISYNC | TS_SERVER_SESSION_SHARING_MATCH_MASK_CERT;
     } else if (value == TS_SERVER_SESSION_SHARING_MATCH_HOST) {
       mask |= TS_SERVER_SESSION_SHARING_MATCH_MASK_HOSTONLY | TS_SERVER_SESSION_SHARING_MATCH_MASK_HOSTSNISYNC;
     }
@@ -331,24 +337,30 @@ register_stat_callbacks()
   http_rsb.https_total_client_connections    = Metrics::Counter::createPtr("proxy.process.https.total_client_connections");
   http_rsb.incoming_requests                 = Metrics::Counter::createPtr("proxy.process.http.incoming_requests");
   http_rsb.incoming_responses                = Metrics::Counter::createPtr("proxy.process.http.incoming_responses");
-  http_rsb.invalid_client_requests           = Metrics::Counter::createPtr("proxy.process.http.invalid_client_requests");
-  http_rsb.misc_count                        = Metrics::Counter::createPtr("proxy.process.http.misc_count");
-  http_rsb.misc_origin_server_bytes          = Metrics::Counter::createPtr("proxy.process.http.http_misc_origin_server_bytes");
-  http_rsb.misc_user_agent_bytes             = Metrics::Counter::createPtr("proxy.process.http.misc_user_agent_bytes");
-  http_rsb.missing_host_hdr                  = Metrics::Counter::createPtr("proxy.process.http.missing_host_hdr");
-  http_rsb.no_remap_matched                  = Metrics::Counter::createPtr("proxy.process.http.no_remap_matched");
-  http_rsb.options_requests                  = Metrics::Counter::createPtr("proxy.process.http.options_requests");
-  http_rsb.origin_body                       = Metrics::Counter::createPtr("proxy.process.http.origin.body");
-  http_rsb.origin_close_private              = Metrics::Counter::createPtr("proxy.process.http.origin.close_private");
-  http_rsb.origin_connect_adjust_thread      = Metrics::Counter::createPtr("proxy.process.http.origin.connect.adjust_thread");
-  http_rsb.origin_connections_throttled      = Metrics::Counter::createPtr("proxy.process.http.origin_connections_throttled_out");
-  http_rsb.origin_make_new                   = Metrics::Counter::createPtr("proxy.process.http.origin.make_new");
-  http_rsb.origin_no_sharing                 = Metrics::Counter::createPtr("proxy.process.http.origin.no_sharing");
-  http_rsb.origin_not_found                  = Metrics::Counter::createPtr("proxy.process.http.origin.not_found");
-  http_rsb.origin_private                    = Metrics::Counter::createPtr("proxy.process.http.origin.private");
-  http_rsb.origin_raw                        = Metrics::Counter::createPtr("proxy.process.http.origin.raw");
-  http_rsb.origin_reuse                      = Metrics::Counter::createPtr("proxy.process.http.origin.reuse");
-  http_rsb.origin_reuse_fail                 = Metrics::Counter::createPtr("proxy.process.http.origin.reuse_fail");
+  http_rsb.client_request_at_headers_stripped =
+    Metrics::Counter::createPtr("proxy.process.http.client_request_at_headers_stripped");
+  http_rsb.origin_response_at_headers_stripped =
+    Metrics::Counter::createPtr("proxy.process.http.origin_response_at_headers_stripped");
+  http_rsb.invalid_client_requests       = Metrics::Counter::createPtr("proxy.process.http.invalid_client_requests");
+  http_rsb.misc_count                    = Metrics::Counter::createPtr("proxy.process.http.misc_count");
+  http_rsb.misc_origin_server_bytes      = Metrics::Counter::createPtr("proxy.process.http.http_misc_origin_server_bytes");
+  http_rsb.misc_user_agent_bytes         = Metrics::Counter::createPtr("proxy.process.http.misc_user_agent_bytes");
+  http_rsb.missing_host_hdr              = Metrics::Counter::createPtr("proxy.process.http.missing_host_hdr");
+  http_rsb.no_remap_matched              = Metrics::Counter::createPtr("proxy.process.http.no_remap_matched");
+  http_rsb.options_requests              = Metrics::Counter::createPtr("proxy.process.http.options_requests");
+  http_rsb.origin_body                   = Metrics::Counter::createPtr("proxy.process.http.origin.body");
+  http_rsb.origin_close_private          = Metrics::Counter::createPtr("proxy.process.http.origin.close_private");
+  http_rsb.origin_connect_adjust_thread  = Metrics::Counter::createPtr("proxy.process.http.origin.connect.adjust_thread");
+  http_rsb.origin_connections_throttled  = Metrics::Counter::createPtr("proxy.process.http.origin_connections_throttled_out");
+  http_rsb.origin_make_new               = Metrics::Counter::createPtr("proxy.process.http.origin.make_new");
+  http_rsb.origin_no_sharing             = Metrics::Counter::createPtr("proxy.process.http.origin.no_sharing");
+  http_rsb.origin_not_found              = Metrics::Counter::createPtr("proxy.process.http.origin.not_found");
+  http_rsb.origin_private                = Metrics::Counter::createPtr("proxy.process.http.origin.private");
+  http_rsb.origin_raw                    = Metrics::Counter::createPtr("proxy.process.http.origin.raw");
+  http_rsb.origin_reuse                  = Metrics::Counter::createPtr("proxy.process.http.origin.reuse");
+  http_rsb.origin_retry_admitted         = Metrics::Counter::createPtr("proxy.process.http.origin.retry_admitted");
+  http_rsb.origin_retry_body_unavailable = Metrics::Counter::createPtr("proxy.process.http.origin.retry_body_unavailable");
+  http_rsb.origin_reuse_fail             = Metrics::Counter::createPtr("proxy.process.http.origin.reuse_fail");
   http_rsb.origin_server_request_document_total_size =
     Metrics::Counter::createPtr("proxy.process.http.origin_server_request_document_total_size");
   http_rsb.origin_server_request_header_total_size =
@@ -499,6 +511,7 @@ register_stat_callbacks()
   http_rsb.total_transactions_time           = Metrics::Counter::createPtr("proxy.process.http.total_transactions_time");
   http_rsb.total_x_redirect                  = Metrics::Counter::createPtr("proxy.process.http.total_x_redirect_count");
   http_rsb.trace_requests                    = Metrics::Counter::createPtr("proxy.process.http.trace_requests");
+  http_rsb.tunnel_chunked_throttle           = Metrics::Counter::createPtr("proxy.process.http.tunnel.chunked_throttle");
   http_rsb.tunnel_current_active_connections = Metrics::Gauge::createPtr("proxy.process.tunnel.current_active_connections");
   http_rsb.tunnels                           = Metrics::Counter::createPtr("proxy.process.http.tunnels");
   http_rsb.ua_begin_time                     = Metrics::Counter::createPtr("proxy.process.http.milestone.ua_begin");
@@ -688,7 +701,7 @@ parse_http_status_code_list(HttpStatusBitset &set, swoc::TextView status_list)
 const MgmtConverter HttpStatusCodeList::Conv{
   [](const void *data) -> std::string_view {
     const HttpStatusCodeList *list = static_cast<const HttpStatusCodeList *>(data);
-    return list->conf_value;
+    return list->conf_value ? list->conf_value : "";
   },
   [](void *data, std::string_view src) -> void {
     HttpStatusCodeList *list = static_cast<HttpStatusCodeList *>(data);
@@ -786,15 +799,14 @@ ParsedConfigCache::lookup_impl(TSOverridableConfigKey key, std::string_view valu
   }
 
   // Parse and insert.
-  auto [inserted_it, success] = _cache.emplace(cache_key, parse(key, value));
+  auto [inserted_it, success] = _cache.try_emplace(cache_key);
+  parse_into(inserted_it->second, key, value);
   return inserted_it->second;
 }
 
-ParsedConfigCache::ParsedValue
-ParsedConfigCache::parse(TSOverridableConfigKey key, std::string_view value)
+void
+ParsedConfigCache::parse_into(ParsedValue &result, TSOverridableConfigKey key, std::string_view value)
 {
-  ParsedValue result{};
-
   // Store the string value - the parsed structures may reference this.
   result.conf_value_storage = std::string(value);
 
@@ -843,8 +855,6 @@ ParsedConfigCache::parse(TSOverridableConfigKey key, std::string_view value)
     // No special parsing needed for this config.
     break;
   }
-
-  return result;
 }
 
 /** Template for creating conversions and initialization for @c std::chrono based configuration variables.
@@ -963,12 +973,14 @@ HttpConfig::startup()
 
   HttpEstablishStaticConfigLongLong(c.http_request_line_max_size, "proxy.config.http.request_line_max_size");
   HttpEstablishStaticConfigLongLong(c.http_hdr_field_max_size, "proxy.config.http.header_field_max_size");
+  HttpEstablishStaticConfigLongLong(c.pp_hdr_max_size, "proxy.config.proxy_protocol.max_header_size");
 
   HttpEstablishStaticConfigByte(c.disable_ssl_parenting, "proxy.config.http.parent_proxy.disable_connect_tunneling");
   HttpEstablishStaticConfigByte(c.oride.forward_connect_method, "proxy.config.http.forward_connect_method");
 
   HttpEstablishStaticConfigByte(c.oride.no_dns_forward_to_parent, "proxy.config.http.no_dns_just_forward_to_parent");
   HttpEstablishStaticConfigByte(c.oride.uncacheable_requests_bypass_parent, "proxy.config.http.uncacheable_requests_bypass_parent");
+  HttpEstablishStaticConfigByte(c.oride.bypass_parent, "proxy.config.http.bypass_parent");
   HttpEstablishStaticConfigByte(c.oride.doc_in_cache_skip_dns, "proxy.config.http.doc_in_cache_skip_dns");
 
   HttpEstablishStaticConfigByte(c.no_origin_server_dns, "proxy.config.http.no_origin_server_dns");
@@ -996,6 +1008,7 @@ HttpConfig::startup()
   HttpEstablishStaticConfigLongLong(c.oride.flow_high_water_mark, "proxy.config.http.flow_control.high_water");
   HttpEstablishStaticConfigLongLong(c.oride.flow_low_water_mark, "proxy.config.http.flow_control.low_water");
   HttpEstablishStaticConfigByte(c.oride.post_check_content_length_enabled, "proxy.config.http.post.check.content_length.enabled");
+  HttpEstablishStaticConfigByte(c.oride.reject_head_with_content, "proxy.config.http.reject_head_with_content");
   HttpEstablishStaticConfigByte(c.oride.cache_post_method, "proxy.config.http.cache.post_method");
   HttpEstablishStaticConfigByte(c.oride.request_buffer_enabled, "proxy.config.http.request_buffer_enabled");
   HttpEstablishStaticConfigByte(c.strict_uri_parsing, "proxy.config.http.strict_uri_parsing");
@@ -1045,8 +1058,8 @@ HttpConfig::startup()
   HttpEstablishStaticConfigFloat(c.oride.background_fill_threshold, "proxy.config.http.background_fill_completed_threshold");
 
   HttpEstablishStaticConfigLongLong(c.oride.connect_attempts_max_retries, "proxy.config.http.connect_attempts_max_retries");
-  HttpEstablishStaticConfigLongLong(c.oride.connect_attempts_max_retries_down_server,
-                                    "proxy.config.http.connect_attempts_max_retries_down_server");
+  HttpEstablishStaticConfigLongLong(c.oride.connect_attempts_max_retries_suspect_server,
+                                    "proxy.config.http.connect_attempts_max_retries_suspect_server");
   HttpEstablishStaticConfigLongLong(c.oride.connect_attempts_retry_backoff_base,
                                     "proxy.config.http.connect_attempts_retry_backoff_base");
 
@@ -1105,6 +1118,7 @@ HttpConfig::startup()
   HttpEstablishStaticConfigLongLong(c.oride.cache_guaranteed_max_lifetime, "proxy.config.http.cache.guaranteed_max_lifetime");
 
   HttpEstablishStaticConfigLongLong(c.oride.cache_max_stale_age, "proxy.config.http.cache.max_stale_age");
+  HttpEstablishStaticConfigLongLong(c.oride.cache_max_stale_age_percent, "proxy.config.http.cache.max_stale_age_percent");
 
   HttpEstablishStaticConfigByte(c.oride.srv_enabled, "proxy.config.srv_enabled");
 
@@ -1256,6 +1270,7 @@ HttpConfig::reconfigure()
   params->proxy_hostname_len                       = (params->proxy_hostname) ? strlen(params->proxy_hostname) : 0;
   params->oride.no_dns_forward_to_parent           = INT_TO_BOOL(m_master.oride.no_dns_forward_to_parent);
   params->oride.uncacheable_requests_bypass_parent = INT_TO_BOOL(m_master.oride.uncacheable_requests_bypass_parent);
+  params->oride.bypass_parent                      = INT_TO_BOOL(m_master.oride.bypass_parent);
   params->no_origin_server_dns                     = INT_TO_BOOL(m_master.no_origin_server_dns);
   params->use_client_target_addr                   = m_master.use_client_target_addr;
   params->use_client_source_port                   = INT_TO_BOOL(m_master.use_client_source_port);
@@ -1276,6 +1291,17 @@ HttpConfig::reconfigure()
 
   params->http_request_line_max_size = m_master.http_request_line_max_size;
   params->http_hdr_field_max_size    = m_master.http_hdr_field_max_size;
+  params->pp_hdr_max_size            = m_master.pp_hdr_max_size;
+
+  // A header field name and value are each stored with a uint16_t length, so a
+  // single field cannot exceed UINT16_MAX octets. Clamp the configured
+  // per-field limit to that ceiling: a larger value can never be honored and an
+  // oversized field is rejected at parse time regardless.
+  if (params->http_hdr_field_max_size > UINT16_MAX) {
+    Note("proxy.config.http.header_field_max_size %" PRId64 " exceeds the %d-octet storage limit; clamping to %d",
+         static_cast<int64_t>(params->http_hdr_field_max_size), UINT16_MAX, UINT16_MAX);
+    params->http_hdr_field_max_size = UINT16_MAX;
+  }
 
   if (params->oride.connection_tracker_config.server_max > 0 &&
       params->oride.connection_tracker_config.server_max < params->oride.connection_tracker_config.server_min) {
@@ -1303,6 +1329,7 @@ HttpConfig::reconfigure()
   params->oride.http_chunking_size = m_master.oride.http_chunking_size;
 
   params->oride.post_check_content_length_enabled = INT_TO_BOOL(m_master.oride.post_check_content_length_enabled);
+  params->oride.reject_head_with_content          = INT_TO_BOOL(m_master.oride.reject_head_with_content);
   params->oride.cache_post_method                 = INT_TO_BOOL(m_master.oride.cache_post_method);
 
   params->oride.request_buffer_enabled = INT_TO_BOOL(m_master.oride.request_buffer_enabled);
@@ -1342,13 +1369,45 @@ HttpConfig::reconfigure()
   params->oride.background_fill_active_timeout      = m_master.oride.background_fill_active_timeout;
   params->oride.background_fill_threshold           = m_master.oride.background_fill_threshold;
 
-  params->oride.connect_attempts_max_retries             = m_master.oride.connect_attempts_max_retries;
-  params->oride.connect_attempts_max_retries_down_server = m_master.oride.connect_attempts_max_retries_down_server;
+  params->oride.connect_attempts_max_retries                = m_master.oride.connect_attempts_max_retries;
+  params->oride.connect_attempts_max_retries_suspect_server = m_master.oride.connect_attempts_max_retries_suspect_server;
+
+  // Deprecation handling for connect_attempts_max_retries_down_server: if the operator explicitly set the deprecated record
+  // but did not set the replacement, mirror the value forward so existing configs keep working. If both are set, the new
+  // record wins and the deprecated one is ignored. Always warn when the deprecated record is explicitly set. The deprecated
+  // record has no bound struct field; fetch its value on demand from RecCore.
+  {
+    RecSourceT old_src = REC_SOURCE_NULL;
+    RecSourceT new_src = REC_SOURCE_NULL;
+    RecGetRecordSource("proxy.config.http.connect_attempts_max_retries_down_server", &old_src);
+    RecGetRecordSource("proxy.config.http.connect_attempts_max_retries_suspect_server", &new_src);
+    const bool old_explicit = (old_src == REC_SOURCE_EXPLICIT || old_src == REC_SOURCE_ENV);
+    const bool new_explicit = (new_src == REC_SOURCE_EXPLICIT || new_src == REC_SOURCE_ENV);
+    if (old_explicit && !new_explicit) {
+      RecInt deprecated_val = RecGetRecordInt("proxy.config.http.connect_attempts_max_retries_down_server")
+                                .value_or(params->oride.connect_attempts_max_retries_suspect_server);
+      Warning("proxy.config.http.connect_attempts_max_retries_down_server is deprecated; "
+              "use proxy.config.http.connect_attempts_max_retries_suspect_server instead. "
+              "Using deprecated value %" PRIu64 " for now.",
+              deprecated_val);
+      params->oride.connect_attempts_max_retries_suspect_server = deprecated_val;
+    } else if (old_explicit && new_explicit) {
+      Warning("proxy.config.http.connect_attempts_max_retries_down_server is deprecated and is being ignored "
+              "in favor of proxy.config.http.connect_attempts_max_retries_suspect_server (%" PRIu64 ").",
+              m_master.oride.connect_attempts_max_retries_suspect_server);
+    }
+  }
+
   if (m_master.oride.connect_attempts_rr_retries > params->oride.connect_attempts_max_retries) {
     Warning("connect_attempts_rr_retries (%" PRIu64 ") is greater than "
             "connect_attempts_max_retries (%" PRIu64 "), this means requests "
             "will never redispatch to another server",
             m_master.oride.connect_attempts_rr_retries, params->oride.connect_attempts_max_retries);
+  }
+  if (m_master.oride.connect_attempts_rr_retries > 0 && params->oride.connect_attempts_max_retries_suspect_server == 0) {
+    Warning("connect_attempts_max_retries_suspect_server=0 with round-robin enabled leaves no retry budget for recovering "
+            "(SUSPECT) origins beyond the initial attempt; "
+            "setting proxy.config.http.connect_attempts_max_retries_suspect_server >= 1 is recommended");
   }
   params->oride.connect_attempts_retry_backoff_base = m_master.oride.connect_attempts_retry_backoff_base;
 
@@ -1410,7 +1469,8 @@ HttpConfig::reconfigure()
   params->oride.cache_guaranteed_min_lifetime = m_master.oride.cache_guaranteed_min_lifetime;
   params->oride.cache_guaranteed_max_lifetime = m_master.oride.cache_guaranteed_max_lifetime;
 
-  params->oride.cache_max_stale_age = m_master.oride.cache_max_stale_age;
+  params->oride.cache_max_stale_age         = m_master.oride.cache_max_stale_age;
+  params->oride.cache_max_stale_age_percent = m_master.oride.cache_max_stale_age_percent;
 
   params->oride.srv_enabled = m_master.oride.srv_enabled;
 
@@ -1522,6 +1582,9 @@ HttpConfig::reconfigure()
 
   params->oride.ssl_client_sni_policy     = ats_strdup(m_master.oride.ssl_client_sni_policy);
   params->oride.ssl_client_alpn_protocols = ats_strdup(m_master.oride.ssl_client_alpn_protocols);
+  params->oride.ssl_client_sni_policy_len = params->oride.ssl_client_sni_policy ? strlen(params->oride.ssl_client_sni_policy) : 0;
+  params->oride.ssl_client_alpn_protocols_len =
+    params->oride.ssl_client_alpn_protocols ? strlen(params->oride.ssl_client_alpn_protocols) : 0;
 
   params->oride.negative_caching_list.set(m_master.oride.negative_caching_list.conf_value);
   params->oride.negative_revalidating_list.set(m_master.oride.negative_revalidating_list.conf_value);

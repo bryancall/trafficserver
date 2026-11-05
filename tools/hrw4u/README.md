@@ -1,7 +1,7 @@
 # HRW4U - Header Rewrite for You
 
 [![Apache License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
+[![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
 
 HRW4U is a domain-specific language and compiler toolchain for Apache Traffic Server's `header_rewrite` plugin, providing a more readable and maintainable alternative to writing header rewrite rules directly.
 
@@ -21,7 +21,7 @@ Decompiles existing `header_rewrite` rules back into HRW4U source code.
 
 ## Requirements
 
-- **Python 3.11+** (uses modern type annotations and performance features)
+- **Python 3.12+** (uses modern type annotations and performance features)
 - **ANTLR4** for grammar parsing
 - **uv** (for Python environment management)
 
@@ -148,6 +148,27 @@ REMAP {
 ```
 
 Passing the output from hrw4u back into u4wrh brings back the original script again!
+
+### JSON response bodies
+
+Use the two-argument `set-body` form to set body content and its MIME type
+together. Double braces delimit literal brace content, so JSON object braces
+are not interpreted as HRW4U interpolation:
+
+```
+REMAP {
+    http.status = 400;
+    set-body("{{"error": "bad request"}}\n", "application/problem+json");
+}
+```
+
+`set-body-from(url)` preserves the fetched response's `Content-Type`. Pass a
+second argument, `set-body-from(url, content_type)`, to override it. This
+function is available in the `READ_RESPONSE` section.
+
+Use `set-body-from-file(path, content_type)` in `REMAP` or `SEND_RESPONSE` to
+load a local body when the rule configuration is loaded. Relative paths are
+resolved from the directory containing the rule file.
 
 ## Build System
 

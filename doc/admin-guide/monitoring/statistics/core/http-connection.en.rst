@@ -201,6 +201,79 @@ HTTP Connection
    Current number of TCP connections for tunnels where the far end is the server,
    except for those counted by ``proxy.process.tunnel.current_server_connections_tls``
 
+.. _per-server-connection-metrics:
+
+Per Server Connection Metrics
+-----------------------------
+
+Unlike the metrics above these do not have fixed names. They are created dynamically, one set per
+upstream server group as defined by :ts:cv:`proxy.config.http.per_server.connection.match`, and,
+when the match type is ``both``, one aggregate set per hostname. Whether they are collected at all is
+controlled by :ts:cv:`proxy.config.http.per_server.connection.metric_enabled`, and which of them are
+published by :ts:cv:`proxy.config.http.per_server.connection.metric_aggregate`. An optional
+:ts:cv:`proxy.config.http.per_server.connection.metric_prefix` can be inserted into the names.
+
+Per group names are ``proxy.process.http.per_server.<counter>.<group>``, where ``<group>`` depends on
+the match type: an IP address, an ``address:port`` pair, a hostname, or, for ``both``,
+``<hostname>.<address:port>``. Per hostname names are
+``proxy.process.http.per_server.<counter>.<hostname>``. Aggregates exist only for match type
+``both``, because that is the only match type whose group key carries the hostname. An ``ip`` or
+``port`` group is keyed on the address alone and is shared by every hostname that resolves to it, so
+there is no single hostname to aggregate it under. For match type ``host`` the group name is already
+the bare hostname, so an aggregate would carry the same name as the single group it summarises.
+
+For a group, ``<counter>`` is one of:
+
+current_connection
+   Gauge. The number of connections currently open to the group.
+
+total_connection
+   Counter. The total number of connections ever opened to the group. Never decreases.
+
+blocked_connection
+   Counter. The total number of connection attempts to the group blocked by
+   :ts:cv:`proxy.config.http.per_server.connection.max`. Never decreases.
+
+For a hostname aggregate there are two kinds. The *sums* are those same three counters, each added
+across the groups of that hostname which have aggregation enabled, published at
+:ts:cv:`metric_aggregate <proxy.config.http.per_server.connection.metric_aggregate>` ``1`` and
+``3``. The *max*, published at ``1``, ``2`` and ``3``, is:
+
+current_connection.max
+   Gauge. The largest ``current_connection`` value among the groups of that hostname at the moment
+   of sampling, so the maximum rather than the sum of the groups' current counts. This is useful
+   because :ts:cv:`proxy.config.http.per_server.connection.max` is enforced per group rather than
+   per hostname, so the busiest group is what determines whether connections are about to be
+   blocked. Like ``current_connection`` it rises and falls with traffic and is not a high-water
+   mark. There is no per group ``current_connection.max``; it exists only as a hostname aggregate.
+
+Because :ts:cv:`proxy.config.http.per_server.connection.metric_aggregate` is overridable, a group
+joins its hostname's aggregate only if the mapping that first opened that upstream had aggregation
+enabled. Mappings that disagree for one hostname therefore produce an aggregate over part of it: the
+sums cover a subset of the groups and ``current_connection.max`` takes its maximum over that same
+subset, with nothing in the metric to indicate it. Keeping the setting uniform across the mappings
+for a hostname avoids this.
+
+Because :ts:cv:`proxy.config.http.per_server.connection.match` is also overridable, one hostname can
+use match type ``host`` on one mapping and ``both`` on another. The ``host`` group and the hostname
+aggregate are then published under the same name and merged into a single metric that carries both,
+so a hostname should use one match type throughout.
+
+Every published per server metric is recomputed periodically, currently every 5 seconds, rather than
+on every connection event, so a reader sees a value up to that interval old. This is true of the
+hostname aggregates and of the published per group metrics alike: those are
+mirrored from the internal ones by the same periodic mechanism, not written as connections open and
+close. It applies to ``current_connection.max`` too, which reports the maximum across groups as of
+the last sample rather than a running peak. To obtain the peak over a longer window, compute a
+maximum over time from this gauge in the monitoring system.
+
+At :ts:cv:`metric_aggregate <proxy.config.http.per_server.connection.metric_aggregate>` values
+``2`` and ``3`` the per group metrics still exist internally, since the aggregates are computed from
+them, but are not published. They can be listed with ``traffic_ctl metric match per_server --include-hidden``, which
+reads them directly and so is not subject to the sampling delay above. That visibility is intended
+for debugging and is not a stable interface: the existence, granularity and naming of the per group
+metrics may change independently of the published aggregates.
+
 HTTP/2
 ------
 
@@ -307,7 +380,9 @@ HTTP/2
 
    Represents the total number of closed HTTP/2 connections for exceeding the
    maximum allowed number of ping frames per minute limit which is configured by
-   :ts:cv:`proxy.config.http2.max_ping_frames_per_minute`.
+   :ts:cv:`proxy.config.http2.max_ping_frames_per_minute` for inbound connections
+   and :ts:cv:`proxy.config.http2.max_ping_frames_per_minute_out` for outbound
+   connections.
 
 .. ts:stat:: global proxy.process.http2.max_priority_frames_per_minute_exceeded integer
    :type: counter

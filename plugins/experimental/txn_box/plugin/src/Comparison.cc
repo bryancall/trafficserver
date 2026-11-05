@@ -21,6 +21,7 @@
 */
 
 #include <string>
+#include <utility>
 #include <algorithm>
 
 #include <swoc/bwf_base.h>
@@ -1054,11 +1055,7 @@ struct Base_Binary_Cmp : public Comparison {
   using self_type  = Base_Binary_Cmp; ///< Self reference type.
   using super_type = Comparison;      ///< Parent type.
 public:
-  /// Supported types.
-  using Cmp_Types = swoc::meta::type_list<feature_type_for<INTEGER>, feature_type_for<BOOLEAN>, feature_type_for<IP_ADDR>,
-                                          feature_type_for<DURATION>>;
-
-  static inline const ActiveType TYPES = Cmp_Types::apply<ValueMaskFor>::value; ///< Mask for supported types.
+  static inline const ActiveType TYPES{INTEGER, BOOLEAN, IP_ADDR, DURATION}; ///< Mask for supported types.
 
   /** Instantiate an instance from YAML configuration.
    *
@@ -1391,7 +1388,7 @@ ComboComparison::load(Config &cfg, YAML::Node const &cmp_node, TextView const &k
   } else if (value_node.IsSequence()) {
     cmps.reserve(cmp_node.size());
     for (auto child : value_node) {
-      auto errata = self_type::load_case(cfg, cmps, child);
+      auto errata = self_type::load_case(cfg, cmps, std::move(child));
       if (!errata.is_ok()) {
         errata.note("While parsing {} comparison at {}.", key, cmp_node.Mark());
         return errata;

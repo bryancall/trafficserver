@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -32,6 +32,7 @@
 #include <mutex>
 #include <sstream>
 #include <tuple>
+#include <utility>
 #include "records/RecCore.h"
 #include "tscore/ink_platform.h"
 #include "tscore/ink_config.h"
@@ -74,11 +75,67 @@ public:
   /// String equivalents for @c MatchType.
   static const std::array<std::string_view, static_cast<int>(MATCH_BOTH) + 1> MATCH_TYPE_NAME;
 
+  /** Whether, and how, the per hostname aggregate metrics are published.
+   *
+   * This is independent of @c TxnConfig::metric_enabled, which decides only whether per server
+   * metrics exist for a group at all. The per group metrics are always created in the hidden metric
+   * store; what varies here is what gets published from them.
+   *
+   * Two kinds of per hostname aggregate exist. The *sums* are @c current_connection,
+   * @c total_connection and @c blocked_connection added across the groups of a hostname. The *max*
+   * is @c current_connection.max, the largest @c current_connection among those groups. Which of
+   * them are published, and whether the per group metrics are published alongside, is what this
+   * selects:
+   *
+   *   | value                | per group | sums | max |
+   *   |----------------------|-----------|------|-----|
+   *   | @c AGGREGATE_NONE    | yes       | no   | no  |
+   *   | @c AGGREGATE_GROUP   | yes       | yes  | yes |
+   *   | @c AGGREGATE_MAX     | no        | no   | yes |
+   *   | @c AGGREGATE_SUM     | no        | yes  | yes |
+   *
+   * @c AGGREGATE_NONE is the default and matches the behavior of releases that had no aggregate
+   * support. @c AGGREGATE_MAX is the smallest useful configuration: one metric per hostname,
+   * answering how close the busiest group is to @c per_server.connection.max. @c AGGREGATE_SUM adds
+   * the totals for that hostname. Both keep the published metric count proportional to hostnames
+   * rather than to groups.
+   *
+   * Where a group has no aggregate to belong to -- see @c Group::host_metric_name, which only
+   * yields a name for match type @c MATCH_BOTH -- the per group metrics are published whatever this
+   * says, since otherwise nothing at all would be reported for that group.
+   *
+   * Keeping the per group metrics in the hidden store in every case means changing this at runtime
+   * is only a change of what is registered for publication, with no metric to migrate between the
+   * two stores.
+   *
+   * A change is applied per group, when that group is next constructed, which happens on the first
+   * connection after its count last fell to zero. A group that never goes idle keeps whatever was
+   * in effect when it was created.
+   *
+   * The per group names belong to one group, so a group that stops publishing them retracts them,
+   * see @c ts::Metrics::unlist. The sums and the max are named per hostname and shared by its
+   * groups, so a group that stops publishing those only stops contributing to them, see
+   * @c ts::Metrics::Derived::remove_source; they are retracted once no group of that hostname
+   * publishes them.
+   *
+   * The records layer validates and clamps this to 0..3. A plugin setting the overridable config
+   * directly is not clamped, see @c METRIC_AGGREGATE_CONV; any other value behaves as
+   * @c AGGREGATE_GROUP, publishing everything.
+   */
+  enum MetricAggregate : int {
+    AGGREGATE_NONE  = 0, ///< No hostname aggregate; the per group metrics are published.
+    AGGREGATE_GROUP = 1, ///< Hostname sums and max, published along with the per group metrics.
+    AGGREGATE_MAX   = 2, ///< Hostname max only; the per group metrics stay hidden.
+    AGGREGATE_SUM   = 3, ///< Hostname sums and max; the per group metrics stay hidden.
+  };
+
   /// Per transaction configuration values.
   struct TxnConfig {
-    int       server_max{0};          ///< Maximum concurrent server connections.
-    int       server_min{0};          ///< Minimum keepalive server connections.
-    MatchType server_match{MATCH_IP}; ///< Server match type.
+    int             server_max{0};                    ///< Maximum concurrent server connections.
+    int             server_min{0};                    ///< Minimum keepalive server connections.
+    MatchType       server_match{MATCH_IP};           ///< Server match type.
+    int             metric_enabled{0};                ///< Whether per server metrics exist for a group.
+    MetricAggregate metric_aggregate{AGGREGATE_NONE}; ///< What is published, see @c MetricAggregate.
   };
 
   /** Static configuration values. */
@@ -89,7 +146,6 @@ public:
 
     std::chrono::seconds            client_alert_delay{60}; ///< Alert delay in seconds.
     std::chrono::seconds            server_alert_delay{60}; ///< Alert delay in seconds.
-    bool                            metric_enabled{false};  ///< Enabling per server metrics.
     std::string                     metric_prefix;          ///< Per server metric prefix.
     swoc::IPRangeSet                client_exempt_list; ///< The set of IP addresses to not block due client connection counting.
     mutable ts::bravo::shared_mutex client_exempt_list_mutex; ///< Protects client_exempt_list from concurrent access.
@@ -105,6 +161,7 @@ public:
   static constexpr std::string_view CONFIG_SERVER_VAR_MATCH{"proxy.config.http.per_server.connection.match"};
   static constexpr std::string_view CONFIG_SERVER_VAR_ALERT_DELAY{"proxy.config.http.per_server.connection.alert_delay"};
   static constexpr std::string_view CONFIG_SERVER_VAR_METRIC_ENABLED{"proxy.config.http.per_server.connection.metric_enabled"};
+  static constexpr std::string_view CONFIG_SERVER_VAR_METRIC_AGGREGATE{"proxy.config.http.per_server.connection.metric_aggregate"};
   static constexpr std::string_view CONFIG_SERVER_VAR_METRIC_PREFIX{"proxy.config.http.per_server.connection.metric_prefix"};
 
   /// A record for the outbound connection count.
@@ -144,7 +201,8 @@ public:
     std::atomic<int>    _in_queue{0};   ///< # of connections queued, waiting for a connection.
     std::atomic<Ticker> _last_alert{0}; ///< Absolute time of the last alert.
 
-    // Recording data as metrics
+    // Recording data as metrics. These are always in the hidden metric store when created; see
+    // @c MetricAggregate for how they are published.
     ts::Metrics::Gauge::AtomicType   *_count_metric       = nullptr;
     ts::Metrics::Counter::AtomicType *_count_total_metric = nullptr;
     ts::Metrics::Counter::AtomicType *_blocked_metric     = nullptr;
@@ -154,8 +212,12 @@ public:
      * @param key A populated @c Key structure - values are copied to the @c Group.
      * @param fqdn The full FQDN.
      * @param min_keep_alive The minimum number of origin keep alive connections to maintain.
+     * @param metric_enabled Whether the transaction creating this group wants per server metrics.
+     * @param metric_aggregate What that transaction wants published, see @c MetricAggregate.
+     * @param[in] direction Whether the connection group is inbound or outbound.
      */
-    Group(DirectionType direction, Key const &key, std::string_view fqdn, int min_keep_alive);
+    Group(DirectionType direction, Key const &key, std::string_view fqdn, int min_keep_alive, int metric_enabled = 0,
+          MetricAggregate metric_aggregate = AGGREGATE_NONE);
     ~Group();
     /// Key equality checker.
     static bool equal(Key const &lhs, Key const &rhs);
@@ -170,6 +232,28 @@ public:
     std::time_t        get_last_alert_epoch_time() const;
     static std::string metric_name(const Key &key, std::string_view fqdn, std::string metric_prefix);
 
+    /** Name of the metric which aggregates a value across all groups of a hostname.
+     *
+     * Only @c MATCH_BOTH keys carry both a hostname and an address, so it is the only match type
+     * whose groups can be gathered by hostname at all. @c MATCH_IP and @c MATCH_PORT key on the
+     * address alone and one such group is shared by every hostname resolving to it, so there is no
+     * single hostname to aggregate it under. For @c MATCH_HOST there is exactly one group per
+     * hostname, so an aggregate would be over a set of one, and @c Group::metric_name already
+     * returns the FQDN alone for that match type - identical to what this would return, so
+     * publishing both would collide on one name.
+     *
+     * Note that reasoning holds within a single match type. @c TxnConfig::server_match is
+     * overridable, so one hostname can be @c MATCH_HOST on one mapping and @c MATCH_BOTH on
+     * another, and then that group's own published name and this aggregate name are the same
+     * string and are merged into one derived metric.
+     *
+     * @param key The group key.
+     * @param fqdn The full FQDN.
+     * @param metric_prefix The configured metric prefix.
+     * @return The metric name, or an empty string if @a key is not @c MATCH_BOTH.
+     */
+    static std::string host_metric_name(const Key &key, std::string_view fqdn, std::string metric_prefix);
+
     /// Release the reference count to this group and remove it from the
     /// group table if it is no longer referenced.
     void release();
@@ -180,15 +264,9 @@ public:
     std::shared_ptr<Group> _g;                 ///< Active group for this transaction.
     bool                   _reserved_p{false}; ///< Set if a connection slot has been reserved.
     bool                   _queued_p{false};   ///< Set if the connection is delayed / queued.
-    bool                   _exempt_p{false};   ///< Set if the peer is in the connection exempt list.
 
     /// Check if tracking is active.
     bool is_active() const;
-
-    /// Whether this group is in the connection max exempt list.
-    /// @return @c true if this group should not be blocked due to
-    /// proxy.config.net.per_client.max_connections_in.
-    bool is_exempt() const;
 
     /// Reserve a connection.
     /// @return the number of tracked connections.
@@ -216,7 +294,7 @@ public:
     /** Generate a Warning that a connection was blocked.
      *
      * @param max_connections The maximum configured number of connections for the group.
-     * @param sm_id ID to display in Warning.
+     * @param[in] id ID to display in Warning.
      * @param count Count value to display in Warning.
      * @param addr IP address of the upstream.
      * @param debug_tag Tag to use for the debug message. If no debug message should be generated set this to @c nullptr.
@@ -229,6 +307,14 @@ public:
    * @return A @c Group for the arguments, existing if possible and created if not.
    */
   static TxnState obtain_inbound(IpEndpoint const &addr);
+
+  /** Whether client connections from @a addr are exempt from proxy.config.net.connections_throttle and
+   * proxy.config.net.per_client.max_connections_in.
+   *
+   * @param addr The peer address of the client socket, not an address from a PROXY protocol header.
+   * @return @c true if @a addr is in the client exempt list.
+   */
+  static bool is_client_exempt(IpEndpoint const &addr);
 
   /** Get or create the @c Group for the specified outbound session properties.
    * @param txn_cnf The transaction local configuration.
@@ -281,7 +367,7 @@ public:
    * This sets up the global configuration and any configuration update callbacks needed. It is presumed
    * the caller has set up the actual storage where the global configuration data is stored.
    *
-   * @param config The storage for the global configuration data.
+   * @param[in,out] global The storage for the global configuration data.
    * @param txn The storage for the default per transaction data.
    * @param config_cb The callback to invoke when a configuration is updated.
    */
@@ -346,6 +432,8 @@ public:
   static const MgmtConverter MIN_SERVER_CONV;
   static const MgmtConverter MAX_SERVER_CONV;
   static const MgmtConverter SERVER_MATCH_CONV;
+  static const MgmtConverter METRIC_ENABLED_CONV;
+  static const MgmtConverter METRIC_AGGREGATE_CONV;
 
 protected:
   static GlobalConfig *_global_config; ///< Global configuration data.
@@ -364,7 +452,7 @@ protected:
 
   /// Internal implementation class instance.
   struct TableSingleton {
-    friend ConnectionTracker::Group;
+    friend struct ConnectionTracker::Group;
     std::unordered_map<Group::Key, std::shared_ptr<Group>, GroupMapHelper, GroupMapHelper>
                _table; ///< Hash table of connection groups.
     std::mutex _mutex; ///< Lock for insert, delete, and find.
@@ -429,7 +517,16 @@ ConnectionTracker::Group::metric_name(const Key &key, std::string_view fqdn, std
   default:
     Warning("Invalid matching type to add to per_server.connections metrics");
   }
-  return metric_prefix.empty() ? metric_name : metric_prefix + "." + metric_name;
+  return metric_prefix.empty() ? std::move(metric_name) : metric_prefix + "." + metric_name;
+}
+
+inline std::string
+ConnectionTracker::Group::host_metric_name(const Key &key, std::string_view fqdn, std::string metric_prefix)
+{
+  if (MATCH_BOTH != key._match_type) {
+    return {}; // Only MATCH_BOTH keys carry the hostname needed to gather groups under it.
+  }
+  return metric_prefix.empty() ? std::string(fqdn) : metric_prefix + "." + std::string(fqdn);
 }
 
 inline bool
@@ -438,23 +535,17 @@ ConnectionTracker::TxnState::is_active() const
   return nullptr != _g;
 }
 
-inline bool
-ConnectionTracker::TxnState::is_exempt() const
-{
-  return _exempt_p;
-}
-
 inline int
 ConnectionTracker::TxnState::reserve()
 {
   _reserved_p = true;
-  // If metric enabled, use metric as count
+  // @a _count is always the authoritative count; the metrics, if enabled, only mirror it.
+  auto count = ++_g->_count;
   if (_g->_count_metric != nullptr) {
     ts::Metrics::Gauge::increment(_g->_count_metric);
     ts::Metrics::Counter::increment(_g->_count_total_metric);
-    return _g->_count_metric->load();
   }
-  return ++_g->_count;
+  return count;
 }
 
 inline void
@@ -462,11 +553,9 @@ ConnectionTracker::TxnState::release()
 {
   if (_reserved_p) {
     _reserved_p = false;
-    // If metric enabled, use metric as count
+    --_g->_count;
     if (_g->_count_metric != nullptr) {
       ts::Metrics::Gauge::decrement(_g->_count_metric);
-    } else {
-      --_g->_count;
     }
   }
 }
@@ -490,9 +579,13 @@ ConnectionTracker::TxnState::clear()
 inline void
 ConnectionTracker::TxnState::update_max_count(int count)
 {
-  auto cmax = _g->_count_max.load();
-  if (count > cmax) {
-    _g->_count_max.compare_exchange_weak(cmax, count);
+  auto cmax = _g->_count_max.load(std::memory_order_relaxed);
+
+  while (count > cmax) {
+    if (_g->_count_max.compare_exchange_weak(cmax, count, std::memory_order_relaxed, std::memory_order_relaxed)) {
+      break;
+    }
+    // cmax was reloaded by the failed exchange; retry if we are still larger.
   }
 }
 

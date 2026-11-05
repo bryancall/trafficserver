@@ -19,9 +19,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, TYPE_CHECKING
 
 from antlr4.error.ErrorListener import ErrorListener
+
+if TYPE_CHECKING:
+    from hrw4u.ast_nodes import Span
+    from hrw4u.formatters import ErrorFormatter
 
 _TOKEN_NAMES: Final[dict[str, str]] = {
     'QUALIFIED_IDENT': "qualified name (e.g. 'Namespace::Name')",
@@ -111,13 +115,8 @@ class Hrw4uSyntaxError(Exception):
         self.filename = filename
         self.line = line
         self.column = column
+        self.message = message
         self.source_line = source_line
-
-    def add_context_note(self, context: str) -> None:
-        self.add_note(f"Context: {context}")
-
-    def add_resolution_hint(self, hint: str) -> None:
-        self.add_note(f"Hint: {hint}")
 
 
 class SymbolResolutionError(Exception):
@@ -128,7 +127,13 @@ class SymbolResolutionError(Exception):
 
     def add_symbol_suggestion(self, suggestions: list[str]) -> None:
         if suggestions:
-            self.add_note(f"     | Did you mean: {suggestions[0]}?")
+            self.add_note(f"Did you mean: {suggestions[0]}?")
+
+
+def _with_notes(error: Hrw4uSyntaxError, exc: Exception) -> Hrw4uSyntaxError:
+    for note in getattr(exc, '__notes__', ()):
+        error.add_note(note)
+    return error
 
 
 def hrw4u_error(filename: str, ctx: object, exc: Exception) -> Hrw4uSyntaxError:
@@ -138,11 +143,7 @@ def hrw4u_error(filename: str, ctx: object, exc: Exception) -> Hrw4uSyntaxError:
     line, col, source_line = _extract_source_context(ctx) if ctx else (0, 0, "")
     error = Hrw4uSyntaxError(filename, line, col, str(exc), source_line)
 
-    if hasattr(exc, '__notes__') and exc.__notes__:
-        for note in exc.__notes__:
-            error.add_note(note)
-
-    return error
+    return _with_notes(error, exc)
 
 
 def format_diagnostic(filename: str, ctx: object, severity: str, message: str) -> str:
@@ -168,15 +169,20 @@ class Warning:
         line, col, source_line = _extract_source_context(ctx)
         return cls(filename=filename, line=line, column=col, message=message, source_line=source_line)
 
+    @classmethod
+    def from_span(cls, span: Span, message: str, source_line: str = "") -> Warning:
+        return cls(filename=span.file, line=span.line, column=span.column, message=message, source_line=source_line)
+
 
 class ErrorCollector:
     """Collects multiple syntax errors and warnings for comprehensive reporting."""
 
-    def __init__(self, max_errors: int = 5) -> None:
+    def __init__(self, max_errors: int = 5, formatter: "ErrorFormatter | None" = None) -> None:
         self.errors: list[Hrw4uSyntaxError] = []
         self.max_errors = max_errors
         self.warnings: list[Warning] = []
         self._sandbox_message: str | None = None
+        self._formatter = formatter
 
     def add_error(self, error: Hrw4uSyntaxError) -> None:
         self.errors.append(error)
@@ -200,35 +206,11 @@ class ErrorCollector:
         return bool(self.warnings)
 
     def get_error_summary(self) -> str:
-        if not self.errors and not self.warnings:
-            return "No errors found."
-
-        lines: list[str] = []
-
-        if self.errors:
-            count = len(self.errors)
-            lines.append(f"Found {count} error{'s' if count > 1 else ''}:")
-
-            for error in self.errors:
-                lines.append(str(error))
-                if hasattr(error, '__notes__') and error.__notes__:
-                    lines.extend(error.__notes__)
-
-        if self.warnings:
-            if self.errors:
-                lines.append("")
-            count = len(self.warnings)
-            lines.append(f"{count} warning{'s' if count > 1 else ''}:")
-            lines.extend(w.format() for w in self.warnings)
-
-        if self.at_limit:
-            lines.append(f"(stopped after {self.max_errors} errors)")
-
-        if self._sandbox_message:
-            lines.append("")
-            lines.append(self._sandbox_message)
-
-        return "\n".join(lines)
+        formatter = self._formatter
+        if formatter is None:
+            from hrw4u.formatters import PlainTextFormatter
+            formatter = PlainTextFormatter()
+        return formatter.format_errors(self.errors, self.warnings, self._sandbox_message, self.at_limit, self.max_errors)
 
 
 class CollectingErrorListener(ErrorListener):
@@ -257,3 +239,32 @@ class CollectingErrorListener(ErrorListener):
 
         if self.error_collector.at_limit:
             raise error
+
+
+class SourceMap:
+    """Line lookup for diagnostics, keyed by the file a span names."""
+
+    def __init__(self) -> None:
+        self._lines: dict[str, list[str]] = {}
+
+    def add(self, filename: str, text: str) -> None:
+        self._lines[filename] = text.splitlines()
+
+    def line_at(self, span: Span) -> str:
+        lines = self._lines.get(span.file, [])
+        index = span.line - 1
+        if 0 <= index < len(lines):
+            return lines[index]
+        return ""
+
+    def error_at(self, span: Span, message: str) -> Hrw4uSyntaxError:
+        return Hrw4uSyntaxError(span.file, span.line, span.column, message, self.line_at(span))
+
+
+def hrw4u_error_at(span: Span, exc: Exception, source_line: str = "") -> Hrw4uSyntaxError:
+    if isinstance(exc, Hrw4uSyntaxError):
+        return exc
+
+    error = Hrw4uSyntaxError(span.file, span.line, span.column, str(exc), source_line)
+
+    return _with_notes(error, exc)

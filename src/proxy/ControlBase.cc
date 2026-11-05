@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -34,6 +34,8 @@
 #include "tscore/ink_defs.h"
 #include "tscore/ink_time.h"
 
+#include "tsutil/StringCompare.h"
+
 #include "proxy/hdrs/URL.h"
 #include "tscore/Tokenizer.h"
 #include "proxy/ControlBase.h"
@@ -42,6 +44,9 @@
 #include "proxy/ControlMatcher.h"
 #include "proxy/hdrs/HdrUtils.h"
 
+#include "swoc/string_view_util.h"
+
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -487,7 +492,7 @@ bool
 MethodMod::check(HttpRequestData *req) const
 {
   auto method{req->hdr->method_get()};
-  return method.length() >= text.length() && 0 == strncasecmp(method.data(), text.data(), text.length());
+  return method.length() == text.length() && 0 == strcasecmp(method, std::string_view(text.data(), text.length()));
 }
 std::unique_ptr<MethodMod>
 MethodMod::make(char *value, const char **)
@@ -658,9 +663,9 @@ InternalMod::make(char *value, const char **error)
 {
   InternalMod tmp;
 
-  if (0 == strncasecmp("false", value, 5)) {
+  if (ts::iequals("false", value)) {
     tmp.flag = false;
-  } else if (0 == strncasecmp("true", value, 4)) {
+  } else if (ts::iequals("true", value)) {
     tmp.flag = true;
   } else {
     *error = "Value must be true or false";

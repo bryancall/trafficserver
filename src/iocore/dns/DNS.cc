@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -92,9 +92,7 @@ is_addr_query(int qtype)
 
 DNSProcessor                    dnsProcessor;
 ClassAllocator<DNSEntry, false> dnsEntryAllocator("dnsEntryAllocator");
-// Users are expected to free these entries in short order!
-// We could page align this buffer to enable page flipping for recv...
-ClassAllocator<HostEnt, false> dnsBufAllocator("dnsBufAllocator", 2);
+extern ClassAllocator<HostEnt>  dnsBufAllocator;
 
 //
 // Function Prototypes
@@ -149,12 +147,6 @@ bool
 HostEnt::isNameError()
 {
   return get_rcode(this) == NXDOMAIN;
-}
-
-void
-HostEnt::free()
-{
-  dnsBufAllocator.free(this);
 }
 
 size_t
@@ -483,6 +475,25 @@ DNSHandler::open_cons(sockaddr const *target, bool failed, int icon)
   }
 }
 
+void
+DNSHandler::open_all_rr_cons()
+{
+  int max_nscount = m_res->nscount;
+  if (max_nscount > MAX_NAMED) {
+    max_nscount = MAX_NAMED;
+  }
+  n_con = 0;
+  for (int i = 0; i < max_nscount; i++) {
+    ip_port_text_buffer buff;
+    sockaddr           *sa = &m_res->nsaddr_list[i].sa;
+    if (ats_is_ip(sa)) {
+      open_cons(sa, false, n_con);
+      ++n_con;
+      Dbg(dbg_ctl_dns_pas, "opened connection to %s, n_con = %d", ats_ip_nptop(sa, buff, sizeof(buff)), n_con);
+    }
+  }
+}
+
 /**
  Close the old TCP connection and open a new one
  */
@@ -526,7 +537,7 @@ DNSHandler::open_con(sockaddr const *target, bool failed, int icon, bool over_tc
 
   Dbg(dbg_ctl_dns, "open_con: opening connection %s", ats_ip_nptop(target, ip_text, sizeof ip_text));
 
-  if (!cur_con.sock.is_ok()) { // Remove old FD from epoll fd
+  if (cur_con.sock.is_ok()) { // Remove old FD from epoll fd
     cur_con.close();
   }
 
@@ -600,20 +611,7 @@ DNSHandler::startEvent(int /* event ATS_UNUSED */, Event *e)
        *
        *   The first DNS server is assigned to DNSHandler::ip within open_con() function.
        */
-      int max_nscount = m_res->nscount;
-      if (max_nscount > MAX_NAMED) {
-        max_nscount = MAX_NAMED;
-      }
-      n_con = 0;
-      for (int i = 0; i < max_nscount; i++) {
-        ip_port_text_buffer buff;
-        sockaddr           *sa = &m_res->nsaddr_list[i].sa;
-        if (ats_is_ip(sa)) {
-          open_cons(sa, false, n_con);
-          ++n_con;
-          Dbg(dbg_ctl_dns_pas, "opened connection to %s, n_con = %d", ats_ip_nptop(sa, buff, sizeof(buff)), n_con);
-        }
-      }
+      open_all_rr_cons();
       dns_ns_rr_init_down = 0;
     } else {
       /* Primary - Secondary mode:
@@ -655,8 +653,14 @@ DNSHandler::startEvent_sdns(int /* event ATS_UNUSED */, Event *e)
   this->validate_ip();
 
   SET_HANDLER(&DNSHandler::mainEvent);
-  open_cons(nullptr, false, 0);
-  n_con = 1;
+  if (dns_ns_rr) {
+    // Split DNS opens one connection per nameserver like the default resolver,
+    // but does not schedule the default resolver's periodic retry.
+    open_all_rr_cons();
+  } else {
+    open_cons(nullptr, false, 0);
+    n_con = 1;
+  }
 
   return EVENT_CONT;
 }
@@ -883,25 +887,23 @@ DNSHandler::recv_dns(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED */)
           dnsc->tcp_data.buf_ptr = make_ptr(dnsBufAllocator.alloc());
         }
         if (dnsc->tcp_data.total_length == 0) {
-          // see if TS gets a two-byte size
-          uint16_t tmp = 0;
-          res          = dnsc->sock.recv(&tmp, sizeof(tmp), MSG_PEEK);
-          if (res == -EAGAIN || res == 1) {
-            break;
-          }
-          if (res <= 0) {
-            goto Lerror;
-          }
-          // reading total size
-          res = dnsc->sock.recv(&(dnsc->tcp_data.total_length), sizeof(dnsc->tcp_data.total_length), 0);
+          // Read the 2-byte length prefix incrementally
+          res = dnsc->sock.recv(dnsc->tcp_data.length_buf + dnsc->tcp_data.length_read,
+                                sizeof(dnsc->tcp_data.length_buf) - dnsc->tcp_data.length_read, 0);
           if (res == -EAGAIN) {
             break;
           }
           if (res <= 0) {
             goto Lerror;
           }
-          dnsc->tcp_data.total_length = ntohs(dnsc->tcp_data.total_length);
-          if (res != sizeof(dnsc->tcp_data.total_length)) {
+          dnsc->tcp_data.length_read += res;
+          if (dnsc->tcp_data.length_read < sizeof(dnsc->tcp_data.length_buf)) {
+            continue;
+          }
+          uint16_t net_length;
+          memcpy(&net_length, dnsc->tcp_data.length_buf, sizeof(net_length));
+          dnsc->tcp_data.total_length = ntohs(net_length);
+          if (dnsc->tcp_data.total_length == 0) {
             goto Lerror;
           }
         }
@@ -1526,9 +1528,8 @@ DNSEntry::post(DNSHandler *h, HostEnt *ent)
 int
 DNSEntry::postOneEvent(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED */)
 {
-  if (!action.cancelled) {
+  if (action.call_back(DNS_EVENT_LOOKUP, result_ent.get())) {
     Dbg(dbg_ctl_dns, "called back continuation for %s", qname);
-    action.continuation->handleEvent(DNS_EVENT_LOOKUP, result_ent.get());
   }
   result_ent   = nullptr;
   action.mutex = nullptr;
@@ -1721,8 +1722,11 @@ dns_process(DNSHandler *handler, HostEnt *buf, int len)
     unsigned char *here = reinterpret_cast<unsigned char *>(buf->buf) + HFIXEDSZ;
     if (e->qtype == T_SRV) {
       for (int ctr = ntohs(h->qdcount); ctr > 0; ctr--) {
-        int strlen  = dn_skipname(here, eom);
-        here       += strlen + QFIXEDSZ;
+        int strlen = dn_skipname(here, eom);
+        if (strlen < 0 || static_cast<size_t>(eom - here) < static_cast<size_t>(strlen) + QFIXEDSZ) {
+          goto Lerror;
+        }
+        here += strlen + QFIXEDSZ;
       }
     }
     //
@@ -1737,6 +1741,10 @@ dns_process(DNSHandler *handler, HostEnt *buf, int len)
         break;
       }
       cp += n;
+      if (static_cast<size_t>(eom - cp) < RRFIXEDSZ) {
+        ++error;
+        break;
+      }
       short int type;
       NS_GET16(type, cp);
       cp += NS_INT16SZ;       // NS_GET16(cls, cp);
@@ -1745,6 +1753,10 @@ dns_process(DNSHandler *handler, HostEnt *buf, int len)
         buf->ttl = temp_ttl;
       }
       NS_GET16(n, cp);
+      if (n > eom - cp) {
+        ++error;
+        break;
+      }
 
       //
       // Decode cname
@@ -1814,13 +1826,26 @@ dns_process(DNSHandler *handler, HostEnt *buf, int len)
         if (buf->srv_hosts.hosts.size() >= hostdb_round_robin_max_count) {
           break;
         }
-        cp                            = here; /* hack */
-        int strlen                    = dn_skipname(cp, eom);
-        cp                           += strlen;
+        cp         = here; /* hack */
+        int strlen = dn_skipname(cp, eom);
+        if (strlen < 0) {
+          ++error;
+          break;
+        }
+        cp += strlen;
+        if (static_cast<size_t>(eom - cp) < SRV_FIXEDSZ) {
+          ++error;
+          break;
+        }
         const unsigned char *srv_off  = cp;
         cp                           += SRV_FIXEDSZ;
-        cp                           += dn_skipname(cp, eom);
-        here                          = cp; /* hack */
+        int srv_namelen               = dn_skipname(cp, eom);
+        if (srv_namelen < 0) {
+          ++error;
+          break;
+        }
+        cp   += srv_namelen;
+        here  = cp; /* hack */
 
         SRV srv;
 
@@ -1875,8 +1900,9 @@ dns_process(DNSHandler *handler, HostEnt *buf, int len)
           memcpy((*hap++ = bp), cp, n);
           Dbg(dbg_ctl_dns, "received %s = %s", QtypeName(type),
               inet_ntop(T_AAAA == type ? AF_INET6 : AF_INET, bp, ip_string, sizeof(ip_string)));
-          bp += n;
-          cp += n;
+          bp     += n;
+          cp     += n;
+          buflen  = sizeof(buf->hostbuf) - (bp - buf->hostbuf);
         }
       } else {
         goto Lerror;

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -27,6 +27,7 @@
 #include "P_CacheInternal.h"
 #include "iocore/cache/Cache.h"
 #include "tscore/InkErrno.h"
+#include "ts/ats_probe.h"
 #include "tsutil/DbgCtl.h"
 
 namespace
@@ -277,6 +278,8 @@ CacheVC::openWriteCloseDir(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED *
       ink_assert(!is_io_in_progress());
       VC_SCHED_LOCK_RETRY();
     }
+    ATS_PROBE6(cache_rww_writer_close, stripe->fd, reinterpret_cast<intptr_t>(this), first_key.slice64(0), closed,
+               static_cast<int>(f.readers), total_len);
     stripe->close_write(this);
     if (closed < 0 && fragment) {
       stripe->directory.remove(&earliest_key, stripe, &earliest_dir);
@@ -585,6 +588,8 @@ Lagain:
     vio.get_reader()->consume(avail);
     vio.ndone += avail;
     total_len += avail;
+    ATS_PROBE6(cache_rww_writer_produce, stripe->fd, reinterpret_cast<intptr_t>(this), first_key.slice64(0), total_len, avail,
+               od ? od->num_writers : 0);
   }
   length = static_cast<uint64_t>(towrite);
   if (length > frag_size && (length < frag_size + frag_size / 4)) {
@@ -638,8 +643,11 @@ CacheVC::openWriteOverwrite(int event, Event *e)
     if (!(doc->first_key == first_key)) {
       goto Lcollision;
     }
+    // Still overwrite a corrupt doc in place, but keep get_header and get_single_data from trusting its lengths.
     od->first_dir = dir;
-    first_buf     = buf;
+    if (doc->magic == DOC_MAGIC) {
+      first_buf = buf;
+    }
     goto Ldone;
   }
 Lcollision: {
@@ -786,8 +794,8 @@ CacheVC::openWriteStartBegin(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED
   if (((err = stripe->open_write_lock(this, false, 1)) > 0)) {
     ts::Metrics::Counter::increment(cache_rsb.status[op_type].failure);
     ts::Metrics::Counter::increment(stripe->cache_vol->vol_rsb.status[op_type].failure);
-    free_CacheVC(this);
     _action.continuation->handleEvent(CACHE_EVENT_OPEN_WRITE_FAILED, reinterpret_cast<void *>(-err));
+    free_CacheVC(this);
     return EVENT_DONE;
   }
   if (err < 0) {

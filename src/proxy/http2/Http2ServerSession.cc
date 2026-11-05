@@ -2,7 +2,7 @@
 
   Http2ServerSession.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -76,6 +76,8 @@ Http2ServerSession::start()
   SET_HANDLER(&Http2ServerSession::main_event_handler);
   HTTP2_SET_SESSION_HANDLER(&Http2ServerSession::state_start_frame_read);
 
+  _vc->set_inactivity_timeout(HRTIME_SECONDS(Http2::accept_no_activity_timeout));
+
   VIO *read_vio = this->do_io_read(this, INT64_MAX, this->read_buffer);
   write_vio     = this->do_io_write(this, INT64_MAX, this->_write_buffer_reader);
 
@@ -103,9 +105,8 @@ Http2ServerSession::new_connection(NetVConnection *new_vc, MIOBuffer *iobuf, IOB
   this->_milestones.mark(Http2SsnMilestone::OPEN);
 
   // Unique client session identifier.
-  this->con_id = ProxySession::next_connection_id();
-  this->_vc    = new_vc;
-  _vc->set_inactivity_timeout(HRTIME_SECONDS(Http2::accept_no_activity_timeout));
+  this->con_id         = ProxySession::next_connection_id();
+  this->_vc            = new_vc;
   this->schedule_event = nullptr;
   this->mutex          = new_vc->mutex;
 
@@ -139,6 +140,9 @@ Http2ServerSession::new_connection(NetVConnection *new_vc, MIOBuffer *iobuf, IOB
 
   this->_handle_if_ssl(new_vc);
 
+  if (has_session_hook(TS_HTTP_SSN_START_HOOK)) {
+    _vc->cancel_inactivity_timeout();
+  }
   do_api_callout(TS_HTTP_SSN_START_HOOK);
 
   this->add_session();
@@ -371,6 +375,27 @@ Http2ServerSession::remove_session()
   }
 }
 
+void
+Http2ServerSession::set_half_close_local_flag(bool flag)
+{
+  // Detect the OFF -> ON transition before delegating to the base, which
+  // is what flips the underlying flag.
+  bool const transitioning_to_half_close = !this->get_half_close_local_flag() && flag;
+  Http2CommonSession::set_half_close_local_flag(flag);
+  if (transitioning_to_half_close) {
+    // Once `half_close_local` is set, `create_initiating_stream` on this
+    // session short-circuits to REFUSED_STREAM. Any future
+    // `acquire_session` lookup that finds this session in the pool will
+    // therefore hand back a session that immediately fails the next
+    // origin request with `HTTP/2 stream error code=0x07 refused to
+    // create new stream, because session is in half_close state`. Evict
+    // it now so the next request opens (or matches) a healthy session
+    // instead. The session itself stays alive long enough for any
+    // already-attached transactions to drain.
+    this->remove_session();
+  }
+}
+
 bool
 Http2ServerSession::is_multiplexing() const
 {
@@ -422,11 +447,10 @@ Http2ServerSession::is_protocol_framed() const
 uint64_t
 Http2ServerSession::get_received_frame_count(uint64_t type) const
 {
-  if (type == 999) { // TS_SSN_INFO_RECEIVED_FRAME_COUNT_H2_UNKNOWN in apidefs.h.in
-    return this->_frame_counts_in[HTTP2_FRAME_TYPE_MAX];
-  } else {
-    return this->_frame_counts_in[type];
+  if (type > HTTP2_FRAME_TYPE_MAX) {
+    type = HTTP2_FRAME_TYPE_MAX;
   }
+  return this->_frame_counts_in[type];
 }
 
 std::function<PoolableSession *()> create_h2_server_session = []() -> PoolableSession * {

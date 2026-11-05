@@ -3,7 +3,7 @@
   TLSSNISupport implements common methods and members to
   support protocols for Server Name Indication
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -30,6 +30,7 @@
 #include <netinet/in.h>
 #include <openssl/ssl.h>
 
+#include <string>
 #include <string_view>
 #include <memory>
 #include <optional>
@@ -84,7 +85,7 @@ public:
     ClientHelloContainer _chc;
 #if HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
     int   *_ext_ids = nullptr;
-    size_t _ext_len;
+    size_t _ext_len{0};
 #endif
   };
 
@@ -105,6 +106,10 @@ public:
    */
   void on_client_hello(ClientHello &client_hello);
 
+  /** Forget the CLIENT_HELLO passed to on_client_hello(), which is only valid during the ClientHello callback.
+   */
+  void clear_client_hello();
+
   /** Process the servername extension when a client uses one in the TLS handshake.
    *
    * This is for client-side connections.
@@ -122,6 +127,7 @@ public:
    * @return True if the servername was set successfully, false otherwise.
    */
   bool set_sni_server_name(SSL *ssl, char const *name);
+  void set_sni_server_name(std::string_view name);
 
   /**
    * Get the server name in SNI
@@ -132,15 +138,17 @@ public:
   bool        would_have_actions_for(const char *servername, IpEndpoint remote, int &enforcement_policy);
 
   struct HintsFromSNI {
-    std::optional<uint32_t>         http2_buffer_water_mark;
-    std::optional<uint32_t>         server_max_early_data;
-    std::optional<uint32_t>         http2_initial_window_size_in;
-    std::optional<int32_t>          http2_max_settings_frames_per_minute;
-    std::optional<int32_t>          http2_max_ping_frames_per_minute;
-    std::optional<int32_t>          http2_max_priority_frames_per_minute;
-    std::optional<int32_t>          http2_max_rst_stream_frames_per_minute;
-    std::optional<int32_t>          http2_max_continuation_frames_per_minute;
-    std::optional<std::string_view> outbound_sni_policy;
+    std::optional<uint32_t>    http2_buffer_water_mark;
+    std::optional<uint32_t>    server_max_early_data;
+    std::optional<uint32_t>    http2_initial_window_size_in;
+    std::optional<int32_t>     http2_max_settings_frames_per_minute;
+    std::optional<int32_t>     http2_max_ping_frames_per_minute;
+    std::optional<int32_t>     http2_max_priority_frames_per_minute;
+    std::optional<int32_t>     http2_max_rst_stream_frames_per_minute;
+    std::optional<int32_t>     http2_max_continuation_frames_per_minute;
+    std::optional<int32_t>     ssl_ticket_enabled;
+    std::optional<int32_t>     ssl_ticket_number;
+    std::optional<std::string> outbound_sni_policy;
   } hints_from_sni;
 
 protected:

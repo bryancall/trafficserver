@@ -18,6 +18,7 @@
 
 #include "cookiejar.h"
 #include "strip.h"
+#include <cstdlib>
 #include <cstring>
 
 /* allowed cookie-name definition from RFC
@@ -210,7 +211,7 @@ CookieJar::verify_name(char *name)
     /* if we get any invalid characters then return failure
      * in order to skip this cookie completely */
 
-    if (rfc_cookie_name_table[static_cast<int>(*p)] == 0) {
+    if (rfc_cookie_name_table[static_cast<unsigned char>(*p)] == 0) {
       return -1;
     }
   }

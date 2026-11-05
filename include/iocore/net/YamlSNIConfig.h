@@ -1,6 +1,6 @@
 /** @file
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -55,10 +55,14 @@ TSDECL(verify_server_properties);
 TSDECL(verify_origin_server);
 TSDECL(client_cert);
 TSDECL(client_key);
+TSDECL(client_rpk_enabled);
+TSDECL(server_rpk_ca);
 TSDECL(client_sni_policy);
 TSDECL(server_cipher_suite);
 TSDECL(server_TLSv1_3_cipher_suites);
 TSDECL(server_groups_list);
+TSDECL(ssl_ticket_enabled);
+TSDECL(ssl_ticket_number);
 TSDECL(ip_allow);
 TSDECL(valid_tls_versions_in);
 TSDECL(valid_tls_version_min_in);
@@ -103,13 +107,17 @@ struct YamlSNIConfig {
     Property            verify_server_properties = Property::UNSET;
     std::string         client_cert;
     std::string         client_key;
+    bool                client_rpk_enabled = false;
+    std::string         server_rpk_ca;
     std::string         client_sni_policy;
     std::string         server_cipher_suite;
     std::string         server_TLSv1_3_cipher_suites;
     std::string         server_groups_list;
+    std::optional<int>  ssl_ticket_enabled;
+    std::optional<int>  ssl_ticket_number;
     std::string         ip_allow;
-    bool                protocol_unset = true;
-    unsigned long       protocol_mask;
+    bool                protocol_unset           = true;
+    unsigned long       protocol_mask            = 0;
     int                 valid_tls_version_min_in = -1;
     int                 valid_tls_version_max_in = -1;
     std::vector<int>    tunnel_alpn{};

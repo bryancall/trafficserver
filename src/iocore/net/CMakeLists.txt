@@ -26,6 +26,7 @@ add_library(
   EventIO.cc
   YamlSNIConfig.cc
   Net.cc
+  NetEvent.cc
   NetHandler.cc
   NetVCOptions.cc
   NetAcceptEventIO.cc
@@ -47,11 +48,13 @@ add_library(
   SSLNetVConnection.cc
   SSLNextProtocolAccept.cc
   SSLNextProtocolSet.cc
+  SSLRPKUtils.cc
   SSLSNIConfig.cc
   SSLStats.cc
   SSLSessionCache.cc
   SSLSessionTicket.cc
   SSLUtils.cc
+  SSLKeyUtils.cc
   OCSPStapling.cc
   TLSBasicSupport.cc
   TLSEventSupport.cc
@@ -61,8 +64,8 @@ add_library(
   TLSSessionResumptionSupport.cc
   TLSSNISupport.cc
   TLSTunnelSupport.cc
+  TLSCertCompression.cc
   UDPEventIO.cc
-  UDPIOEvent.cc
   UnixConnection.cc
   UnixNet.cc
   UnixNetAccept.cc
@@ -75,22 +78,27 @@ add_library(
 )
 add_library(ts::inknet ALIAS inknet)
 
-if(TS_USE_QUIC)
+if(TS_USE_QUIC OR TS_USE_QMUX)
   add_subdirectory(quic)
 
-  target_sources(
-    inknet
-    PRIVATE QUICClosedConCollector.cc
-            QUICMultiCertConfigLoader.cc
-            QUICNet.cc
-            QUICNetProcessor.cc
-            QUICNetVConnection.cc
-            QUICNextProtocolAccept.cc
-            QUICPacketHandler.cc
-            QUICSupport.cc
-  )
+  target_sources(inknet PRIVATE QUICSupport.cc)
+  target_link_libraries(inknet PUBLIC ts::quic)
+endif()
 
-  target_link_libraries(inknet PUBLIC quiche::quiche ts::quic)
+if(TS_USE_QUIC)
+  target_sources(inknet PRIVATE QUICClosedConCollector.cc QUICMultiCertConfigLoader.cc QUICNextProtocolAccept.cc)
+
+  if(TS_HAS_OPENSSL_QUIC)
+    target_sources(inknet PRIVATE OpenSSLQUICNetProcessor.cc OpenSSLQUICNetVConnection.cc OpenSSLQUICPacketHandler.cc)
+  elseif(TS_HAS_QUICHE)
+    target_sources(inknet PRIVATE QUICNet.cc QUICNetProcessor.cc QUICNetVConnection.cc QUICPacketHandler.cc)
+    target_link_libraries(inknet PUBLIC quiche::quiche)
+  endif()
+endif()
+
+if(TS_USE_QMUX)
+  add_subdirectory(qmux)
+  target_link_libraries(inknet PUBLIC quiche::quiche ts::qmux)
 endif()
 
 if(BUILD_REGRESSION_TESTING OR BUILD_TESTING)
@@ -108,7 +116,7 @@ target_link_libraries(
          OpenSSL::Crypto
          OpenSSL::SSL
          ts::tsapibackend
-  PRIVATE ts::tsutil yaml-cpp::yaml-cpp
+  PRIVATE ts::config ts::tsutil yaml-cpp::yaml-cpp
 )
 
 # Is this necessary?
@@ -116,12 +124,55 @@ if(TS_USE_LINUX_IO_URING)
   target_link_libraries(inknet PUBLIC ts::inkuring)
 endif()
 
+# Link cert compression libraries after OpenSSL so that OpenSSL include
+# directories appear first in the search order, preventing broad system
+# include paths (e.g. from Homebrew's zstd) from shadowing them.
+if(HAVE_SSL_CTX_ADD_CERT_COMPRESSION_ALG)
+  target_sources(inknet PRIVATE TLSCertCompression_zlib.cc)
+  if(HAVE_BROTLI_ENCODE_H)
+    target_sources(inknet PRIVATE TLSCertCompression_brotli.cc)
+    target_link_libraries(inknet PRIVATE brotli::brotlienc brotli::brotlidec)
+  endif()
+  if(HAVE_ZSTD_H)
+    target_sources(inknet PRIVATE TLSCertCompression_zstd.cc)
+    target_link_libraries(inknet PRIVATE zstd::zstd)
+  endif()
+endif()
+
 if(BUILD_TESTING)
   # libinknet_stub.cc is need because GNU ld is sensitive to the order of static libraries on the command line, and we have a cyclic dependency between inknet and proxy
   add_executable(
-    test_net libinknet_stub.cc NetVCTest.cc unit_tests/test_ProxyProtocol.cc unit_tests/test_SSLSNIConfig.cc
-             unit_tests/test_YamlSNIConfig.cc unit_tests/unit_test_main.cc
+    test_net
+    libinknet_stub.cc
+    NetVCTest.cc
+    unit_tests/test_ConnectionTracker.cc
+    unit_tests/test_EventIOMigration.cc
+    unit_tests/test_NetHandler.cc
+    unit_tests/test_ProxyProtocol.cc
+    unit_tests/test_SSLCertLookup.cc
+    unit_tests/test_SSLNetVConnectionAsyncEp.cc
+    unit_tests/test_SSLRPKUtils.cc
+    unit_tests/test_SSLSecret.cc
+    unit_tests/test_SSLSNIConfig.cc
+    unit_tests/test_UnixNetVConnectionTimeouts.cc
+    unit_tests/test_YamlSNIConfig.cc
+    unit_tests/test_OCSPStapling.cc
+    unit_tests/unit_test_main.cc
+    unit_tests/benchmark_TLSCertCompression.cc
+    unit_tests/benchmark_InactivityCop.cc
   )
+  if(SSLLIB_IS_AT_LEAST_OPENSSL3)
+    target_sources(test_net PRIVATE unit_tests/test_SSLDHParams.cc)
+  endif()
+  if(TS_USE_QUIC OR TS_USE_QMUX)
+    target_sources(test_net PRIVATE unit_tests/test_QUICConnectionId.cc)
+  endif()
+  if(TS_USE_QUIC)
+    target_sources(test_net PRIVATE unit_tests/test_QUICTokenKeyConfig.cc)
+  endif()
+  if(TS_USE_QUIC OR TS_USE_QMUX)
+    target_sources(test_net PRIVATE unit_tests/test_QUICStream.cc)
+  endif()
   # Use link groups to solve circular dependency
   set(LINK_GROUP_LIBS
       ts::logging
@@ -137,8 +188,14 @@ if(BUILD_TESTING)
       ts::http
       ts::http_remap
   )
-  if(TS_USE_QUIC)
+  if(TS_USE_QUIC OR TS_USE_QMUX)
     list(APPEND LINK_GROUP_LIBS quic http3)
+    if(TS_HAS_QUICHE)
+      list(APPEND LINK_GROUP_LIBS quiche::quiche)
+    endif()
+  endif()
+  if(TS_USE_QMUX)
+    list(APPEND LINK_GROUP_LIBS qmux)
   endif()
   if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED)
     string(JOIN "," LINK_GROUP_LIBS_CSV ${LINK_GROUP_LIBS})
@@ -172,12 +229,12 @@ if(BUILD_TESTING)
   endif()
   set(LIBINKNET_UNIT_TEST_DIR "${CMAKE_SOURCE_DIR}/src/iocore/net/unit_tests")
   target_compile_definitions(test_net PRIVATE LIBINKNET_UNIT_TEST_DIR=${LIBINKNET_UNIT_TEST_DIR})
-  add_catch2_test(NAME test_net COMMAND test_net)
-
-  if(NOT APPLE)
-    # Disable ORD violation caused by double definition inside a stub file libinknet_stub.cc
+  if(APPLE)
+    add_catch2_test(NAME test_net COMMAND test_net)
+  else()
+    # Disable ODR violation caused by double definition inside a stub file libinknet_stub.cc
     # see remap_test_dlopen_leak_suppression.txt for more info.
-    set_tests_properties(test_net PROPERTIES ENVIRONMENT "ASAN_OPTIONS=detect_odr_violation=0")
+    add_catch2_test(NAME test_net COMMAND test_net ENVIRONMENT "ASAN_OPTIONS=detect_odr_violation=0")
   endif()
 endif()
 

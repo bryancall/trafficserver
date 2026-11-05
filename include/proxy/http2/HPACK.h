@@ -2,7 +2,7 @@
 
   [RFC 7541] HPACK: Header Compression for HTTP/2
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -71,16 +71,22 @@ class MIMEFieldWrapper
 {
 public:
   MIMEFieldWrapper(MIMEField *f, HdrHeap *hh, MIMEHdrImpl *impl) : _field(f), _heap(hh), _mh(impl) {}
-  void
+  MIMEFieldWrapper(HdrHeap *hh, MIMEHdrImpl *impl) : _heap(hh), _mh(impl) {}
+  bool
   name_set(const char *name, int name_len)
   {
-    _field->name_set(_heap, _mh, std::string_view{name, static_cast<std::string_view::size_type>(name_len)});
+    std::string_view name_view{name, static_cast<std::string_view::size_type>(name_len)};
+
+    if (_field == nullptr) {
+      _field = mime_field_create_for_name(_heap, _mh, name_view);
+    }
+    return _field->name_set(_heap, _mh, name_view);
   }
 
-  void
+  bool
   value_set(const char *value, int value_len)
   {
-    _field->value_set(_heap, _mh, std::string_view{value, static_cast<std::string_view::size_type>(value_len)});
+    return _field->value_set(_heap, _mh, std::string_view{value, static_cast<std::string_view::size_type>(value_len)});
   }
 
   std::string_view
@@ -101,8 +107,14 @@ public:
     return _field;
   }
 
+  MIMEField *
+  field_get()
+  {
+    return _field;
+  }
+
 private:
-  MIMEField   *_field;
+  MIMEField   *_field = nullptr;
   HdrHeap     *_heap;
   MIMEHdrImpl *_mh;
 };
@@ -143,14 +155,14 @@ int64_t encode_literal_header_field_with_new_name(uint8_t *buf_start, const uint
 int64_t decode_indexed_header_field(MIMEFieldWrapper &header, const uint8_t *buf_start, const uint8_t *buf_end,
                                     HpackIndexingTable &indexing_table);
 int64_t decode_literal_header_field(MIMEFieldWrapper &header, const uint8_t *buf_start, const uint8_t *buf_end,
-                                    HpackIndexingTable &indexing_table);
+                                    HpackIndexingTable &indexing_table, uint32_t header_field_max_size);
 int64_t update_dynamic_table_size(const uint8_t *buf_start, const uint8_t *buf_end, HpackIndexingTable &indexing_table,
                                   uint32_t maximum_table_size);
 
 // High level interfaces
 using HpackHandle = HpackIndexingTable;
 int64_t hpack_decode_header_block(HpackHandle &handle, HTTPHdr *hdr, const uint8_t *in_buf, const size_t in_buf_len,
-                                  uint32_t max_header_size, uint32_t maximum_table_size);
+                                  uint32_t max_header_size, uint32_t maximum_table_size, uint32_t header_field_max_size);
 int64_t hpack_encode_header_block(HpackHandle &handle, uint8_t *out_buf, const size_t out_buf_len, HTTPHdr *hdr,
                                   int32_t maximum_table_size = -1);
 int32_t hpack_get_maximum_table_size(HpackHandle &handle);

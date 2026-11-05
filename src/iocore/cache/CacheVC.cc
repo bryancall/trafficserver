@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -66,9 +66,11 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <limits>
 
 namespace
 {
+DbgCtl dbg_ctl_cache_ram{"cache_ram"};
 DbgCtl dbg_ctl_cache_bc{"cache_bc"};
 DbgCtl dbg_ctl_cache_disk_error{"cache_disk_error"};
 DbgCtl dbg_ctl_cache_read{"cache_read"};
@@ -110,9 +112,6 @@ next_in_map(Stripe *stripe, char *vol_map, off_t offset)
   return new_off + start_offset;
 }
 
-// Function in CacheDir.cc that we need for make_vol_map().
-int dir_bucket_loop_fix(Dir *start_dir, int s, Directory *directory);
-
 // TODO: If we used a bit vector, we could make a smaller map structure.
 // TODO: If we saved a high water mark we could have a smaller buf, and avoid searching it
 // when we are asked about the highest interesting offset.
@@ -136,7 +135,7 @@ make_vol_map(Stripe *stripe)
     Dir *seg = stripe->directory.get_segment(s);
     for (int b = 0; b < stripe->directory.buckets; b++) {
       Dir *e = dir_bucket(b, seg);
-      if (dir_bucket_loop_fix(e, s, &stripe->directory)) {
+      if (stripe->directory.bucket_loop_fix(e, s, stripe)) {
         break;
       }
       while (e) {
@@ -215,6 +214,14 @@ CacheVC::do_io_write(Continuation *c, int64_t nbytes, IOBufferReader *abuf, bool
 #ifdef DEBUG
   ink_assert(!c || c->mutex->thread_holding);
 #endif
+  if (nbytes == 0) {
+    // A zero-byte write represents an empty document, while closing without a
+    // write represents a header-only update.
+    f.allow_empty_doc = 1;
+    if (alternate.valid()) {
+      alternate.object_size_set(0);
+    }
+  }
   if (c && !trigger && !recursive) {
     trigger = c->mutex->thread_holding->schedule_imm_local(this);
   }
@@ -225,6 +232,14 @@ void
 CacheVC::do_io_close(int alerrno)
 {
   ink_assert(mutex->thread_holding == this_ethread());
+  if (alerrno == -1 && vio.op == VIO::WRITE && vio.get_reader() != nullptr && vio.nbytes == 0) {
+    // The write may have started with an unknown length and been finalized
+    // at zero after the response framing was parsed.
+    f.allow_empty_doc = 1;
+    if (alternate.valid()) {
+      alternate.object_size_set(0);
+    }
+  }
   int previous_closed = closed;
   closed              = (alerrno == -1) ? 1 : -1; // Stupid default arguments
   DDbg(dbg_ctl_cache_close, "do_io_close %p %d %d", this, alerrno, closed);
@@ -304,31 +319,43 @@ CacheVC::dead(int /* event ATS_UNUSED */, Event * /*e ATS_UNUSED */)
   return EVENT_DONE;
 }
 
-static void
-unmarshal_helper(Doc *doc, Ptr<IOBufferData> &buf, int &okay)
+bool
+CacheVC::unmarshal_http_info(Doc *doc, Ptr<IOBufferData> &buf)
 {
   using UnmarshalFunc              = int(char *buf, int len, RefCountObj *block_ref);
   UnmarshalFunc    *unmarshal_func = &HTTPInfo::unmarshal;
   ts::VersionNumber version(doc->v_major, doc->v_minor);
 
-  // introduced by https://github.com/apache/trafficserver/pull/4874, this is used to distinguish the doc version
-  // before and after #4847
-  if (version < CACHE_DB_VERSION) {
+  // hlen is unsigned and the walk below is not. Narrowing a header length this large would
+  // make the walk negative, skipping it and reporting success on a block nothing decoded.
+  if (doc->hlen > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+    Warning("CacheVC::unmarshal_http_info: header length %u exceeds the maximum - corrupt cache entry", doc->hlen);
+    return false;
+  }
+
+  if (version < CACHE_DB_FRAG_OFFSET_TABLE_VERSION) {
     unmarshal_func = &HTTPInfo::unmarshal_v24_1;
   }
 
   char *tmp = doc->hdr();
   int   len = doc->hlen;
   while (len > 0) {
+    // The decoders read the alt header before they check any length, so a tail too short
+    // to hold one has to be rejected here rather than passed down.
+    if (static_cast<size_t>(len) < sizeof(HTTPCacheAlt)) {
+      Warning("CacheVC::unmarshal_http_info: header block ends mid alternate - corrupt cache entry");
+      return false;
+    }
     int r = unmarshal_func(tmp, len, buf.get());
+
     if (r < 0) {
-      ink_assert(!"CacheVC::handleReadDone unmarshal failed");
-      okay = 0;
-      break;
+      ink_assert(!"CacheVC::unmarshal_http_info: HTTPInfo unmarshal failed");
+      return false;
     }
     len -= r;
     tmp += r;
   }
+  return true;
 }
 
 // [amc] I think this is where all disk reads from cache funnel through here.
@@ -376,6 +403,19 @@ CacheVC::handleReadDone(int event, Event * /* e ATS_UNUSED */)
       goto Ldone;
     }
 
+    // Everything below trusts len and hlen, and STORE_COLLISION lets a doc that is not ours get this far.
+    if (doc->magic == DOC_MAGIC &&
+        (doc->len < sizeof(Doc) || doc->len > io.aiocb.aio_nbytes || doc->hlen > doc->len - sizeof(Doc))) {
+      // Callers check the key before trusting len, so a doc that is not ours stays a collision and they keep probing.
+      // Marking it corrupt would fail a read whose own fragment may be further down the chain.
+      if (doc->first_key == *read_key || doc->key == *read_key) {
+        Warning("Doc length %u (hlen %u) does not fit the %zu bytes read - disk %s offset %" PRIu64, doc->len, doc->hlen,
+                static_cast<size_t>(io.aiocb.aio_nbytes), stripe->hash_text.get(), static_cast<uint64_t>(stripe->vol_offset(&dir)));
+        doc->magic = DOC_CORRUPT;
+      }
+      goto Ldone;
+    }
+
     if (dbg_ctl_cache_read.on()) {
       char xt[CRYPTO_HEX_SIZE];
       Dbg(dbg_ctl_cache_read,
@@ -407,7 +447,7 @@ CacheVC::handleReadDone(int event, Event * /* e ATS_UNUSED */)
       // If http doc we need to unmarshal the headers before putting in the ram cache
       // unless it could be compressed
       if (!http_copy_hdr && doc->doc_type == CACHE_FRAG_TYPE_HTTP && doc->hlen && okay) {
-        unmarshal_helper(doc, buf, okay);
+        okay = CacheVC::unmarshal_http_info(doc, buf);
       }
       // Put the request in the ram cache only if its a open_read or lookup
       if (vio.op == VIO::READ && okay) {
@@ -438,7 +478,10 @@ CacheVC::handleReadDone(int event, Event * /* e ATS_UNUSED */)
       } // end VIO::READ check
       // If it could be compressed, unmarshal after
       if (http_copy_hdr && doc->doc_type == CACHE_FRAG_TYPE_HTTP && doc->hlen && okay) {
-        unmarshal_helper(doc, buf, okay);
+        okay = CacheVC::unmarshal_http_info(doc, buf);
+      }
+      if (!okay) {
+        doc->magic = DOC_CORRUPT;
       }
     } // end io.ok() check
   }
@@ -449,27 +492,56 @@ Ldone:
 
 int
 CacheVC::handleRead(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED */)
-
 {
   cancel_trigger();
 
   f.doc_from_ram_cache = false;
 
   ink_assert(stripe->mutex->thread_holding == this_ethread());
+
+  // 1. check RAM cache
   if (load_from_ram_cache()) {
-    goto LramHit;
-  } else if (load_from_last_open_read_call()) {
-    goto LmemHit;
-  } else if (load_from_aggregation_buffer()) {
+    Dbg(dbg_ctl_cache_ram, "RAM cache hit");
     f.doc_from_ram_cache = true;
     io.aio_result        = io.aiocb.aio_nbytes;
+
+    Doc *doc = reinterpret_cast<Doc *>(buf->data());
+    if (cache_config_ram_cache_compress && doc->doc_type == CACHE_FRAG_TYPE_HTTP && doc->hlen) {
+      SET_HANDLER(&CacheVC::handleReadDone);
+      return EVENT_RETURN;
+    }
+
+    POP_HANDLER;
+    return EVENT_RETURN;
+  }
+
+  // 2. check last open read cache
+  if (load_from_last_open_read_call()) {
+    Dbg(dbg_ctl_cache_ram, "last open read hit");
+    f.doc_from_ram_cache = true;
+    io.aio_result        = io.aiocb.aio_nbytes;
+
+    POP_HANDLER;
+    return EVENT_RETURN;
+  }
+
+  // 3. check aggregation buffer
+  if (load_from_aggregation_buffer()) {
+    Dbg(dbg_ctl_cache_ram, "aggregation buffer hit");
+    f.doc_from_ram_cache = true;
+    io.aio_result        = io.aiocb.aio_nbytes;
+
     SET_HANDLER(&CacheVC::handleReadDone);
     return EVENT_RETURN;
   }
 
+  // 4. read from Disk (AIO) due to all memory cache miss
+  Dbg(dbg_ctl_cache_ram, "all memory cache miss");
+
   ts::Metrics::Counter::increment(cache_rsb.all_mem_misses);
   ts::Metrics::Counter::increment(stripe->cache_vol->vol_rsb.all_mem_misses);
 
+  // enqueue AIO read
   io.aiocb.aio_fildes = stripe->fd;
   io.aiocb.aio_offset = stripe->vol_offset(&dir);
   if (static_cast<off_t>(io.aiocb.aio_offset + io.aiocb.aio_nbytes) > static_cast<off_t>(stripe->skip + stripe->len)) {
@@ -480,30 +552,14 @@ CacheVC::handleRead(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED */)
   io.action        = this;
   io.thread        = mutex->thread_holding->tt == DEDICATED ? AIO_CALLBACK_THREAD_ANY : mutex->thread_holding;
   SET_HANDLER(&CacheVC::handleReadDone);
-  ink_assert(ink_aio_read(&io) >= 0);
 
-// ToDo: Why are these for debug only ??
-#if DEBUG
+  int res = ink_aio_read(&io);
+  ink_assert(res >= 0);
+
   ts::Metrics::Counter::increment(cache_rsb.pread_count);
   ts::Metrics::Counter::increment(stripe->cache_vol->vol_rsb.pread_count);
-#endif
 
   return EVENT_CONT;
-
-LramHit: {
-  f.doc_from_ram_cache = true;
-  io.aio_result        = io.aiocb.aio_nbytes;
-  Doc *doc             = reinterpret_cast<Doc *>(buf->data());
-  if (cache_config_ram_cache_compress && doc->doc_type == CACHE_FRAG_TYPE_HTTP && doc->hlen) {
-    SET_HANDLER(&CacheVC::handleReadDone);
-    return EVENT_RETURN;
-  }
-}
-LmemHit:
-  f.doc_from_ram_cache = true;
-  io.aio_result        = io.aiocb.aio_nbytes;
-  POP_HANDLER;
-  return EVENT_RETURN; // allow the caller to release the volume lock
 }
 
 bool
@@ -619,10 +675,10 @@ CacheVC::removeEvent(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED */)
     }
   }
   ink_assert(!stripe || this_ethread() != stripe->mutex->thread_holding);
-  _action.continuation->handleEvent(CACHE_EVENT_REMOVE_FAILED, reinterpret_cast<void *>(-ECACHE_NO_DOC));
+  _action.call_back(CACHE_EVENT_REMOVE_FAILED, reinterpret_cast<void *>(-ECACHE_NO_DOC));
   goto Lfree;
 Lremoved:
-  _action.continuation->handleEvent(CACHE_EVENT_REMOVE, nullptr);
+  _action.call_back(CACHE_EVENT_REMOVE, nullptr);
 Lfree:
   return free_CacheVC(this);
 }
@@ -666,7 +722,7 @@ Lcont:
   eventProcessor.schedule_in(this, HRTIME_MSECONDS(scan_msec_delay));
   return EVENT_CONT;
 Ldone:
-  _action.continuation->handleEvent(CACHE_EVENT_SCAN_DONE, nullptr);
+  _action.call_back(CACHE_EVENT_SCAN_DONE, nullptr);
   return free_CacheVC(this);
 }
 
@@ -755,22 +811,20 @@ CacheVC::scanObject(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED */)
       }
       break;
     }
-    if (doc->data() - buf->data() > static_cast<int>(io.aiocb.aio_nbytes)) {
-      might_need_overlap_read = true;
-      goto Lskip;
-    }
     {
-      char *tmp = doc->hdr();
-      int   len = doc->hlen;
-      while (len > 0) {
-        int r = HTTPInfo::unmarshal(tmp, len, buf.get());
-        if (r < 0) {
-          ink_assert(!"CacheVC::scanObject unmarshal failed");
-          goto Lskip;
-        }
-        len -= r;
-        tmp += r;
+      size_t const doc_off = reinterpret_cast<char *>(doc) - buf->data();
+      // Bounds-check in unsigned domain: doc must lie within the
+      // buffer, with room for the Doc header, and doc->hlen must
+      // fit in the remaining bytes before doc->hdr() and
+      // unmarshal_http_info walk it.
+      if (io.aiocb.aio_nbytes < doc_off || (io.aiocb.aio_nbytes - doc_off) < sizeof(Doc) ||
+          (io.aiocb.aio_nbytes - doc_off - sizeof(Doc)) < doc->hlen) {
+        might_need_overlap_read = true;
+        goto Lskip;
       }
+    }
+    if (!CacheVC::unmarshal_http_info(doc, buf)) {
+      goto Lskip;
     }
     if (this->load_http_info(&vector, doc) != doc->hlen) {
       goto Lskip;
@@ -899,7 +953,7 @@ Lread:
 
 Ldone:
   Dbg(dbg_ctl_cache_scan_truss, "done %p:scanObject", this);
-  _action.continuation->handleEvent(CACHE_EVENT_SCAN_DONE, result);
+  _action.call_back(CACHE_EVENT_SCAN_DONE, result);
 Lcancel:
   return free_CacheVC(this);
 }
@@ -1044,7 +1098,8 @@ CacheVC::set_http_info(CacheHTTPInfo *ainfo)
   }
 
   MIMEField *field = ainfo->m_alt->m_response_hdr.field_find(static_cast<std::string_view>(MIME_FIELD_CONTENT_LENGTH));
-  if ((field && !field->value_get_int64()) || ainfo->m_alt->m_response_hdr.status_get() == HTTPStatus::NO_CONTENT) {
+  if ((field && !field->value_get_int64()) || ainfo->m_alt->m_response_hdr.status_get() == HTTPStatus::NO_CONTENT ||
+      (f.allow_empty_doc && vio.nbytes == 0)) {
     f.allow_empty_doc = 1;
     // Set the object size here to zero in case this is a cache replace where the new object
     // length is zero but the old object was not.

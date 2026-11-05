@@ -21,7 +21,7 @@ add_executable(CompileParseRules CompileParseRules.cc)
 
 add_custom_command(
   OUTPUT ParseRulesCType ParseRulesCTypeToUpper ParseRulesCTypeToLower
-  COMMAND CompileParseRules
+  COMMAND ${CMAKE_COMMAND} -E env ASAN_OPTIONS=detect_leaks=0 $<TARGET_FILE:CompileParseRules>
   COMMENT "Generating compile parse rules"
 )
 
@@ -35,6 +35,7 @@ add_library(
   ConsistentHash.cc
   ContFlags.cc
   CryptoHash.cc
+  Demangle.cc
   Diags.cc
   Encoding.cc
   EventNotify.cc
@@ -49,7 +50,6 @@ add_library(
   MMH.cc
   MatcherUtils.cc
   ParseRules.cc
-  Random.cc
   Regression.cc
   SnowflakeID.cc
   TextBuffer.cc
@@ -100,10 +100,21 @@ set_target_properties(tscore PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 
 if(SSLLIB_IS_BORINGSSL OR SSLLIB_IS_AWSLC)
   target_sources(tscore PRIVATE HKDF_boringssl.cc)
-elseif(SSLLIB_IS_OPENSSL3)
+elseif(SSLLIB_IS_AT_LEAST_OPENSSL3)
   target_sources(tscore PRIVATE HKDF_openssl3.cc)
 else()
   target_sources(tscore PRIVATE HKDF_openssl.cc)
+endif()
+
+# Highway runtime-dispatched SIMD kernels (ASCII tolower, base64). Only
+# compiled when ENABLE_HIGHWAY_DISPATCH=ON; otherwise ink_ascii_tolower.h and
+# ink_base64.cc use their scalar paths. The source dir is added to the include
+# path so Highway's foreach_target.h self-include of each *_dispatch.cc
+# resolves.
+if(TS_HAS_HIGHWAY_DISPATCH)
+  target_sources(tscore PRIVATE ink_ascii_tolower_dispatch.cc ink_base64_dispatch.cc)
+  target_link_libraries(tscore PRIVATE hwy::hwy)
+  target_include_directories(tscore PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 target_link_libraries(
@@ -127,6 +138,14 @@ if(TS_HAS_128BIT_CAS AND TS_NEEDS_MCX16_FOR_CAS)
   target_compile_options(tscore PUBLIC "-mcx16")
 endif()
 
+if(TS_NEEDS_LIBATOMIC_FOR_CAS)
+  target_link_libraries(tscore PUBLIC atomic)
+endif()
+
+if(TS_HAS_128BIT_CAS_LIBATOMIC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  target_compile_options(tscore PUBLIC "-Wno-error=atomic-alignment")
+endif()
+
 if(BUILD_SHARED_LIBS)
   install(
     TARGETS tscore
@@ -140,27 +159,34 @@ if(BUILD_TESTING)
     test_tscore
     unit_tests/test_ArgParser.cc
     unit_tests/test_CryptoHash.cc
+    unit_tests/test_Demangle.cc
     unit_tests/test_Encoding.cc
     unit_tests/test_FrequencyCounter.cc
     unit_tests/test_HashAlgorithms.cc
     unit_tests/test_HKDF.cc
     unit_tests/test_Histogram.cc
     unit_tests/test_History.cc
+    unit_tests/test_InkAtomicList.cc
     unit_tests/test_IntrusivePtr.cc
     unit_tests/test_List.cc
     unit_tests/test_MMH.cc
     unit_tests/test_ParseRules.cc
+    unit_tests/test_PendingAction.cc
     unit_tests/test_PluginUserArgs.cc
     unit_tests/test_PriorityQueue.cc
     unit_tests/test_Ptr.cc
     unit_tests/test_Random.cc
     unit_tests/test_SnowflakeID.cc
     unit_tests/test_Throttler.cc
+    unit_tests/test_TimerWheel.cc
     unit_tests/test_Tokenizer.cc
     unit_tests/test_arena.cc
+    unit_tests/test_ink_base64.cc
+    unit_tests/test_ink_ascii_tolower.cc
     unit_tests/test_ink_inet.cc
     unit_tests/test_ink_memory.cc
     unit_tests/test_ink_string.cc
+    unit_tests/test_ink_sys_control.cc
     unit_tests/test_layout.cc
     unit_tests/test_scoped_resource.cc
     unit_tests/test_Version.cc

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -36,15 +36,39 @@ static constexpr ts::ModuleVersion CACHE_MODULE_VERSION(1, 0);
 
 #define SCAN_KB_PER_SECOND 8192 // 1TB/8MB = 131072 = 36 HOURS to scan a TB
 
-#define RAM_CACHE_ALGORITHM_CLFUS 0
-#define RAM_CACHE_ALGORITHM_LRU   1
+#define RAM_CACHE_ALGORITHM_CLFUS  0
+#define RAM_CACHE_ALGORITHM_LRU    1
+#define RAM_CACHE_ALGORITHM_S3FIFO 2
 
 #define CACHE_COMPRESSION_NONE    0
 #define CACHE_COMPRESSION_FASTLZ  1
 #define CACHE_COMPRESSION_LIBZ    2
 #define CACHE_COMPRESSION_LIBLZMA 3
+#define CACHE_COMPRESSION_LZ4     4
+#define CACHE_COMPRESSION_ZSTD    5
 
-enum { RAM_HIT_COMPRESS_NONE = 1, RAM_HIT_COMPRESS_FASTLZ, RAM_HIT_COMPRESS_LIBZ, RAM_HIT_COMPRESS_LIBLZMA, RAM_HIT_LAST_ENTRY };
+enum {
+  RAM_HIT_COMPRESS_NONE = 1,
+  RAM_HIT_COMPRESS_FASTLZ,
+  RAM_HIT_COMPRESS_LIBZ,
+  RAM_HIT_COMPRESS_LIBLZMA,
+  RAM_HIT_COMPRESS_LZ4,
+  RAM_HIT_COMPRESS_ZSTD,
+  RAM_HIT_LAST_ENTRY
+};
+
+// The RAM_HIT_COMPRESS_* values are the CACHE_COMPRESSION_* values offset by
+// one; keep the two sequences from silently desyncing when a codec is added.
+// The pairwise asserts catch a reordering of either sequence; the count assert
+// catches a new CACHE_COMPRESSION_* that was never given a RAM_HIT_COMPRESS_*
+// enumerator (or vice versa).
+static_assert(RAM_HIT_LAST_ENTRY == CACHE_COMPRESSION_ZSTD + 2);
+static_assert(RAM_HIT_COMPRESS_NONE == CACHE_COMPRESSION_NONE + 1);
+static_assert(RAM_HIT_COMPRESS_FASTLZ == CACHE_COMPRESSION_FASTLZ + 1);
+static_assert(RAM_HIT_COMPRESS_LIBZ == CACHE_COMPRESSION_LIBZ + 1);
+static_assert(RAM_HIT_COMPRESS_LIBLZMA == CACHE_COMPRESSION_LIBLZMA + 1);
+static_assert(RAM_HIT_COMPRESS_LZ4 == CACHE_COMPRESSION_LZ4 + 1);
+static_assert(RAM_HIT_COMPRESS_ZSTD == CACHE_COMPRESSION_ZSTD + 1);
 
 struct CacheVC;
 class CacheEvacuateDocVC;

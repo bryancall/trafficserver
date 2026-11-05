@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -24,12 +24,16 @@
 #include "tscore/ink_defs.h"
 #include "tscore/ink_platform.h"
 #include "tscore/ink_memory.h"
+
+#include "tsutil/StringCompare.h"
+
 #include <cassert>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <cctype>
 #include <algorithm>
+#include <charconv>
 #include <string_view>
 #include "proxy/hdrs/MIME.h"
 #include "proxy/hdrs/HdrHeap.h"
@@ -70,7 +74,7 @@ make_packed(const std::array<std::string_view, count> &names)
 {
   std::array<uint32_t, count> packed{};
 
-  auto tl = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; };
+  auto tl = [](unsigned char c) -> uint32_t { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; };
 
   for (size_t i = 0; i < count; ++i) {
     const auto    &sv = names[i];
@@ -469,7 +473,7 @@ mime_hdr_set_accelerators_and_presence_bits(MIMEHdrImpl *mh, MIMEField *field)
   if (slot_id != MIME_SLOTID_NONE) {
     if (mh->m_first_fblock.contains(field)) {
       slot_num = (field - &(mh->m_first_fblock.m_field_slots[0]));
-      // constains() assure that the field is in the block, and the calculated
+      // contains() assure that the field is in the block, and the calculated
       // slot_num will be between 0 and 15, which seem valid.
       // However, strangely, this function regards slot number 14 and 15 as
       // unknown for some reason that is not clear. It might be a bug.
@@ -538,6 +542,7 @@ mime_hdr_sanity_check(MIMEHdrImpl *mh)
   MIMEField          *field, *next_dup;
   uint32_t            slot_index, index;
   uint64_t            masksum;
+  size_t              deleted_count = 0;
 
   ink_assert(mh != nullptr);
 
@@ -613,13 +618,15 @@ mime_hdr_sanity_check(MIMEHdrImpl *mh)
           ink_release_assert(found);
         }
         // re-find the field --- should always find the head dup
-        MIMEField *mf = mime_hdr_field_find(mh, field->m_ptr_name, field->m_len_name);
+        MIMEField *mf = mime_hdr_field_find(mh, {field->m_ptr_name, field->m_len_name});
         ink_release_assert(mf != nullptr);
         if (mf == field) {
           ink_release_assert((field->m_flags & MIME_FIELD_SLOT_FLAGS_DUP_HEAD) != 0);
         } else {
           ink_release_assert((field->m_flags & MIME_FIELD_SLOT_FLAGS_DUP_HEAD) == 0);
         }
+      } else if (field->m_readiness == MIME_FIELD_SLOT_READINESS_DELETED) {
+        ++deleted_count;
       }
 
       ++slot_index;
@@ -629,6 +636,20 @@ mime_hdr_sanity_check(MIMEHdrImpl *mh)
 
   ink_release_assert(last_fblock == mh->m_fblock_list_tail);
   ink_release_assert(masksum == mh->m_presence_bits);
+
+  if (mh->m_free_slot != MIME_FIELD_FREE_SLOT_UNINITIALIZED) {
+    size_t  free_count = 0;
+    int32_t free_slot  = mh->m_free_slot;
+
+    while (free_slot != MIME_FIELD_FREE_SLOT_NONE) {
+      field = mime_hdr_field_get_slotnum(mh, free_slot);
+      ink_release_assert(field != nullptr);
+      ink_release_assert(field->m_readiness == MIME_FIELD_SLOT_READINESS_DELETED);
+      ink_release_assert(++free_count <= deleted_count);
+      free_slot = field->m_free_next;
+    }
+    ink_release_assert(free_count == deleted_count);
+  }
 }
 #endif
 
@@ -829,37 +850,6 @@ mime_init()
     MIME_VALUE_H2C                  = hdrtoken_string_to_wks_sv(MIME_UPGRADE_H2C_TOKEN);
 
     mime_init_date_format_table();
-    mime_init_cache_control_cooking_masks();
-  }
-}
-
-void
-mime_init_cache_control_cooking_masks()
-{
-  static struct {
-    const char *name;
-    uint32_t    mask;
-  } cc_mask_table[] = {
-    {"max-age",              MIME_COOKED_MASK_CC_MAX_AGE             },
-    {"no-cache",             MIME_COOKED_MASK_CC_NO_CACHE            },
-    {"no-store",             MIME_COOKED_MASK_CC_NO_STORE            },
-    {"no-transform",         MIME_COOKED_MASK_CC_NO_TRANSFORM        },
-    {"max-stale",            MIME_COOKED_MASK_CC_MAX_STALE           },
-    {"min-fresh",            MIME_COOKED_MASK_CC_MIN_FRESH           },
-    {"only-if-cached",       MIME_COOKED_MASK_CC_ONLY_IF_CACHED      },
-    {"public",               MIME_COOKED_MASK_CC_PUBLIC              },
-    {"private",              MIME_COOKED_MASK_CC_PRIVATE             },
-    {"must-revalidate",      MIME_COOKED_MASK_CC_MUST_REVALIDATE     },
-    {"proxy-revalidate",     MIME_COOKED_MASK_CC_PROXY_REVALIDATE    },
-    {"s-maxage",             MIME_COOKED_MASK_CC_S_MAXAGE            },
-    {"need-revalidate-once", MIME_COOKED_MASK_CC_NEED_REVALIDATE_ONCE},
-    {nullptr,                0                                       }
-  };
-
-  for (int i = 0; cc_mask_table[i].name != nullptr; i++) {
-    const char         *wks                      = hdrtoken_string_to_wks(cc_mask_table[i].name);
-    HdrTokenHeapPrefix *p                        = hdrtoken_wks_to_prefix(wks);
-    p->wks_type_specific.u.cache_control.cc_mask = cc_mask_table[i].mask;
   }
 }
 
@@ -945,6 +935,8 @@ mime_hdr_cooked_stuff_init(MIMEHdrImpl *mh, MIMEField *changing_field_or_null)
 void
 mime_hdr_init(MIMEHdrImpl *mh)
 {
+  mh->m_free_slot = MIME_FIELD_FREE_SLOT_NONE;
+
   mime_hdr_init_accelerators_and_presence_bits(mh);
 
   mime_hdr_cooked_stuff_init(mh, nullptr);
@@ -998,6 +990,26 @@ mime_hdr_destroy(HdrHeap *heap, MIMEHdrImpl *mh)
   // heap->deallocate_obj(mh);
 }
 
+static void
+mime_hdr_rebuild_field_free_list(MIMEHdrImpl *mh)
+{
+  int32_t slotnum = 0;
+
+  mh->m_free_slot = MIME_FIELD_FREE_SLOT_NONE;
+  for (MIMEFieldBlockImpl *fblock = &mh->m_first_fblock; fblock != nullptr; fblock = fblock->m_next) {
+    for (uint32_t index = 0; index < fblock->m_freetop; ++index) {
+      MIMEField *field = &fblock->m_field_slots[index];
+
+      if (field->m_readiness == MIME_FIELD_SLOT_READINESS_DELETED || field->m_readiness == MIME_FIELD_SLOT_READINESS_EMPTY) {
+        field->m_readiness = MIME_FIELD_SLOT_READINESS_DELETED;
+        field->m_free_next = mh->m_free_slot;
+        mh->m_free_slot    = slotnum + static_cast<int32_t>(index);
+      }
+    }
+    slotnum += MIME_FIELD_BLOCK_SLOTS;
+  }
+}
+
 void
 mime_hdr_copy_onto(MIMEHdrImpl *s_mh, HdrHeap *s_heap, MIMEHdrImpl *d_mh, HdrHeap *d_heap, bool inherit_strs)
 {
@@ -1043,6 +1055,7 @@ mime_hdr_copy_onto(MIMEHdrImpl *s_mh, HdrHeap *s_heap, MIMEHdrImpl *d_mh, HdrHea
   }
 
   mime_hdr_field_block_list_adjust(block_count, &(s_mh->m_first_fblock), &(d_mh->m_first_fblock));
+  mime_hdr_rebuild_field_free_list(d_mh);
 
   MIME_HDR_SANITY_CHECK(s_mh);
   MIME_HDR_SANITY_CHECK(d_mh);
@@ -1063,7 +1076,7 @@ mime_hdr_clone(MIMEHdrImpl *s_mh, HdrHeap *s_heap, HdrHeap *d_heap, bool inherit
  * @a dest_ptr does to @a src_base.
  */
 static inline MIMEField *
-rebase(MIMEField *dest_ptr,  ///< Original pointer into @src_base memory.
+rebase(MIMEField *dest_ptr,  ///< Original pointer into @a src_base memory.
        void      *dest_base, ///< New base pointer.
        void      *src_base   ///< Original base pointer.
 )
@@ -1161,8 +1174,8 @@ _mime_hdr_field_list_search_by_string(MIMEHdrImpl *mh, std::string_view field_na
     too_far_field = &(fblock->m_field_slots[fblock->m_freetop]);
     while (field < too_far_field) {
       if (field->is_live() &&
-          strcasecmp(std::string_view{field->m_ptr_name, static_cast<std::string_view::size_type>(field->m_len_name)},
-                     field_name) == 0) {
+          ts::iequals(std::string_view{field->m_ptr_name, static_cast<std::string_view::size_type>(field->m_len_name)},
+                      field_name)) {
         return field;
       }
       ++field;
@@ -1205,8 +1218,8 @@ _mime_hdr_field_list_search_by_slotnum(MIMEHdrImpl *mh, int slotnum)
 MIMEField *
 mime_hdr_field_find(MIMEHdrImpl *mh, std::string_view field_name)
 {
-  HdrTokenHeapPrefix *token_info;
-  const bool          is_wks = hdrtoken_is_wks(field_name.data());
+  const HdrTokenHeapPrefix *token_info;
+  const bool                is_wks = hdrtoken_is_wks(field_name.data());
 
   ink_assert(!field_name.empty());
 
@@ -1341,13 +1354,19 @@ mime_field_create(HdrHeap *heap, MIMEHdrImpl *mh)
   MIMEFieldBlockImpl *tail_fblock, *new_fblock;
 
   tail_fblock = mh->m_fblock_list_tail;
-  if (tail_fblock->m_freetop >= MIME_FIELD_BLOCK_SLOTS) {
-    new_fblock = (MIMEFieldBlockImpl *)heap->allocate_obj(sizeof(MIMEFieldBlockImpl), HdrHeapObjType::FIELD_BLOCK);
-    _mime_hdr_field_block_init(new_fblock);
-    tail_fblock->m_next    = new_fblock;
-    tail_fblock            = new_fblock;
-    mh->m_fblock_list_tail = new_fblock;
+  if (tail_fblock->m_freetop < MIME_FIELD_BLOCK_SLOTS) {
+    field = &(tail_fblock->m_field_slots[tail_fblock->m_freetop]);
+    ++tail_fblock->m_freetop;
+
+    mime_field_init(field);
+    return field;
   }
+
+  new_fblock = (MIMEFieldBlockImpl *)heap->allocate_obj(sizeof(MIMEFieldBlockImpl), HdrHeapObjType::FIELD_BLOCK);
+  _mime_hdr_field_block_init(new_fblock);
+  tail_fblock->m_next    = new_fblock;
+  tail_fblock            = new_fblock;
+  mh->m_fblock_list_tail = new_fblock;
 
   field = &(tail_fblock->m_field_slots[tail_fblock->m_freetop]);
   ++tail_fblock->m_freetop;
@@ -1358,11 +1377,69 @@ mime_field_create(HdrHeap *heap, MIMEHdrImpl *mh)
 }
 
 MIMEField *
+mime_field_create_for_name(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view name)
+{
+  if (mh->m_fblock_list_tail->m_freetop < MIME_FIELD_BLOCK_SLOTS) {
+    return mime_field_create(heap, mh);
+  }
+
+  if (mh->m_free_slot == MIME_FIELD_FREE_SLOT_UNINITIALIZED) {
+    mime_hdr_rebuild_field_free_list(mh);
+  }
+
+  if (mh->m_free_slot == MIME_FIELD_FREE_SLOT_NONE) {
+    return mime_field_create(heap, mh);
+  }
+
+  int last_dup_slot = -1;
+
+  if (MIMEField *last_dup = name.empty() ? nullptr : mime_hdr_field_find(mh, name); last_dup != nullptr) {
+    while (last_dup->m_next_dup != nullptr) {
+      last_dup = last_dup->m_next_dup;
+    }
+    last_dup_slot = mime_hdr_field_slotnum(mh, last_dup);
+    ink_release_assert(last_dup_slot >= 0);
+  }
+
+  int32_t previous_free_slot = MIME_FIELD_FREE_SLOT_NONE;
+  int32_t free_slot          = mh->m_free_slot;
+
+  while (free_slot != MIME_FIELD_FREE_SLOT_NONE) {
+    MIMEField *field = mime_hdr_field_get_slotnum(mh, free_slot);
+    ink_release_assert(field != nullptr);
+    ink_release_assert(field->m_readiness == MIME_FIELD_SLOT_READINESS_DELETED);
+
+    if (free_slot > last_dup_slot) {
+      if (previous_free_slot == MIME_FIELD_FREE_SLOT_NONE) {
+        mh->m_free_slot = field->m_free_next;
+      } else {
+        MIMEField *previous_free = mime_hdr_field_get_slotnum(mh, previous_free_slot);
+
+        ink_release_assert(previous_free != nullptr);
+        previous_free->m_free_next = field->m_free_next;
+      }
+      mime_field_init(field);
+      return field;
+    }
+
+    previous_free_slot = free_slot;
+    free_slot          = field->m_free_next;
+  }
+
+  return mime_field_create(heap, mh);
+}
+
+MIMEField *
 mime_field_create_named(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view name)
 {
-  MIMEField *field              = mime_field_create(heap, mh);
+  MIMEField *field              = mime_field_create_for_name(heap, mh, name);
   int        field_name_wks_idx = hdrtoken_tokenize(name.data(), static_cast<int>(name.length()));
-  mime_field_name_set(heap, mh, field, field_name_wks_idx, name, true);
+  if (!mime_field_name_set(heap, mh, field, field_name_wks_idx, name, true)) {
+    // The name exceeds the uint16_t field-length limit and was rejected. Tear
+    // the detached field back down so callers do not get a half-formed field.
+    mime_field_destroy(mh, field);
+    return nullptr;
+  }
   return field;
 }
 
@@ -1554,32 +1631,6 @@ mime_hdr_field_delete(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, bool del
 
     MIME_HDR_SANITY_CHECK(mh);
     mime_field_destroy(mh, field);
-
-    MIMEFieldBlockImpl *prev_block        = nullptr;
-    bool                can_destroy_block = true;
-    for (auto fblock = &(mh->m_first_fblock); fblock != nullptr; fblock = fblock->m_next) {
-      if (prev_block != nullptr) {
-        if (fblock->m_freetop == MIME_FIELD_BLOCK_SLOTS && fblock->contains(field)) {
-          // Check if fields in all slots are deleted
-          for (auto &m_field_slot : fblock->m_field_slots) {
-            if (m_field_slot.m_readiness != MIME_FIELD_SLOT_READINESS_DELETED) {
-              can_destroy_block = false;
-              break;
-            }
-          }
-          // Destroy a block and maintain the chain
-          if (can_destroy_block) {
-            prev_block->m_next = fblock->m_next;
-            _mime_field_block_destroy(heap, fblock);
-            if (prev_block->m_next == nullptr) {
-              mh->m_fblock_list_tail = prev_block;
-            }
-          }
-          break;
-        }
-      }
-      prev_block = fblock;
-    }
   }
 
   MIME_HDR_SANITY_CHECK(mh);
@@ -1637,7 +1688,7 @@ mime_hdr_prepare_for_value_set(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view 
   if (field == nullptr) // no fields of this name
   {
     wks_idx = hdrtoken_tokenize(name.data(), static_cast<int>(name.length()));
-    field   = mime_field_create(heap, mh);
+    field   = mime_field_create_for_name(heap, mh, name);
     mime_field_name_set(heap, mh, field, wks_idx, name, true);
     mime_hdr_field_attach(mh, field, 0, nullptr);
 
@@ -1645,7 +1696,7 @@ mime_hdr_prepare_for_value_set(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view 
   {
     wks_idx = field->m_wks_idx;
     mime_hdr_field_delete(heap, mh, field, true);
-    field = mime_field_create(heap, mh);
+    field = mime_field_create_for_name(heap, mh, name);
     mime_field_name_set(heap, mh, field, wks_idx, name, true);
     mime_hdr_field_attach(mh, field, 0, nullptr);
   }
@@ -1653,10 +1704,18 @@ mime_hdr_prepare_for_value_set(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view 
 }
 
 void
-mime_field_destroy(MIMEHdrImpl * /* mh ATS_UNUSED */, MIMEField *field)
+mime_field_destroy(MIMEHdrImpl *mh, MIMEField *field)
 {
   ink_assert(field->m_readiness == MIME_FIELD_SLOT_READINESS_DETACHED);
   field->m_readiness = MIME_FIELD_SLOT_READINESS_DELETED;
+
+  if (mh->m_free_slot == MIME_FIELD_FREE_SLOT_UNINITIALIZED) {
+    mime_hdr_rebuild_field_free_list(mh);
+  } else {
+    field->m_free_next = mh->m_free_slot;
+    mh->m_free_slot    = mime_hdr_field_slotnum(mh, field);
+    ink_release_assert(mh->m_free_slot >= 0);
+  }
 }
 
 std::string_view
@@ -1668,11 +1727,19 @@ MIMEField::name_get() const
   return {m_ptr_name, m_len_name};
 }
 
-void
+bool
 mime_field_name_set(HdrHeap *heap, MIMEHdrImpl * /* mh ATS_UNUSED */, MIMEField *field, int16_t name_wks_idx_or_neg1,
                     std::string_view name, bool must_copy_string)
 {
   ink_assert(field->m_readiness == MIME_FIELD_SLOT_READINESS_DETACHED);
+
+  // A name longer than UINT16_MAX cannot be stored in the uint16_t m_len_name.
+  // Reject it without mutating the field so the caller never observes a name
+  // whose stored length disagrees with its data.
+  if (name.length() > static_cast<size_t>(UINT16_MAX)) {
+    Warning("mime_field_name_set: rejecting oversized name of length %zu (max %u)", name.length(), UINT16_MAX);
+    return false;
+  }
 
   field->m_wks_idx = name_wks_idx_or_neg1;
   mime_str_u16_set(heap, name, &(field->m_ptr_name), &(field->m_len_name), must_copy_string);
@@ -1680,6 +1747,8 @@ mime_field_name_set(HdrHeap *heap, MIMEHdrImpl * /* mh ATS_UNUSED */, MIMEField 
   if ((name_wks_idx_or_neg1 == MIME_WKSIDX_CACHE_CONTROL) || (name_wks_idx_or_neg1 == MIME_WKSIDX_PRAGMA)) {
     field->m_flags |= MIME_FIELD_SLOT_FLAGS_COOKED;
   }
+
+  return true;
 }
 
 int
@@ -2042,9 +2111,21 @@ mime_field_value_extend_comma_val(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *fie
   }
 }
 
-void
+bool
 mime_field_value_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, std::string_view value, bool must_copy_string)
 {
+  // Cap the value length at UINT16_MAX as a deliberate, uniform header
+  // field-size limit matching the name field (m_len_name is uint16_t). The
+  // value storage (m_len_value is uint32_t : 24) could physically hold more,
+  // but we reject longer values to keep a single consistent limit on both the
+  // name and value of a header field.
+  if (value.length() > UINT16_MAX) {
+    Warning("mime_field_value_set: rejecting oversized value of length %zu (max %u)", value.length(), UINT16_MAX);
+    // Reject without mutating the field: a live field keeps its current value
+    // and cooked state, so a rejected set is a clean no-op.
+    return false;
+  }
+
   heap->free_string(field->m_ptr_value, field->m_len_value);
 
   if (must_copy_string && value.data()) {
@@ -2060,6 +2141,8 @@ mime_field_value_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, std::stri
   if (field->is_live() && field->is_cooked()) {
     mh->recompute_cooked_stuff(field);
   }
+
+  return true;
 }
 
 void
@@ -2094,7 +2177,7 @@ mime_field_value_set_date(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, time
   mime_field_value_set(heap, mh, field, std::string_view{buf, static_cast<std::string_view::size_type>(len)}, true);
 }
 
-void
+bool
 mime_field_name_value_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int16_t name_wks_idx_or_neg1, std::string_view name,
                           std::string_view value, int n_v_raw_printable, int n_v_raw_length, bool must_copy_strings)
 {
@@ -2104,9 +2187,21 @@ mime_field_name_value_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int1
 
   ink_assert(field->m_readiness == MIME_FIELD_SLOT_READINESS_DETACHED);
 
+  // m_len_name is uint16_t, so a name longer than UINT16_MAX would truncate its
+  // stored length; m_len_value is uint32_t : 24 and could hold more, but the value
+  // is capped at the same UINT16_MAX for a single uniform limit. Reject oversized
+  // strings up front, before either branch mutates the field, so a rejected set is
+  // an all-or-nothing no-op rather than a half-stored (name xor value) field.
+  if (name_length < 0 || name_length > static_cast<int>(UINT16_MAX) || value_length < 0 ||
+      value_length > static_cast<int>(UINT16_MAX)) {
+    Warning("mime_field_name_value_set: rejecting oversized name=%d value=%d (max %u)", name_length, value_length, UINT16_MAX);
+    return false;
+  }
+
   if (must_copy_strings) {
-    mime_field_name_set(heap, mh, field, name_wks_idx_or_neg1, name, true);
-    mime_field_value_set(heap, mh, field, value, true);
+    bool name_stored  = mime_field_name_set(heap, mh, field, name_wks_idx_or_neg1, name, true);
+    bool value_stored = mime_field_value_set(heap, mh, field, value, true);
+    return name_stored && value_stored;
   } else {
     field->m_wks_idx   = name_wks_idx_or_neg1;
     field->m_ptr_name  = name.data();
@@ -2128,6 +2223,7 @@ mime_field_name_value_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int1
       mh->recompute_cooked_stuff(field);
     }
   }
+  return true;
 }
 
 void
@@ -2279,11 +2375,19 @@ MIMEScanner::get(TextView &input, TextView &output, bool &output_shares_input, b
       // After a LF, the next line might be a continuation / folded line. That's indicated by a
       // starting whitespace. If that's the case, back up over the preceding CR/LF with space and
       // pretend it's the same line.
+      //
+      // NOTE: obs-fold is only detected here when the LF and the continuation whitespace are in
+      // the same get() call. If the CRLF falls exactly at the end of an input buffer, the
+      // post-loop cleanup returns OK before we see the next byte, so the fold is silently lost
+      // and the continuation becomes a separate field. Fixing this requires changing the scanner
+      // to return CONT in AFTER state, which affects all callers including TSMimeHdrParse.
       if (ParseRules::is_ws(*text)) { // folded line.
         char *unfold = const_cast<char *>(text.data() - 1);
-        *unfold--    = ' ';
-        if (ParseRules::is_cr(*unfold)) {
-          *unfold = ' ';
+        *unfold      = ' ';
+        if (unfold > input.data() && ParseRules::is_cr(*(unfold - 1))) {
+          *(unfold - 1) = ' ';
+        } else if (!m_line.empty() && ParseRules::is_cr(m_line.back())) {
+          m_line.back() = ' ';
         }
         m_state = MimeParseState::INSIDE; // back inside the field.
       } else {
@@ -2432,12 +2536,30 @@ mime_parser_parse(MIMEParser *parser, HdrHeap *heap, MIMEHdrImpl *mh, const char
       continue; // toss away garbage line
     }
 
+    // A line so long its size cannot be represented as int cannot yield a
+    // storable field; reject it rather than let the narrowing below wrap.
+    if (parsed.size() > static_cast<size_t>(INT_MAX)) {
+      return ParseResult::ERROR;
+    }
+
     // find name last
-    auto field_value = parsed; // need parsed as is later on.
-    auto field_name  = field_value.split_prefix_at(':');
-    if (field_name.empty()) {
+    //
+    // Fuse the colon scan, FNV-1a name hash, and per-byte field-name validation
+    // into one pass over the name bytes. hdrtoken_field_name_scan returns the
+    // colon index (the name length) and, for those bytes, the hash reused below
+    // by the WKS lookup, plus whether every byte is a valid HTTP field-name
+    // char.
+    auto     field_value = parsed; // need parsed as is later on.
+    uint32_t field_name_hash;
+    bool     name_all_valid;
+    int colon_idx = hdrtoken_field_name_scan(parsed.data(), static_cast<int>(parsed.size()), &field_name_hash, &name_all_valid);
+    if (colon_idx <= 0) {
+      // colon_idx < 0: no colon; colon_idx == 0: empty name. Both are garbage,
+      // matching the old empty-field_name toss.
       continue; // toss away garbage line
     }
+    auto field_name = parsed.prefix(colon_idx);
+    field_value.remove_prefix(colon_idx + 1);
 
     // RFC7230 section 3.2.4:
     // No whitespace is allowed between the header field-name and colon.  In
@@ -2449,22 +2571,42 @@ mime_parser_parse(MIMEParser *parser, HdrHeap *heap, MIMEHdrImpl *mh, const char
     // A proxy MUST remove any such whitespace from a response message before
     // forwarding the message downstream.
     bool raw_print_field = true;
+    bool name_scan_stale = false;
     if (is_ws(field_name.back())) {
       if (!remove_ws_from_field_name) {
         return ParseResult::ERROR;
       }
       field_name.rtrim_if(&ParseRules::is_ws);
       raw_print_field = false;
-    } else if (parsed.suffix(2) != "\r\n") {
-      raw_print_field = false;
+      // The fused scan hashed and validated the untrimmed name; recompute below.
+      name_scan_stale = true;
     }
 
     // find value first
     field_value.ltrim_if(&ParseRules::is_ws);
     field_value.rtrim_if(&ParseRules::is_wslfcr);
 
+    if (raw_print_field) {
+      // Raw printing copies the original input bytes instead of re-serializing, so it would
+      // replay this line ending verbatim. Everything between the end of the trimmed value and
+      // the end of the line must be optional whitespace followed by exactly one CRLF; a bare
+      // CR in there is malformed (RFC 9112 section 2.2) and must not be forwarded.
+      TextView tail{field_value.data() + field_value.size(), parsed.data() + parsed.size()};
+      if (tail.suffix(2) != "\r\n" || tail.remove_suffix(2).find_first_of("\r\n") != TextView::npos) {
+        raw_print_field = false;
+      }
+    }
+
     // Make sure the name + value is not longer than configured max_hdr_field_size
     if (field_name.size() + field_value.size() > max_hdr_field_size) {
+      return ParseResult::ERROR;
+    }
+
+    // m_len_name is uint16_t, so a name longer than UINT16_MAX would truncate
+    // its stored length; m_len_value is uint32_t : 24 and could hold more, but the
+    // value is capped at the same UINT16_MAX for a uniform limit. Reject the
+    // message rather than keep a field whose length and data disagree.
+    if (field_name.size() > UINT16_MAX || field_value.size() > UINT16_MAX) {
       return ParseResult::ERROR;
     }
 
@@ -2484,13 +2626,22 @@ mime_parser_parse(MIMEParser *parser, HdrHeap *heap, MIMEHdrImpl *mh, const char
     // tokenize the name //
     ///////////////////////
 
-    int field_name_wks_idx = hdrtoken_tokenize(field_name.data(), field_name.size());
-
-    if (field_name_wks_idx < 0) {
-      for (auto i : field_name) {
-        if (!ParseRules::is_http_field_name(i)) {
-          return ParseResult::ERROR;
+    int field_name_wks_idx;
+    if (name_scan_stale) {
+      // BWS trimming shortened the name after the fused scan; redo the WKS
+      // lookup and byte validation over the trimmed name.
+      field_name_wks_idx = hdrtoken_tokenize(field_name.data(), static_cast<int>(field_name.size()));
+      if (field_name_wks_idx < 0) {
+        for (auto i : field_name) {
+          if (!ParseRules::is_http_field_name(i)) {
+            return ParseResult::ERROR;
+          }
         }
+      }
+    } else {
+      field_name_wks_idx = hdrtoken_tokenize_prehashed(field_name.data(), static_cast<int>(field_name.size()), field_name_hash);
+      if ((field_name_wks_idx < 0) && !name_all_valid) {
+        return ParseResult::ERROR;
       }
     }
 
@@ -2506,9 +2657,69 @@ mime_parser_parse(MIMEParser *parser, HdrHeap *heap, MIMEHdrImpl *mh, const char
     // build and insert the new field object //
     ///////////////////////////////////////////
 
-    MIMEField *field = mime_field_create(heap, mh);
+    MIMEField *field = mime_field_create_for_name(heap, mh, field_name);
     mime_field_name_value_set(heap, mh, field, field_name_wks_idx, field_name, field_value, raw_print_field, parsed.size(), false);
-    mime_hdr_field_attach(mh, field, 1, nullptr);
+
+    // A clear presence bit guarantees no duplicate exists. Skip the lookup.
+    // Names without a presence bit still need the normal duplicate check.
+    //
+    // mime_hdr_field_attach() uses field->name_get(), which returns an interned
+    // string for well-known names. mime_hdr_field_find() would then check the
+    // same presence bit and return nullptr.
+    int check_for_dups = 1;
+    if (field_name_wks_idx >= 0) {
+      uint64_t const mask = hdrtoken_index_to_mask(field_name_wks_idx);
+      if (mask != 0 && (mh->m_presence_bits & mask) == 0) {
+        check_for_dups = 0;
+      }
+    }
+
+    // Append an adjacent duplicate in O(1), without searching its chain.
+    // The previous field must have the same name and be the chain's tail.
+    // Duplicate chains follow slot order, so the new field belongs after it.
+    //
+    // mime_field_create_for_name() can reuse an older slot. The pointer check
+    // below limits this shortcut to cases where the new field occupies
+    // the last allocated slot in the tail block and has a predecessor there.
+    // Otherwise, fall back to normal attachment.
+    //
+    // Get the previous field from the current header. Do not cache it in the
+    // parser: the parser can be reused after its previous header is destroyed.
+    bool                      fast_tail_append = false;
+    MIMEFieldBlockImpl *const tail_fblock      = mh->m_fblock_list_tail;
+
+    if (tail_fblock->m_freetop >= 2 && &tail_fblock->m_field_slots[tail_fblock->m_freetop - 1] == field) {
+      MIMEField *const last = &tail_fblock->m_field_slots[tail_fblock->m_freetop - 2];
+
+      if (last->is_live() && last->m_next_dup == nullptr) {
+        bool name_matches;
+
+        if (field_name_wks_idx >= 0) {
+          name_matches = (last->m_wks_idx == field_name_wks_idx);
+        } else {
+          name_matches =
+            (last->m_wks_idx < 0) &&
+            ts::iequals(std::string_view{last->m_ptr_name, static_cast<std::string_view::size_type>(last->m_len_name)}, field_name);
+        }
+
+        if (name_matches) {
+          field->m_readiness = MIME_FIELD_SLOT_READINESS_LIVE;
+          field->m_flags     = (field->m_flags & ~MIME_FIELD_SLOT_FLAGS_DUP_HEAD);
+          field->m_next_dup  = nullptr;
+          last->m_next_dup   = field;
+          // Presence bit and slot accelerator were set by the chain head; a tail
+          // dup leaves them untouched, matching attach's patch-after-prev branch.
+          if (field->m_ptr_value && field->is_cooked()) {
+            mh->recompute_cooked_stuff(field);
+          }
+          fast_tail_append = true;
+        }
+      }
+    }
+
+    if (!fast_tail_append) {
+      mime_hdr_field_attach(mh, field, check_for_dups, nullptr);
+    }
   }
 }
 
@@ -2669,6 +2880,12 @@ to_same_char(int ch)
   return ch;
 }
 
+int
+to_lower_char(int ch)
+{
+  return std::tolower(static_cast<unsigned char>(ch));
+}
+
 } // end anonymous namespace
 
 int
@@ -2680,7 +2897,7 @@ mime_mem_print(std::string_view src, char *buf_start, int buf_length, int *buf_i
 int
 mime_mem_print_lc(std::string_view src, char *buf_start, int buf_length, int *buf_index_inout, int *buf_chars_to_skip_inout)
 {
-  return mime_mem_print_(src, buf_start, buf_length, buf_index_inout, buf_chars_to_skip_inout, std::tolower);
+  return mime_mem_print_(src, buf_start, buf_length, buf_index_inout, buf_chars_to_skip_inout, to_lower_char);
 }
 
 int
@@ -2750,7 +2967,14 @@ const char *
 mime_str_u16_set(HdrHeap *heap, std::string_view src, const char **d_str, uint16_t *d_len, bool must_copy)
 {
   auto s_len{static_cast<int>(src.length())};
-  ink_assert(s_len >= 0 && s_len < UINT16_MAX);
+  // The out-length (*d_len) is uint16_t. A length greater than UINT16_MAX
+  // would be silently truncated by the assignment below, leaving the stored
+  // length out of sync with the data. Reject the value without mutating
+  // *d_str/*d_len so any existing stored string is preserved intact.
+  if (s_len < 0 || s_len > static_cast<int>(UINT16_MAX)) {
+    Warning("mime_str_u16_set: rejecting oversized field of length %d (max %u)", s_len, UINT16_MAX);
+    return nullptr;
+  }
   // INKqa08287 - keep track of free string space.
   //  INVARIANT: passed in result pointers must be to
   //    either NULL or be valid ptr for a string already
@@ -2799,7 +3023,7 @@ mime_days_since_epoch_to_mdy_slowcase(time_t days_since_jan_1_1970, int *m_retur
 {
   static constexpr int DAYS_OFFSET = 25508;
 
-  static const char months[] = {
+  static constexpr uint8_t months[] = {
     2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
     2,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
     4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,
@@ -3003,130 +3227,72 @@ mime_format_date(char *buffer, time_t value)
   return buf - buffer; // not counting NUL
 }
 
+// RFC 9110 §17.5: recipients must limit processing of numeric values to prevent
+// arithmetic overflows. These parsers clamp to the max of their respective type on
+// overflow rather than returning an error. Callers that need stricter policy
+// (e.g. rejecting an overflowing Content-Length per RFC 9112 §6.3, or clamping
+// Age to 2^31 per RFC 9111 §1.2.2) apply it at their own layer.
 int32_t
 mime_parse_int(const char *buf, const char *end)
 {
-  int32_t num;
-  bool    negative;
-
   if (!buf || (buf == end)) {
     return 0;
   }
 
-  if (is_digit(*buf)) { // fast case
-    num = *buf++ - '0';
-    while ((buf != end) && is_digit(*buf)) {
-      if (num != INT_MAX) {
-        int new_num = (num * 10) + (*buf++ - '0');
-
-        num = (new_num < num ? INT_MAX : new_num); // Check for overflow
-      } else {
-        ++buf; // Skip the remaining (valid) digits since we reached MAX/MIN_INT
-      }
-    }
-
-    return num;
-  } else {
-    num      = 0;
-    negative = false;
-
-    while ((buf != end) && ParseRules::is_space(*buf)) {
-      buf += 1;
-    }
-
-    if ((buf != end) && (*buf == '-')) {
-      negative  = true;
-      buf      += 1;
-    }
-    // NOTE: we first compute the value as negative then correct the
-    // sign back to positive. This enables us to correctly parse MININT.
-    while ((buf != end) && is_digit(*buf)) {
-      if (num != INT_MIN) {
-        int new_num = (num * 10) - (*buf++ - '0');
-
-        num = (new_num > num ? INT_MIN : new_num); // Check for overflow, so to speak, see above re: negative
-      } else {
-        ++buf; // Skip the remaining (valid) digits since we reached MAX/MIN_INT
-      }
-    }
-
-    if (!negative) {
-      num = -num;
-    }
-
-    return num;
+  while ((buf != end) && ParseRules::is_space(*buf)) {
+    buf += 1;
   }
+
+  int32_t num    = 0;
+  auto [ptr, ec] = std::from_chars(buf, end, num);
+
+  if (ec == std::errc::result_out_of_range) {
+    return (*buf == '-') ? INT32_MIN : INT32_MAX;
+  }
+
+  return num;
 }
 
 uint32_t
 mime_parse_uint(const char *buf, const char *end)
 {
-  uint32_t num;
-
   if (!buf || (buf == end)) {
     return 0;
   }
 
-  if (is_digit(*buf)) // fast case
-  {
-    num = *buf++ - '0';
-    while ((buf != end) && is_digit(*buf)) {
-      num = (num * 10) + (*buf++ - '0');
-    }
-    return num;
-  } else {
-    num = 0;
-    while ((buf != end) && ParseRules::is_space(*buf)) {
-      buf += 1;
-    }
-    while ((buf != end) && is_digit(*buf)) {
-      num = (num * 10) + (*buf++ - '0');
-    }
-    return num;
+  while ((buf != end) && ParseRules::is_space(*buf)) {
+    buf += 1;
   }
+
+  uint32_t num   = 0;
+  auto [ptr, ec] = std::from_chars(buf, end, num);
+
+  if (ec == std::errc::result_out_of_range) {
+    return UINT32_MAX;
+  }
+
+  return num;
 }
 
 int64_t
 mime_parse_int64(const char *buf, const char *end)
 {
-  int64_t num;
-  bool    negative;
-
   if (!buf || (buf == end)) {
     return 0;
   }
 
-  if (is_digit(*buf)) // fast case
-  {
-    num = *buf++ - '0';
-    while ((buf != end) && is_digit(*buf)) {
-      num = (num * 10) + (*buf++ - '0');
-    }
-    return num;
-  } else {
-    num      = 0;
-    negative = false;
-
-    while ((buf != end) && ParseRules::is_space(*buf)) {
-      buf += 1;
-    }
-
-    if ((buf != end) && (*buf == '-')) {
-      negative  = true;
-      buf      += 1;
-    }
-    // NOTE: we first compute the value as negative then correct the
-    // sign back to positive. This enables us to correctly parse MININT.
-    while ((buf != end) && is_digit(*buf)) {
-      num = (num * 10) - (*buf++ - '0');
-    }
-
-    if (!negative) {
-      num = -num;
-    }
-
-    return num;
+  while ((buf != end) && ParseRules::is_space(*buf)) {
+    buf += 1;
   }
+
+  int64_t num    = 0;
+  auto [ptr, ec] = std::from_chars(buf, end, num);
+
+  if (ec == std::errc::result_out_of_range) {
+    return (*buf == '-') ? INT64_MIN : INT64_MAX;
+  }
+
+  return num;
 }
 
 /*-------------------------------------------------------------------------
@@ -3493,52 +3659,14 @@ mime_parse_integer(const char *&buf, const char *end, int *integer)
     return false;
   }
 
-  int32_t num;
-  bool    negative;
+  int32_t num    = 0;
+  auto [ptr, ec] = std::from_chars(buf, end, num);
 
-  // This code is copied verbatim from mime_parse_int ... Sigh. Maybe amc is right, and
-  // we really need to clean this up. But, as such, we should redo all these interfaces,
-  // and that's a big undertaking (and we'd want to move these strings all to string_view's).
-  if (is_digit(*buf)) { // fast case
-    num = *buf++ - '0';
-    while ((buf != end) && is_digit(*buf)) {
-      if (num != INT_MAX) {
-        int new_num = (num * 10) + (*buf++ - '0');
-
-        num = (new_num < num ? INT_MAX : new_num); // Check for overflow
-      } else {
-        ++buf; // Skip the remaining (valid) digits since we reached MAX/MIN_INT
-      }
-    }
-  } else {
-    num      = 0;
-    negative = false;
-
-    while ((buf != end) && ParseRules::is_space(*buf)) {
-      buf += 1;
-    }
-
-    if ((buf != end) && (*buf == '-')) {
-      negative  = true;
-      buf      += 1;
-    }
-    // NOTE: we first compute the value as negative then correct the
-    // sign back to positive. This enables us to correctly parse MININT.
-    while ((buf != end) && is_digit(*buf)) {
-      if (num != INT_MIN) {
-        int new_num = (num * 10) - (*buf++ - '0');
-
-        num = (new_num > num ? INT_MIN : new_num); // Check for overflow, so to speak, see above re: negative
-      } else {
-        ++buf; // Skip the remaining (valid) digits since we reached MAX/MIN_INT
-      }
-    }
-
-    if (!negative) {
-      num = -num;
-    }
+  if (ec == std::errc::result_out_of_range) {
+    num = (*buf == '-') ? INT32_MIN : INT32_MAX;
   }
 
+  buf      = ptr;
   *integer = num;
 
   return true;
@@ -3565,6 +3693,8 @@ MIMEFieldBlockImpl::marshal(MarshalXlate *ptr_xlate, int num_ptr, MarshalXlate *
         if (field->m_next_dup) {
           HDR_MARSHAL_PTR_1(field->m_next_dup, MIMEField, ptr_xlate);
         }
+      } else {
+        field->m_next_dup = nullptr;
       }
     }
   } else {
@@ -3577,6 +3707,8 @@ MIMEFieldBlockImpl::marshal(MarshalXlate *ptr_xlate, int num_ptr, MarshalXlate *
         if (field->m_next_dup) {
           HDR_MARSHAL_PTR(field->m_next_dup, MIMEField, ptr_xlate, num_ptr);
         }
+      } else {
+        field->m_next_dup = nullptr;
       }
     }
   }
@@ -3663,6 +3795,7 @@ int
 MIMEHdrImpl::marshal(MarshalXlate *ptr_xlate, int num_ptr, MarshalXlate *str_xlate, int num_str)
 {
   // printf("MIMEHdrImpl:marshal  num_ptr = %d  num_str = %d\n", num_ptr, num_str);
+  m_free_slot = MIME_FIELD_FREE_SLOT_UNINITIALIZED;
   HDR_MARSHAL_PTR(m_fblock_list_tail, MIMEFieldBlockImpl, ptr_xlate, num_ptr);
   return m_first_fblock.marshal(ptr_xlate, num_ptr, str_xlate, num_str);
 }
@@ -3672,6 +3805,7 @@ MIMEHdrImpl::unmarshal(intptr_t offset)
 {
   HDR_UNMARSHAL_PTR(m_fblock_list_tail, MIMEFieldBlockImpl, offset);
   m_first_fblock.unmarshal(offset);
+  m_free_slot = MIME_FIELD_FREE_SLOT_UNINITIALIZED;
 }
 
 void
@@ -3767,6 +3901,9 @@ MIMEHdrImpl::recompute_cooked_stuff(MIMEField *changing_field_or_null, const std
 
         for (s = csv_iter.get_first(field, &len); s != nullptr; s = csv_iter.get_next(&len)) {
           e = s + len;
+          // Store set mask bits from this CSV value so we can clear them if needed.
+          uint32_t csv_value_mask = 0;
+
           for (c = s; (c < e) && (ParseRules::is_token(*c)); c++) {
             ;
           }
@@ -3778,9 +3915,10 @@ MIMEHdrImpl::recompute_cooked_stuff(MIMEField *changing_field_or_null, const std
             Dbg(dbg_ctl_http, "recompute_cooked_stuff: got field '%s'", token_wks);
 #endif
 
-            HdrTokenHeapPrefix *p                  = hdrtoken_wks_to_prefix(token_wks);
+            const HdrTokenHeapPrefix *p            = hdrtoken_wks_to_prefix(token_wks);
             mask                                   = p->wks_type_specific.u.cache_control.cc_mask;
             m_cooked_stuff.m_cache_control.m_mask |= mask;
+            csv_value_mask                        |= mask;
 
 #if TRACK_COOKING
             Dbg(dbg_ctl_http, "                        set mask 0x%0X", mask);
@@ -3789,27 +3927,95 @@ MIMEHdrImpl::recompute_cooked_stuff(MIMEField *changing_field_or_null, const std
             if (mask & (MIME_COOKED_MASK_CC_MAX_AGE | MIME_COOKED_MASK_CC_S_MAXAGE | MIME_COOKED_MASK_CC_MAX_STALE |
                         MIME_COOKED_MASK_CC_MIN_FRESH)) {
               int value;
+              // Per RFC 7230 Section 3.2.3, there should be no whitespace around '='.
+              const char *value_start = c;
 
-              if (mime_parse_integer(c, e, &value)) {
+              // Check if the next character is '=' (no space allowed before '=').
+              if (c < e && *c == '=') {
+                ++c; // Move past the '='
+
+                // Again: no whitespace after the '=' either. Keep in mind that values can be negative.
+                bool valid_syntax = (c < e) && (is_digit(*c) || *c == '-');
+
+                if (valid_syntax) {
+                  // Reset to value_start to let mime_parse_integer do its work.
+                  c = value_start;
+                  if (mime_parse_integer(c, e, &value)) {
 #if TRACK_COOKING
-                Dbg(dbg_ctl_http, "                        set integer value %d", value);
+                    Dbg(dbg_ctl_http, "                        set integer value %d", value);
 #endif
-                if (token_wks == MIME_VALUE_MAX_AGE.c_str()) {
-                  m_cooked_stuff.m_cache_control.m_secs_max_age = value;
-                } else if (token_wks == MIME_VALUE_MIN_FRESH.c_str()) {
-                  m_cooked_stuff.m_cache_control.m_secs_min_fresh = value;
-                } else if (token_wks == MIME_VALUE_MAX_STALE.c_str()) {
-                  m_cooked_stuff.m_cache_control.m_secs_max_stale = value;
-                } else if (token_wks == MIME_VALUE_S_MAXAGE.c_str()) {
-                  m_cooked_stuff.m_cache_control.m_secs_s_maxage = value;
+                    if (token_wks == MIME_VALUE_MAX_AGE.c_str()) {
+                      m_cooked_stuff.m_cache_control.m_secs_max_age = value;
+                    } else if (token_wks == MIME_VALUE_MIN_FRESH.c_str()) {
+                      m_cooked_stuff.m_cache_control.m_secs_min_fresh = value;
+                    } else if (token_wks == MIME_VALUE_MAX_STALE.c_str()) {
+                      m_cooked_stuff.m_cache_control.m_secs_max_stale = value;
+                    } else if (token_wks == MIME_VALUE_S_MAXAGE.c_str()) {
+                      m_cooked_stuff.m_cache_control.m_secs_s_maxage = value;
+                    }
+                  } else {
+#if TRACK_COOKING
+                    Dbg(dbg_ctl_http, "                        set integer value %d", INT_MAX);
+#endif
+                    if (token_wks == MIME_VALUE_MAX_STALE.c_str()) {
+                      m_cooked_stuff.m_cache_control.m_secs_max_stale = INT_MAX;
+                    }
+                  }
+                } else {
+                  // Syntax is malformed (e.g., whitespace after '=', quotes around value, or no value).
+                  // Treat this as unrecognized and clear the mask.
+                  csv_value_mask                         = 0;
+                  m_cooked_stuff.m_cache_control.m_mask &= ~mask;
+                }
+              } else if (token_wks == MIME_VALUE_MAX_STALE.c_str()) {
+                // RFC 9111, Section 5.2.1.2: a valueless max-stale request
+                // directive permits a stale response of any age.
+                m_cooked_stuff.m_cache_control.m_secs_max_stale = INT_MAX;
+              } else {
+                // No '=' found, or whitespace before '='. This is malformed
+                // for directives that require values.
+                // Clear the mask for this directive.
+                csv_value_mask                         = 0;
+                m_cooked_stuff.m_cache_control.m_mask &= ~mask;
+              }
+            } else if (c < e && *c == '=') {
+              // RFC 9111, Section 5.2: cache-directive = token [ "=" ( token / quoted-string ) ].
+              // Skip the argument, such as the field names of a qualified private or no-cache.
+              // The CSV iterator strips the closing quote, so tolerate its absence.
+              ++c;
+              if (c < e && *c == '"') {
+                for (++c; c < e && *c != '"'; ++c) {
+                  if (*c == '\\' && c + 1 < e) {
+                    ++c;
+                  }
+                }
+                if (c < e) {
+                  ++c;
                 }
               } else {
-#if TRACK_COOKING
-                Dbg(dbg_ctl_http, "                        set integer value %d", INT_MAX);
-#endif
-                if (token_wks == MIME_VALUE_MAX_STALE.c_str()) {
-                  m_cooked_stuff.m_cache_control.m_secs_max_stale = INT_MAX;
+                while (c < e && ParseRules::is_token(*c)) {
+                  ++c;
                 }
+              }
+            }
+
+            // Detect whether there is any more non-whitespace content after the
+            // directive. This indicates an unrecognized or malformed directive.
+            // This can happen, for instance, if the host uses semicolons
+            // instead of commas as separators which is against RFC 7234 (see
+            // issue #12029). Regardless of the cause, this means we need to
+            // ignore the directive and clear any mask bits we set from it.
+            while (c < e && ParseRules::is_ws(*c)) {
+              ++c;
+            }
+            if (c < e) {
+              // There's non-whitespace content that wasn't parsed. This means
+              // that we cannot really understand what this directive is.
+              // Per RFC 7234 Section 5.2: "A cache MUST ignore unrecognized cache
+              // directives."
+              if (csv_value_mask != 0) {
+                // Reverse the mask that we set above.
+                m_cooked_stuff.m_cache_control.m_mask &= ~csv_value_mask;
               }
             }
           }

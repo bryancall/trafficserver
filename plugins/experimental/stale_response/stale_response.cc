@@ -69,6 +69,7 @@ create_response_info(void)
   resp_info->http_hdr_loc = TSHttpHdrCreate(resp_info->http_hdr_buf);
   resp_info->parser       = TSHttpParserCreate();
   resp_info->parsed       = false;
+  resp_info->status       = TS_HTTP_STATUS_NONE;
 
   return resp_info;
 }
@@ -92,16 +93,34 @@ create_request_info(TSHttpTxn txnp)
   TSMBuffer hdr_url_buf;
   TSMLoc    hdr_url_loc;
 
-  TSHttpTxnClientReqGet(txnp, &hdr_url_buf, &hdr_url_loc);
+  if (TSHttpTxnClientReqGet(txnp, &hdr_url_buf, &hdr_url_loc) != TS_SUCCESS) {
+    SRDBG(TAG_BAD, "[%s] TSHttpTxnClientReqGet failed!", __FUNCTION__);
+    TSfree(req_info);
+    return nullptr;
+  }
 
   // this only seems to be correct/consistent if done in http read request header state
-  char *url               = TSHttpTxnEffectiveUrlStringGet(txnp, &req_info->effective_url_length);
+  char *url = TSHttpTxnEffectiveUrlStringGet(txnp, &req_info->effective_url_length);
+  if (url == nullptr) {
+    SRDBG(TAG_BAD, "[%s] TSHttpTxnEffectiveUrlStringGet failed!", __FUNCTION__);
+    TSHandleMLocRelease(hdr_url_buf, TS_NULL_MLOC, hdr_url_loc);
+    TSfree(req_info);
+    return nullptr;
+  }
   req_info->effective_url = TSstrndup(url, req_info->effective_url_length);
   TSfree(url);
 
   // copy the headers
   req_info->http_hdr_buf = TSMBufferCreate();
-  TSHttpHdrClone(req_info->http_hdr_buf, hdr_url_buf, hdr_url_loc, &(req_info->http_hdr_loc));
+  req_info->http_hdr_loc = TS_NULL_MLOC;
+  if (TSHttpHdrClone(req_info->http_hdr_buf, hdr_url_buf, hdr_url_loc, &(req_info->http_hdr_loc)) != TS_SUCCESS) {
+    SRDBG(TAG_BAD, "[%s] TSHttpHdrClone failed!", __FUNCTION__);
+    TSHandleMLocRelease(hdr_url_buf, TS_NULL_MLOC, hdr_url_loc);
+    TSMBufferDestroy(req_info->http_hdr_buf);
+    TSfree(req_info->effective_url);
+    TSfree(req_info);
+    return nullptr;
+  }
   // release the client request
   TSHandleMLocRelease(hdr_url_buf, TS_NULL_MLOC, hdr_url_loc);
 
@@ -140,7 +159,31 @@ create_state_info(TSHttpTxn txnp, TSCont contp)
 {
   StateInfo *state = new StateInfo(txnp, contp);
   state->req_info  = create_request_info(txnp);
+  if (state->req_info == nullptr) {
+    delete state;
+    return nullptr;
+  }
   return state;
+}
+
+/*-----------------------------------------------------------------------------------------------*/
+void
+body_memory_release(ConfigInfo *plugin_config, BodyData *pBody)
+{
+  if (!pBody) {
+    return;
+  }
+
+  TSMutexLock(plugin_config->body_data_mutex);
+  int64_t memory_accounted = pBody->memory_accounted;
+  pBody->memory_accounted  = 0;
+  if (memory_accounted > 0) {
+    plugin_config->body_data_memory_usage -= memory_accounted;
+    if (plugin_config->body_data_memory_usage < 0) {
+      plugin_config->body_data_memory_usage = 0;
+    }
+  }
+  TSMutexUnlock(plugin_config->body_data_mutex);
 }
 
 /*-----------------------------------------------------------------------------------------------*/
@@ -188,6 +231,7 @@ free_state_info(StateInfo *state)
 
   // this should be null but check and delete
   if (state->sie_body) {
+    body_memory_release(state->plugin_config, state->sie_body);
     delete state->sie_body;
   }
   state->sie_body = nullptr;
@@ -202,11 +246,12 @@ free_state_info(StateInfo *state)
 int64_t
 aync_memory_total_add(ConfigInfo *plugin_config, int64_t change)
 {
-  int64_t total;
-  TSMutexLock(plugin_config->body_data_mutex);
+  int64_t          total;
+  TSMutexLockGuard lock(plugin_config->body_data_mutex);
+
   plugin_config->body_data_memory_usage += change;
   total                                  = plugin_config->body_data_memory_usage;
-  TSMutexUnlock(plugin_config->body_data_mutex);
+
   return total;
 }
 /*-----------------------------------------------------------------------------------------------*/
@@ -286,7 +331,11 @@ async_remove_active(uint32_t key_hash, ConfigInfo *plugin_config)
   TSMutexLock(plugin_config->body_data_mutex);
   UintBodyMap::iterator pos = plugin_config->body_data->find(key_hash);
   if (pos != plugin_config->body_data->end()) {
-    plugin_config->body_data_memory_usage -= (pos->second)->getSize();
+    plugin_config->body_data_memory_usage -= (pos->second)->memory_accounted;
+    if (plugin_config->body_data_memory_usage < 0) {
+      plugin_config->body_data_memory_usage = 0;
+    }
+    (pos->second)->memory_accounted = 0;
     delete pos->second;
     plugin_config->body_data->erase(pos);
     wasActive = true;
@@ -318,11 +367,15 @@ void
 send_stale_response(StateInfo *state)
 {
   // force to use age header
-  TSHttpTxnConfigIntSet(state->txnp, TS_CONFIG_HTTP_INSERT_AGE_IN_RESPONSE, 1);
+  if (TSHttpTxnConfigIntSet(state->txnp, TS_CONFIG_HTTP_INSERT_AGE_IN_RESPONSE, 1) != TS_SUCCESS) {
+    SRDBG(TAG_BAD, "[%s] {%u} TSHttpTxnConfigIntSet(INSERT_AGE_IN_RESPONSE) failed", __FUNCTION__, state->req_info->key_hash);
+  }
   // add send response header hook for warning header
   TSHttpTxnHookAdd(state->txnp, TS_HTTP_SEND_RESPONSE_HDR_HOOK, state->transaction_contp);
   // set cache as fresh
-  TSHttpTxnCacheLookupStatusSet(state->txnp, TS_CACHE_LOOKUP_HIT_FRESH);
+  if (TSHttpTxnCacheLookupStatusSet(state->txnp, TS_CACHE_LOOKUP_HIT_FRESH) != TS_SUCCESS) {
+    SRDBG(TAG_BAD, "[%s] {%u} TSHttpTxnCacheLookupStatusSet failed", __FUNCTION__, state->req_info->key_hash);
+  }
 }
 
 /*-----------------------------------------------------------------------------------------------*/
@@ -418,7 +471,91 @@ get_cached_header_info(StateInfo *state)
 }
 
 /*-----------------------------------------------------------------------------------------------*/
+/** Record that the current origin fetch exceeded the plugin body memory cap.
+ *
+ * This centralizes the transition into the over-memory state so callers do not
+ * double-count the condition in the plugin statistic.
+ *
+ * @param[in,out] state Fetch state that should fall back instead of saving the
+ * new origin response.
+ */
 static void
+fetch_mark_over_max_memory(StateInfo *state)
+{
+  if (state->over_max_memory) {
+    return;
+  }
+
+  state->over_max_memory = true;
+  SRDBG(TAG, "[%s] {%u} Over memory usage %" PRId64, __FUNCTION__, state->req_info->key_hash,
+        aync_memory_total_get(state->plugin_config));
+  TSStatIntIncrement(state->plugin_config->rfc_stat_memory_over, 1);
+}
+
+/*-----------------------------------------------------------------------------------------------*/
+/** Try to reserve plugin body memory for data about to be appended to a body.
+ *
+ * This keeps the plugin-wide memory total and the per-body accounting in sync:
+ * the aggregate enforces the configured cap, while @a pBody records exactly how
+ * much this object must release later.
+ *
+ * @param[in,out] plugin_config Plugin configuration that owns the shared memory
+ * accounting state.
+ * @param[in,out] pBody Body buffer receiving the reserved data.
+ * @param[in] size Number of bytes to reserve.
+ * @return @c true if the reservation fits within the cap, or @a size is zero or
+ * negative; @c false if reserving @a size would exceed the cap.
+ */
+static bool
+body_memory_reserve(ConfigInfo *plugin_config, BodyData *pBody, int64_t size)
+{
+  bool reserved = false;
+
+  if (size <= 0) {
+    return true;
+  }
+
+  TSMutexLock(plugin_config->body_data_mutex);
+  if (size <= plugin_config->max_body_data_memory_usage - plugin_config->body_data_memory_usage) {
+    plugin_config->body_data_memory_usage += size;
+    pBody->memory_accounted               += size;
+    reserved                               = true;
+  }
+  TSMutexUnlock(plugin_config->body_data_mutex);
+
+  return reserved;
+}
+
+/*-----------------------------------------------------------------------------------------------*/
+/** Determine how many origin response bytes an SIE/SWR fetch should read.
+ *
+ * This returns one byte more than the configured finite cap so the read path can
+ * detect an oversized origin response. The returned value is passed to
+ * @c TSVConnRead in @c fetch_resource(); any overflow byte then reaches
+ * @c fetch_save_response(), where @c body_memory_reserve() rejects the chunk and
+ * the fetch is marked over-memory instead of being treated as a successful,
+ * exactly-at-cap response.
+ *
+ * @param[in] plugin_config Plugin configuration holding the body memory cap.
+ * @return The VConn read limit to use for the origin fetch.
+ */
+static int64_t
+fetch_read_limit(ConfigInfo *plugin_config)
+{
+  int64_t limit = plugin_config->max_body_data_memory_usage;
+
+  if (limit < 0) {
+    return 0;
+  }
+  if (limit == INT64_MAX) {
+    return INT64_MAX;
+  }
+  // The `+ 1` is for a sentinel byte marking overflow. See the function comment above for details.
+  return limit + 1;
+}
+
+/*-----------------------------------------------------------------------------------------------*/
+static bool
 fetch_save_response(StateInfo *state, BodyData *pBody)
 {
   TSIOBufferBlock block;
@@ -428,14 +565,16 @@ fetch_save_response(StateInfo *state, BodyData *pBody)
   while (block != nullptr) {
     start = TSIOBufferBlockReadStart(block, state->resp_io_buf_reader, &avail);
     if (avail > 0) {
-      pBody->addChunk(start, avail);
-      // increase body_data_memory_usage only if content stored in plugin_config->body_data
-      if (pBody->key_hash_active) {
-        aync_memory_total_add(state->plugin_config, avail);
+      if (!body_memory_reserve(state->plugin_config, pBody, avail)) {
+        fetch_mark_over_max_memory(state);
+        return false;
       }
+      pBody->addChunk(start, avail);
     }
     block = TSIOBufferBlockNext(block);
   }
+
+  return true;
 }
 
 /*-----------------------------------------------------------------------------------------------*/
@@ -466,33 +605,67 @@ fetch_parse_response(StateInfo *state)
 }
 
 /*-----------------------------------------------------------------------------------------------*/
-static void
+static bool
 fetch_read_the_data(StateInfo *state)
 {
-  // always save data
-  if (state->cur_save_body) {
-    fetch_save_response(state, state->cur_save_body);
-  } else {
-    SRDBG(TAG_BAD, "[%s] no BodyData", __FUNCTION__);
-  }
-  // get the resp code
   if (!state->resp_info->parsed) {
     fetch_parse_response(state);
   }
-  // Consume data
+
   int64_t avail = TSIOBufferReaderAvail(state->resp_io_buf_reader);
+  if (avail == TS_ERROR) {
+    TSError("[%s] Error while getting number of bytes available", __FUNCTION__);
+    state->fetch_error = true;
+    return false;
+  }
+
+  if (state->sie_active && state->resp_info->parsed && valid_sie_status(state->resp_info->status)) {
+    TSIOBufferReaderConsume(state->resp_io_buf_reader, avail);
+    TSVIONDoneSet(state->r_vio, TSVIONDoneGet(state->r_vio) + avail);
+    return false;
+  }
+
+  if (state->cur_save_body) {
+    if (!fetch_save_response(state, state->cur_save_body)) {
+      TSIOBufferReaderConsume(state->resp_io_buf_reader, avail);
+      TSVIONDoneSet(state->r_vio, TSVIONDoneGet(state->r_vio) + avail);
+      return false;
+    }
+  } else {
+    SRDBG(TAG_BAD, "[%s] no BodyData", __FUNCTION__);
+  }
+
   TSIOBufferReaderConsume(state->resp_io_buf_reader, avail);
   TSVIONDoneSet(state->r_vio, TSVIONDoneGet(state->r_vio) + avail);
+  return true;
 }
 
 /*-----------------------------------------------------------------------------------------------*/
 static void
 fetch_finish(StateInfo *state)
 {
+  bool const         response_header_parsed = state->resp_info && state->resp_info->parsed;
+  TSHttpStatus const response_status        = response_header_parsed ? state->resp_info->status : TS_HTTP_STATUS_NONE;
+  bool const         fetch_failed           = state->fetch_error || (!response_header_parsed && !state->over_max_memory);
+
+  if (!response_header_parsed) {
+    SRDBG(TAG_BAD, "[%s] {%u} origin response header was not parsed", __FUNCTION__, state->req_info->key_hash);
+  }
+
   SRDBG(TAG, "[%s] {%u} swr=%d sie=%d", __FUNCTION__, state->req_info->key_hash, state->swr_active, state->sie_active);
   if (state->swr_active) {
     SRDBG(TAG, "[%s] {%u} SWR Unlock URL / Post request", __FUNCTION__, state->req_info->key_hash);
-    if (state->sie_active && valid_sie_status(state->resp_info->status)) {
+    if (fetch_failed) {
+      SRDBG(TAG_BAD, "[%s] {%u} SWR fetch failed", __FUNCTION__, state->req_info->key_hash);
+      if (!async_remove_active(state->req_info->key_hash, state->plugin_config)) {
+        SRDBG(TAG_BAD, "[%s] {%u} didnt delete async active", __FUNCTION__, state->req_info->key_hash);
+      }
+    } else if (state->over_max_memory) {
+      SRDBG(TAG, "[%s] {%u} SWR response exceeded memory limit", __FUNCTION__, state->req_info->key_hash);
+      if (!async_remove_active(state->req_info->key_hash, state->plugin_config)) {
+        SRDBG(TAG_BAD, "[%s] {%u} didnt delete async active", __FUNCTION__, state->req_info->key_hash);
+      }
+    } else if (state->sie_active && valid_sie_status(response_status)) {
       SRDBG(TAG, "[%s] {%u} SWR Bad Data skipping", __FUNCTION__, state->req_info->key_hash);
       if (!async_remove_active(state->req_info->key_hash, state->plugin_config)) {
         SRDBG(TAG_BAD, "[%s] {%u} didnt delete async active", __FUNCTION__, state->req_info->key_hash);
@@ -503,8 +676,8 @@ fetch_finish(StateInfo *state)
     }
   } else // state->sie_active
   {
-    SRDBG(TAG, "[%s] {%u} SIE in sync path Reenable %d", __FUNCTION__, state->req_info->key_hash, state->resp_info->status);
-    if (valid_sie_status(state->resp_info->status)) {
+    SRDBG(TAG, "[%s] {%u} SIE in sync path Reenable %d", __FUNCTION__, state->req_info->key_hash, response_status);
+    if (valid_sie_status(response_status)) {
       SRDBG(TAG, "[%s] {%u} SIE sending stale data", __FUNCTION__, state->req_info->key_hash);
       if (state->plugin_config->log_info.object &&
           (state->plugin_config->log_info.all || state->plugin_config->log_info.stale_if_error)) {
@@ -515,6 +688,12 @@ fetch_finish(StateInfo *state)
       }
       // send out the stale data
       send_stale_response(state);
+    } else if (fetch_failed) {
+      SRDBG(TAG_BAD, "[%s] SIE {%u} fetch failed; sending stale data", __FUNCTION__, state->req_info->key_hash);
+      send_stale_response(state);
+    } else if (state->over_max_memory) {
+      SRDBG(TAG, "[%s] SIE {%u} response exceeded memory limit; sending stale data", __FUNCTION__, state->req_info->key_hash);
+      send_stale_response(state);
     } else {
       SRDBG(TAG, "[%s] SIE {%u} sending new data", __FUNCTION__, state->req_info->key_hash);
       // load the data as if we are OS by ServerIntercept
@@ -524,11 +703,15 @@ fetch_finish(StateInfo *state)
       // Add sie_server_intercept header.
       TSMBuffer buf;
       TSMLoc    hdr_loc;
-      TSHttpTxnClientReqGet(state->txnp, &buf, &hdr_loc);
-      if (!add_header(buf, hdr_loc, SIE_SERVER_INTERCEPT_HEADER, HTTP_VALUE_SERVER_INTERCEPT)) {
+      if (TSHttpTxnClientReqGet(state->txnp, &buf, &hdr_loc) != TS_SUCCESS) {
+        SRDBG(TAG_BAD, "[%s] {%u} TSHttpTxnClientReqGet failed", __FUNCTION__, state->req_info->key_hash);
         TSError("stale_response [%s] error inserting header %s", __FUNCTION__, SIE_SERVER_INTERCEPT_HEADER);
+      } else {
+        if (!add_header(buf, hdr_loc, SIE_SERVER_INTERCEPT_HEADER, HTTP_VALUE_SERVER_INTERCEPT)) {
+          TSError("stale_response [%s] error inserting header %s", __FUNCTION__, SIE_SERVER_INTERCEPT_HEADER);
+        }
+        TSHandleMLocRelease(buf, TS_NULL_MLOC, hdr_loc);
       }
-      TSHandleMLocRelease(buf, TS_NULL_MLOC, hdr_loc);
       serverInterceptSetup(state->txnp, pBody, state->plugin_config);
       // This was TSHttpTxnNewCacheLookupDo -- now we just use the copy we have
     }
@@ -554,8 +737,14 @@ fetch_consume(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
 
   case TS_EVENT_VCONN_READ_READY:
     // save the data and parse header if needed
-    fetch_read_the_data(state);
-    TSVIOReenable(state->r_vio);
+    if (fetch_read_the_data(state)) {
+      TSVIOReenable(state->r_vio);
+    } else {
+      TSVConnAbort(state->vconn, TS_VC_CLOSE_ABORT);
+      fetch_finish(state);
+      free_state_info(state);
+      TSContDestroy(contp);
+    }
     break;
 
   case TS_EVENT_VCONN_READ_COMPLETE:
@@ -631,7 +820,7 @@ fetch_resource(TSCont contp, TSEvent, void *)
   // connect , setup read , write
   assert(state->req_info->client_addr != nullptr);
   state->vconn = TSHttpConnect(state->req_info->client_addr);
-  state->r_vio = TSVConnRead(state->vconn, consume_contp, state->resp_io_buf, INT64_MAX);
+  state->r_vio = TSVConnRead(state->vconn, consume_contp, state->resp_io_buf, fetch_read_limit(state->plugin_config));
   state->w_vio =
     TSVConnWrite(state->vconn, consume_contp, state->req_io_buf_reader, TSIOBufferReaderAvail(state->req_io_buf_reader));
 
@@ -733,13 +922,13 @@ transaction_handler(TSCont contp, TSEvent event, void *edata)
         state->swr_active =
           ((((state->txn_start - chi->date) + 1) < (chi->max_age + chi->stale_while_revalidate)) && chi->stale_while_revalidate);
         state->sie_active = ((((state->txn_start - chi->date) + 1) < (chi->max_age + chi->stale_if_error)) && chi->stale_if_error);
-        state->over_max_memory = (aync_memory_total_get(plugin_config) > plugin_config->max_body_data_memory_usage);
+        state->over_max_memory = (aync_memory_total_get(plugin_config) >= plugin_config->max_body_data_memory_usage);
 
         SRDBG(TAG, "[%s] {%u} CacheLookup Stale swr=%d sie=%d over=%d", __FUNCTION__, state->req_info->key_hash, state->swr_active,
               state->sie_active, state->over_max_memory);
         // see if we are using too much memory and if so do not swr/sie
         if (state->over_max_memory) {
-          SRDBG(TAG, "[%s] {%u} Over memory Usage %" PRId64, __FUNCTION__, state->req_info->key_hash,
+          SRDBG(TAG, "[%s] {%u} Over memory usage %" PRId64, __FUNCTION__, state->req_info->key_hash,
                 aync_memory_total_get(plugin_config));
           TSStatIntIncrement(state->plugin_config->rfc_stat_memory_over, 1);
         }
@@ -799,11 +988,14 @@ transaction_handler(TSCont contp, TSEvent event, void *edata)
         if (plugin_config->intercept_reroute) {
           TSMBuffer buf;
           TSMLoc    hdr_loc;
-          TSHttpTxnClientReqGet(txnp, &buf, &hdr_loc);
-          if (strip_trailing_parameter(buf, hdr_loc)) {
-            SRDBG(TAG_BAD, "[%s] {%u} missed fake internal cache lookup", __FUNCTION__, state->req_info->key_hash);
+          if (TSHttpTxnClientReqGet(txnp, &buf, &hdr_loc) != TS_SUCCESS) {
+            SRDBG(TAG_BAD, "[%s] {%u} TSHttpTxnClientReqGet failed", __FUNCTION__, state->req_info->key_hash);
+          } else {
+            if (strip_trailing_parameter(buf, hdr_loc)) {
+              SRDBG(TAG_BAD, "[%s] {%u} missed fake internal cache lookup", __FUNCTION__, state->req_info->key_hash);
+            }
+            TSHandleMLocRelease(buf, TS_NULL_MLOC, hdr_loc);
           }
-          TSHandleMLocRelease(buf, TS_NULL_MLOC, hdr_loc);
         }
 
         // free state - reenable - had check
@@ -824,9 +1016,12 @@ transaction_handler(TSCont contp, TSEvent event, void *edata)
 
   case TS_EVENT_HTTP_SEND_REQUEST_HDR: {
     SRDBG(TAG, "[%s]: strip_trailing_parameter", __FUNCTION__);
-    TSHttpTxnServerReqGet(txnp, &buf, &loc);
-    strip_trailing_parameter(buf, loc);
-    TSHandleMLocRelease(buf, TS_NULL_MLOC, loc);
+    if (TSHttpTxnServerReqGet(txnp, &buf, &loc) != TS_SUCCESS) {
+      SRDBG(TAG_BAD, "[%s] TSHttpTxnServerReqGet failed", __FUNCTION__);
+    } else {
+      strip_trailing_parameter(buf, loc);
+      TSHandleMLocRelease(buf, TS_NULL_MLOC, loc);
+    }
 
     // reenable
     TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
@@ -836,24 +1031,31 @@ transaction_handler(TSCont contp, TSEvent event, void *edata)
 
   case TS_EVENT_HTTP_READ_RESPONSE_HDR:
     // this should be internal request dont cache if valid sie error code -- no state variable
-    TSHttpTxnServerRespGet(txnp, &buf, &loc);
-    http_status = TSHttpHdrStatusGet(buf, loc);
-    if (valid_sie_status(http_status)) {
-      SRDBG(TAG, "[%s] Set non-cachable %d", __FUNCTION__, http_status);
-      TSHttpTxnServerRespNoStoreSet(txnp, 1);
+    if (TSHttpTxnServerRespGet(txnp, &buf, &loc) != TS_SUCCESS) {
+      SRDBG(TAG_BAD, "[%s] TSHttpTxnServerRespGet failed", __FUNCTION__);
+    } else {
+      http_status = TSHttpHdrStatusGet(buf, loc);
+      if (valid_sie_status(http_status)) {
+        TSHttpTxnServerRespNoStoreSet(txnp, 1);
+        SRDBG(TAG, "[%s] Set non-cachable %d", __FUNCTION__, http_status);
+      }
+      TSHandleMLocRelease(buf, TS_NULL_MLOC, loc);
     }
-    TSHandleMLocRelease(buf, TS_NULL_MLOC, loc);
     TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
     break;
 
   case TS_EVENT_HTTP_SEND_RESPONSE_HDR:
     // add in the stale warning header -- no state variable
     SRDBG(TAG, "[%s] set warning header", __FUNCTION__);
-    TSHttpTxnClientRespGet(txnp, &buf, &loc);
-    if (!add_header(buf, loc, TS_MIME_FIELD_WARNING, HTTP_VALUE_STALE_WARNING)) {
+    if (TSHttpTxnClientRespGet(txnp, &buf, &loc) != TS_SUCCESS) {
+      SRDBG(TAG_BAD, "[%s] TSHttpTxnClientRespGet failed", __FUNCTION__);
       TSError("stale_response [%s] error inserting header %s", __FUNCTION__, TS_MIME_FIELD_WARNING);
+    } else {
+      if (!add_header(buf, loc, TS_MIME_FIELD_WARNING, HTTP_VALUE_STALE_WARNING)) {
+        TSError("stale_response [%s] error inserting header %s", __FUNCTION__, TS_MIME_FIELD_WARNING);
+      }
+      TSHandleMLocRelease(buf, TS_NULL_MLOC, loc);
     }
-    TSHandleMLocRelease(buf, TS_NULL_MLOC, loc);
     TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
     break;
 
@@ -911,7 +1113,8 @@ parse_args(int argc, char const *argv[])
       plugin_config->log_info.stale_if_error = true;
       break;
     case 'd':
-      plugin_config->log_info.filename = strdup(optarg);
+      // Assigning replaces any name from an earlier occurrence of this option.
+      plugin_config->log_info.filename_override = optarg;
       break;
 
     case 'e':
@@ -949,8 +1152,13 @@ parse_args(int argc, char const *argv[])
   }
 
   if (plugin_config->log_info.all || plugin_config->log_info.stale_while_revalidate || plugin_config->log_info.stale_if_error) {
-    SRDBG(TAG, "[%s] Logging to %s", __FUNCTION__, plugin_config->log_info.filename);
-    TSTextLogObjectCreate(plugin_config->log_info.filename, TS_LOG_MODE_ADD_TIMESTAMP, &(plugin_config->log_info.object));
+    char const *const log_filename =
+      plugin_config->log_info.filename_override.empty() ? PLUGIN_TAG : plugin_config->log_info.filename_override.c_str();
+    SRDBG(TAG, "[%s] Logging to %s", __FUNCTION__, log_filename);
+    if (TSTextLogObjectCreate(log_filename, TS_LOG_MODE_ADD_TIMESTAMP, &(plugin_config->log_info.object)) != TS_SUCCESS) {
+      SRDBG(TAG_BAD, "[%s] TSTextLogObjectCreate failed for %s", __FUNCTION__, log_filename);
+      TSError("stale_response [%s] failed to create log object %s", __FUNCTION__, log_filename);
+    }
   }
 
   SRDBG(TAG, "[%s] global stale if error override = %" PRIdMAX, __FUNCTION__,
@@ -975,6 +1183,11 @@ read_request_header_handler(TSHttpTxn const txnp, ConfigInfo *plugin_config)
   TSContDataSet(transaction_contp, plugin_config);
   // todo: move state create to not always happen -- issue: effective url string seems to change in dif states
   StateInfo *state = create_state_info(txnp, transaction_contp);
+  if (state == nullptr) {
+    SRDBG(TAG_BAD, "[%s] create_state_info failed, skipping this transaction", __FUNCTION__);
+    TSContDestroy(transaction_contp);
+    return;
+  }
   TSUserArgSet(txnp, plugin_config->txn_slot, state);
 
   if (TSHttpTxnIsInternal(txnp)) {
@@ -1000,10 +1213,13 @@ read_request_header_handler(TSHttpTxn const txnp, ConfigInfo *plugin_config)
         // add the async to the end so we use the fake cached response
         TSMBuffer buf;
         TSMLoc    hdr_loc;
-        TSHttpTxnClientReqGet(txnp, &buf, &hdr_loc);
-        add_trailing_parameter(buf, hdr_loc);
-        TSHandleMLocRelease(buf, TS_NULL_MLOC, hdr_loc);
-        SRDBG(TAG, "[%s] {%u} add async parm to get fake cached item", __FUNCTION__, state->req_info->key_hash);
+        if (TSHttpTxnClientReqGet(txnp, &buf, &hdr_loc) != TS_SUCCESS) {
+          SRDBG(TAG_BAD, "[%s] {%u} TSHttpTxnClientReqGet failed", __FUNCTION__, state->req_info->key_hash);
+        } else {
+          add_trailing_parameter(buf, hdr_loc);
+          TSHandleMLocRelease(buf, TS_NULL_MLOC, hdr_loc);
+          SRDBG(TAG, "[%s] {%u} add async parm to get fake cached item", __FUNCTION__, state->req_info->key_hash);
+        }
       }
     }
   }
@@ -1054,7 +1270,8 @@ TSPluginInit(int argc, const char *argv[])
   SRDBG(TAG, "Plugin registration succeeded.");
 
   TSMgmtString value = nullptr;
-  TSMgmtStringGet("proxy.config.http.server_session_sharing.pool", &value);
+  // a failed get leaves value as nullptr, which the check below already treats as misconfigured
+  static_cast<void>(TSMgmtStringGet("proxy.config.http.server_session_sharing.pool", &value));
   if (nullptr == value || 0 != strcasecmp(value, "global")) {
     TSError("[stale-response] Server session pool must be set to 'global'");
     assert(false);

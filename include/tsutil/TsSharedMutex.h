@@ -3,7 +3,7 @@
   A drop-in replacement for std::shared_mutex with guarantees against writer
   starvation.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -24,9 +24,12 @@
 
 #pragma once
 
+#include <cstdio>
+#include <cstdlib>
 #include <pthread.h>
 #include "tsutil/Strerror.h"
 #include "tsutil/Assert.h"
+#include "tsutil/ts_thread_safety.h"
 
 #ifdef X
 #error "X preprocessor symbol defined"
@@ -48,7 +51,7 @@ namespace ts
 {
 // A class with the same interface as std::shared_mutex, but which is not prone to writer starvation.
 //
-class shared_mutex
+class TS_CAPABILITY("shared_mutex") shared_mutex
 {
 public:
   shared_mutex() {}
@@ -58,8 +61,13 @@ public:
   shared_mutex(shared_mutex const &)            = delete;
   shared_mutex &operator=(shared_mutex const &) = delete;
 
+  // The lock/unlock methods are the trusted implementation of this capability:
+  // their bodies drive the raw pthread_rwlock_t, which some libc headers (e.g.
+  // FreeBSD's <pthread.h>) annotate as a capability in its own right. Exempt the
+  // bodies from analysis so only the capability contract on each signature is
+  // checked; the actual data-race checking happens at the call sites.
   void
-  lock()
+  lock() TS_ACQUIRE() TS_NO_THREAD_SAFETY_ANALYSIS
   {
     int error = pthread_rwlock_wrlock(&_lock);
     if (error != 0) {
@@ -69,7 +77,7 @@ public:
   }
 
   bool
-  try_lock()
+  try_lock() TS_TRY_ACQUIRE(true) TS_NO_THREAD_SAFETY_ANALYSIS
   {
     int error = pthread_rwlock_trywrlock(&_lock);
     if (EBUSY == error) {
@@ -84,7 +92,7 @@ public:
   }
 
   void
-  unlock()
+  unlock() TS_RELEASE() TS_NO_THREAD_SAFETY_ANALYSIS
   {
     X(debug_assert(_exclusive);)
     X(_exclusive = false;)
@@ -93,7 +101,7 @@ public:
   }
 
   void
-  lock_shared()
+  lock_shared() TS_ACQUIRE_SHARED() TS_NO_THREAD_SAFETY_ANALYSIS
   {
     int error = pthread_rwlock_rdlock(&_lock);
     if (error != 0) {
@@ -105,7 +113,7 @@ public:
   }
 
   bool
-  try_lock_shared()
+  try_lock_shared() TS_TRY_ACQUIRE_SHARED(true) TS_NO_THREAD_SAFETY_ANALYSIS
   {
     int error = pthread_rwlock_tryrdlock(&_lock);
     if (EBUSY == error) {
@@ -121,7 +129,7 @@ public:
   }
 
   void
-  unlock_shared()
+  unlock_shared() TS_RELEASE_SHARED() TS_NO_THREAD_SAFETY_ANALYSIS
   {
     X(debug_assert(_shared > 0);)
     X(--_shared;)
@@ -148,7 +156,7 @@ public:
 
 private:
   void
-  _unlock()
+  _unlock() TS_NO_THREAD_SAFETY_ANALYSIS
   {
     int error = pthread_rwlock_unlock(&_lock);
     if (error != 0) {
@@ -166,16 +174,53 @@ private:
   pthread_rwlock_t _lock = PTHREAD_RWLOCK_INITIALIZER;
 #endif
 
-  static void
-  _call_fatal(char const *func_name, void *ptr, int errnum)
-  {
+  [[noreturn]] static void
+  _call_fatal(char const *func_name, void *ptr, int errnum) noexcept
+  try {
     fatal_error("{}({}) failed: {} ({})", func_name, ptr, Strerror(errnum).c_str(), errnum);
+  } catch (...) {
+    // Formatting the message can throw (it allocates); abort with a minimal
+    // breadcrumb rather than let an exception escape into a noexcept destructor.
+    fprintf(stderr, "shared_mutex: %s failed (%d); abort message formatting threw\n", func_name, errnum);
+    std::abort();
   }
 
   // In debug builds, make sure shared vs. exclusive locks and unlocks are properly paired.
   //
   X(std::atomic<bool> _exclusive{false};)
   X(std::atomic<int> _shared{0};)
+};
+
+// RAII guards for ts::shared_mutex that carry Clang thread-safety capability
+// state. Prefer these over std::unique_lock / std::shared_lock in code annotated
+// for -Wthread-safety: the analysis does not reliably track the std wrappers
+// (see tsutil/ts_thread_safety.h).
+//
+class TS_SCOPED_CAPABILITY write_guard
+{
+public:
+  explicit write_guard(shared_mutex &m) TS_ACQUIRE(m) : _m(m) { _m.lock(); }
+  ~write_guard() TS_RELEASE() { _m.unlock(); }
+
+  write_guard(write_guard const &)            = delete;
+  write_guard &operator=(write_guard const &) = delete;
+
+private:
+  shared_mutex &_m;
+};
+
+class TS_SCOPED_CAPABILITY read_guard
+{
+public:
+  explicit read_guard(shared_mutex &m) TS_ACQUIRE_SHARED(m) : _m(m) { _m.lock_shared(); }
+  // A scoped-capability destructor uses the plain release form even for a shared acquire.
+  ~read_guard() TS_RELEASE() { _m.unlock_shared(); }
+
+  read_guard(read_guard const &)            = delete;
+  read_guard &operator=(read_guard const &) = delete;
+
+private:
+  shared_mutex &_m;
 };
 
 } // end namespace ts

@@ -134,7 +134,7 @@ loadRegionMap(StringMap &m, const String &filename)
       Dbg(dbg_ctl, "added entry-point:%s, region:%s", entrypoint.c_str(), region.c_str());
     }
 
-    m[entrypoint] = region;
+    m[entrypoint] = std::move(region);
   }
 
   if (m.at("").empty()) {
@@ -154,6 +154,8 @@ class S3Config;
 class ConfigCache
 {
 public:
+  ~ConfigCache();
+
   S3Config *get(const char *fname);
 
 private:
@@ -433,6 +435,12 @@ public:
   }
 
   int
+  get_conf_reload_count()
+  {
+    return _conf_reload_count;
+  }
+
+  int
   incr_invalid_file_count()
   {
     return _invalid_file_count++;
@@ -601,6 +609,13 @@ private:
   int       _invalid_file_count  = 0;
 };
 
+ConfigCache::~ConfigCache()
+{
+  for (auto &[key, data] : _cache) {
+    delete data.config.load();
+  }
+}
+
 bool
 S3Config::parse_config(const std::string &config_fname)
 {
@@ -706,7 +721,7 @@ ConfigCache::get(const char *fname)
     unsigned update_status = it->second.update_status;
     if (tv.tv_sec > (it->second.load_time + _ttl)) {
       if (!(update_status & 1) && it->second.update_status.compare_exchange_strong(update_status, update_status + 1)) {
-        Dbg(dbg_ctl, "Configuration from %s is stale, reloading", config_fname.c_str());
+        Dbg(dbg_ctl, "Cached configuration from %s is stale, reloading", config_fname.c_str());
         s3 = new S3Config(false); // false == this config does not get the continuation
 
         if (s3->parse_config(config_fname)) {
@@ -735,7 +750,7 @@ ConfigCache::get(const char *fname)
         s3 = it->second.config;
       }
     } else {
-      Dbg(dbg_ctl, "Configuration from %s is fresh, reusing", config_fname.c_str());
+      Dbg(dbg_ctl, "Cached configuration from %s is fresh, reusing", config_fname.c_str());
       s3 = it->second.config;
     }
   } else {
@@ -786,6 +801,7 @@ public:
   TSHttpStatus authorizeGcp(S3Config *s3);
   TSHttpStatus authorize(S3Config *s3);
   bool         set_header(const char *header, int header_len, const char *val, int val_len);
+  void         stripUnauthorizedAmzHeaders(const StringSet &allowedHeaders);
 
 private:
   TSHttpTxn _txnp;
@@ -842,6 +858,61 @@ S3Request::set_header(const char *header, int header_len, const char *val, int v
   return ret;
 }
 
+///////////////////////////////////////////////////////////////////////////
+// Unlike isXAmzHeader(), takes the raw (not pre-lowercased) name, so callers
+// can skip lowercasing/allocating for headers that don't match.
+static bool
+hasXAmzPrefix(const char *name, int name_len)
+{
+  return name && name_len >= static_cast<int>(X_AMZ.length()) && 0 == strncasecmp(name, X_AMZ.c_str(), X_AMZ.length());
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Strip any x-amz- request header that isn't explicitly allow-listed via
+// v4-include-headers. AWS SigV4 always signs whatever x-amz- headers are
+// present at signing time, so an unsolicited x-amz- header (e.g. x-amz-acl)
+// would otherwise reach S3 with a valid signature, which can trigger
+// bucket-policy denials that get negatively cached.
+//
+// This runs at SEND_REQUEST_HDR, where a client-sent header is
+// indistinguishable from one added by another plugin earlier in the chain, so
+// both are subject to removal. A header another plugin is expected to supply
+// has to be named in v4-include-headers.
+void
+S3Request::stripUnauthorizedAmzHeaders(const StringSet &allowedHeaders)
+{
+  TSMLoc field_loc = TSMimeHdrFieldGet(_bufp, _hdr_loc, 0);
+
+  while (field_loc) {
+    TSMLoc next_field_loc = TSMimeHdrFieldNext(_bufp, _hdr_loc, field_loc);
+
+    int         name_len = 0;
+    const char *name     = TSMimeHdrFieldNameGet(_bufp, _hdr_loc, field_loc, &name_len);
+
+    if (hasXAmzPrefix(name, name_len)) {
+      bool strip = allowedHeaders.empty();
+
+      // allowedHeaders is empty in the common case (v4-include-headers unset), where every
+      // x-amz- header is stripped unconditionally, so skip lowercasing/allocating the name
+      // and the set lookup below.
+      if (!strip) {
+        String lowercaseName(name, name_len);
+        std::transform(lowercaseName.begin(), lowercaseName.end(), lowercaseName.begin(),
+                       [](unsigned char c) { return ::tolower(c); });
+        strip = allowedHeaders.end() == allowedHeaders.find(lowercaseName);
+      }
+
+      if (strip) {
+        Dbg(dbg_ctl, "stripping unauthorized x-amz- header %.*s", name_len, name);
+        TSMimeHdrFieldDestroy(_bufp, _hdr_loc, field_loc);
+      }
+    }
+
+    TSHandleMLocRelease(_bufp, _hdr_loc, field_loc);
+    field_loc = next_field_loc;
+  }
+}
+
 // dst points to starting offset of dst buffer
 // dst_len remaining space in buffer
 static size_t
@@ -879,6 +950,8 @@ S3Request::authorize(S3Config *s3)
 TSHttpStatus
 S3Request::authorizeAwsV4(S3Config *s3)
 {
+  stripUnauthorizedAmzHeaders(s3->v4includeHeaders());
+
   TsApi  api(_bufp, _hdr_loc, _url_loc);
   time_t now = time(nullptr);
 
@@ -1170,8 +1243,8 @@ config_reloader(TSCont cont, TSEvent /* event ATS_UNUSED */, void *edata)
       Dbg(dbg_ctl, "config expiration time for version: %s %s is in the past, re-checking in 1 minute", s3->versionString(),
           config_fname.c_str());
       if (s3->incr_conf_reload_count() % 10 == 0) {
-        TSError("[%s] tried to reload config automatically but failed, please try manual reloading the config file: %s",
-                PLUGIN_NAME, config_fname.c_str());
+        TSError("[%s] Reloading an expired config file has been failing (%d attempts): %s", PLUGIN_NAME,
+                s3->get_conf_reload_count(), config_fname.c_str());
       }
       s3->schedule_conf_reload(60);
     }

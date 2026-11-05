@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -41,9 +41,9 @@
 void
 DiagsConfig::reconfigure_diags()
 {
-  int              i;
+  int              i = 0;
   DiagsConfigState c{};
-  bool             found, all_found;
+  bool             found = false, all_found = false;
 
   static struct {
     const char *config_name;

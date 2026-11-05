@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -114,6 +114,13 @@ public:
   field_count() const
   {
     return m_field_count;
+  }
+  // Read-only view of the parsed fields, in marshalling (on-wire) order. Used
+  // by the v3 binary log writer to publish each field's wire type.
+  const LogFieldList &
+  field_list() const
+  {
+    return m_field_list;
   }
   long
   interval() const

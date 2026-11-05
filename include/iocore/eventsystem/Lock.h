@@ -2,7 +2,7 @@
 
   Basic locks for threads
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -233,10 +233,7 @@ public:
     Initializes the underlying mutex object.
 
     After constructing your ProxyMutex object, use this function
-    to initialize the underlying mutex object with an optional name.
-
-    @param name Name to identify this ProxyMutex. Its use depends
-      on the given platform.
+    to initialize the underlying mutex object.
 
   */
   void
@@ -261,7 +258,13 @@ Mutex_trylock(
   if (m->thread_holding != t) {
     if (!ink_mutex_try_acquire(&m->the_mutex)) {
 #ifdef DEBUG
-      lock_waiting(m->srcloc, m->handler);
+      // Report the waiting site, not the holder's. m->srcloc and m->handler
+      // belong to whichever thread holds the mutex, and this thread just failed
+      // to acquire it, so reading them races with the holder publishing them
+      // below and clearing them in Mutex_unlock(). Any holder snapshot is stale
+      // the instant it is taken anyway; lock_holding() still reports the holder
+      // from Mutex_unlock(), where the fields are owned by the caller.
+      lock_waiting(location, ahandler);
 #ifdef LOCK_CONTENTION_PROFILING
       m->unsuccessful_nonblocking_acquires++;
       m->nonblocking_acquires++;

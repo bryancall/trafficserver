@@ -1012,18 +1012,49 @@ LSP_FUNCTION_DOCUMENTATION: Final[dict[str, FunctionDoc]] = {
                 "set-redirect(302, \"https://example.com/new-path\");",
                 "set-redirect(301, \"https://secure.example.com{inbound.url.path}\");"
             ]),
+    "set-body":
+        FunctionDoc(
+            name="Set Body Function",
+            category="Statement Function",
+            description="Sets the response body and, optionally, its Content-Type.",
+            syntax="set-body(content[, content_type])",
+            maps_to="set-body",
+            usage_context="Used as a statement in response processing sections",
+            parameters=[
+                ParameterDoc("content", "string", "Response body content"),
+                ParameterDoc("content_type", "string", "Optional MIME type for the response")
+            ],
+            examples=[
+                "set-body(\"Not found\", \"text/plain\");", 'set-body("{{"error": "not found"}}", "application/problem+json");'
+            ]),
     "set-body-from":
         FunctionDoc(
             name="Set Body From URL Function",
             category="Statement Function",
             description="Sets the response body by fetching content from the specified URL. Used to replace the response body with content from an external source.",
-            syntax="set-body-from(source_url)",
+            syntax="set-body-from(source_url[, content_type])",
             maps_to="set-response-body-from-url",
-            usage_context="Used as a statement in code blocks to replace response content",
-            parameters=[ParameterDoc("source_url", "string", "URL to fetch the response body content from")],
+            usage_context="Used in READ_RESPONSE to replace response content",
+            parameters=[
+                ParameterDoc("source_url", "string", "URL to fetch the response body content from"),
+                ParameterDoc("content_type", "string", "Optional MIME type overriding the fetched Content-Type")
+            ],
             examples=[
                 "set-body-from(\"https://errors.example.com/500.html\");", "set-body-from(\"http://content.example.com/body.txt\");"
             ]),
+    "set-body-from-file":
+        FunctionDoc(
+            name="Set Body From File Function",
+            category="Statement Function",
+            description="Sets the response body from a file loaded when the rule configuration is loaded.",
+            syntax="set-body-from-file(path[, content_type])",
+            maps_to="set-body-from-file",
+            usage_context="Used in REMAP or SEND_RESPONSE to serve local body content",
+            parameters=[
+                ParameterDoc("path", "string", "Absolute path or path relative to the rule file"),
+                ParameterDoc("content_type", "string", "Optional MIME type for the response")
+            ],
+            examples=['set-body-from-file("errors/forbidden.json", "application/json");']),
     "run-plugin":
         FunctionDoc(
             name="Run Plugin Function",
@@ -1075,7 +1106,7 @@ LSP_FUNCTION_DOCUMENTATION: Final[dict[str, FunctionDoc]] = {
 LSP_STRING_LITERAL_INFO: Final[dict[str, str]] = {
     "name": "String Literal",
     "description":
-        "String values in HRW4U support variable interpolation using {variable} syntax. Variables and function calls can be embedded within strings for dynamic content generation. Strings must be enclosed in double quotes when they contain spaces or special characters."
+        "String values in HRW4U support variable interpolation using {variable} syntax. Variables and function calls can be embedded within strings for dynamic content generation. Enclose literal brace-delimited content such as a JSON object in double braces: {{\"error\": \"not found\"}}. Strings must be enclosed in double quotes when they contain spaces or special characters."
 }
 
 # Remove redundant LSP_HEADER_CONTEXTS - now covered by LSP_SUB_NAMESPACE_DOCUMENTATION
@@ -1085,10 +1116,12 @@ LSP_FIELD_DOCUMENTATION: Final[dict[str, DocumentationInfo]] = {
     "inbound.resp.body":
         DocumentationInfo(
             name="Inbound Response Body",
-            description="Sets the response body content that will be sent to the client. Can be used to provide custom response content.",
+            description="Sets the response body content that will be sent to the client. Use set-body() when a Content-Type is also needed.",
             context="Response Body Assignment",
             usage="Used to set custom response body content in response processing sections",
-            examples=["inbound.resp.body = \"Custom error message\";", "inbound.resp.body = \"I am a teapot, rewritten\";"]),
+            examples=[
+                "inbound.resp.body = \"Custom error message\";", 'set-body("{{"error": "bad request"}}", "application/json");'
+            ]),
     "outbound.resp.body":
         DocumentationInfo(
             name="Outbound Response Body",
@@ -1177,6 +1210,18 @@ LSP_MODIFIER_DOCUMENTATION: Final[dict[str, DocumentationInfo]] = {
                 "if (inbound.url.path == \".php\" with EXT) {\n    // Matches PHP files\n}",
                 "inbound.url.path == \".html\" with EXT",
                 "if (inbound.url.path == \".CC\" with EXT,NOCASE) {\n    // Case-insensitive extension match\n}"
+            ]),
+    "NORM":
+        DocumentationInfo(
+            name="Normalized Value",
+            description="Normalizes the value before it is used, which today means percent-decoding it, so that an "
+            "escaped string such as pr%69vate matches the pattern private.",
+            context="Value Modifier",
+            usage="Used where a client could evade a match by escaping the pattern. Also allowed on interpolated values.",
+            examples=[
+                "if (inbound.url.path ~ /private-/ with NORM) {\n    // Also matches pr%69vate-\n}",
+                "if (inbound.url.path == \"PRIVATE-\" with MID,NOCASE,NORM) {\n    // Composes with the other modifiers\n}",
+                "inbound.req.X-Decoded-Path = \"{inbound.url.path with NORM}\";"
             ]),
 }
 

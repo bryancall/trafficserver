@@ -1,0 +1,440 @@
+# AGENTS.md
+
+This file provides guidance to coding agents working with this repository.
+
+## Project Overview
+
+Apache Traffic Server (ATS) is a high-performance HTTP/HTTPS caching proxy
+server written in C++20. It uses an event-driven, multi-threaded architecture
+with a sophisticated plugin system.
+
+**Key Technologies:**
+- Language: C++20
+- Build System: CMake (migrated from autotools in v10)
+- Testing: Catch2 unit tests plus pytest Uranium replay and native scenario tests
+- Protocols: TLS, HTTP/1.1, HTTP/2, HTTP/3 (via Quiche)
+
+## Project Structure
+
+Core sources live in `src/` (for example `src/proxy`, `src/iocore`,
+`src/traffic_server`). Public headers are in `include/`. Built-in plugins are
+in `plugins/` and `plugins/experimental/`. Uranium tests are in `tests/`,
+especially `tests/uranium_tests/`. Build system files are in `cmake/` plus the
+top-level `CMakeLists.txt`, and docs are in `doc/`. Third party libraries that
+we include locally are in `lib/`.
+
+## Codex Agent Quick Start
+
+Use this sequence for most tasks:
+
+```bash
+# Configure and build a dev tree.
+cmake --preset dev
+cmake --build build-dev
+
+# Run a focused unit test or test suite.
+ctest --test-dir build-dev -j4
+
+# Format before commit.
+cmake --build build-dev -t format
+```
+
+For environments using the default preset naming:
+
+```bash
+cmake --preset default
+cmake --build build-default
+ctest --test-dir build-default
+cmake --build build-default -t format
+```
+
+If this file drifts from current project conventions, run `/init` to
+re-bootstrap agent guidance, then keep repository-specific commands and rules
+below.
+
+## Personal Preferences
+
+If `.codex/AGENTS.local.md` exists, load it for user-specific style preferences
+and working conventions. This file is optional and should stay untracked.
+
+### Key CMake Options
+- `BUILD_EXPERIMENTAL_PLUGINS=ON` - Enable experimental plugins
+- `ENABLE_QUICHE=ON` - QUIC/HTTP3 support
+- `ENABLE_CRIPTS=ON` - Cripts scripting API
+- `BUILD_REGRESSION_TESTING=ON` - Enable legacy test suite
+- `ENABLE_ASAN=ON` - Configure ASan instrumentation
+- `BUILD_TESTING=ON` - Enable building of the Catch2 tests
+
+## Testing
+
+### Unit Tests (Catch2)
+Built automatically with the project. Run via ctest:
+```bash
+ctest --test-dir build -j4
+```
+
+### Running a Single Unit Test
+Unit tests are built into executables. Find the test binary and run it directly:
+```bash
+# Unit tests are typically in build/src/<component>/
+./build/src/tscore/test_tscore
+```
+
+### Uranium Tests (pytest)
+
+**Enable Uranium tests during configuration:**
+```bash
+cmake -B build -DENABLE_URTEST=ON
+cmake --build build
+cmake --install build
+```
+
+**Run all Uranium tests:**
+```bash
+cmake --build build -t urtest
+```
+
+**Run specific test(s):**
+```bash
+cd build/tests
+./urtest.sh -q -k <pytest_expression>
+```
+
+For example, to run items whose names contain `header_rewrite`:
+```bash
+./urtest.sh -q -k header_rewrite
+```
+
+Use pytest-xdist's `-n` option to run selected tests in parallel.
+
+```bash
+cd build/tests
+./urtest.sh -q -n 4 -k "header_rewrite or cache_control"
+```
+
+Most Uranium test coverage is in `tests/uranium_tests/`. The CI system uses the
+container image `ci.trafficserver.apache.org/ats/fedora:44` (Fedora version
+updated regularly). The source-tree `tests/urtest.sh` defaults to this image,
+using Apple container on macOS, Podman on Linux, or Docker as a fallback. It
+runs directly instead when it detects that it is already inside a container or
+the Fedora 44 test environment. Use `--run-in-container` or
+`--no-run-in-container` to override.
+
+### Writing Uranium Tests
+
+**New tests should normally be direct pytest replay tests.** Name the Proxy
+Verifier replay `<scenario>.test.yaml`; the file's `urtest` section describes
+DNS, server, client, and ATS setup, and pytest collects it without a companion
+`.test.py` wrapper. Run these with `cmake --build build -t urtest-replay`.
+
+If a direct replay test is not a good fit (say, the test needs a custom client), then
+write a plain `test_*` function taking the fixtures it needs. Use small helper
+functions or fixtures for repeated setup, and parametrization for variations.
+Keep classes for genuinely stateful clients or services, not mandatory scenario
+wrappers. See `doc/developer-guide/testing/uranium-api.en.rst` for fixture and
+service APIs.
+
+In native tests, launch Python helpers with `sys.executable` rather than a
+hardcoded `python3`, so the helper uses the same interpreter as pytest.
+
+Tests that are useful only when explicitly requested, such as privileged, very
+slow, or known-flaky diagnostic scenarios, use `@pytest.mark.manual`. Direct
+replay tests set `urtest.manual` to `true` or a reason string. They are skipped
+during normal runs. Enable them explicitly with `--run-manual` and normally
+select the intended test with `-k`:
+
+```bash
+./urtest.sh --run-manual -k ats_probe
+```
+
+**For complete details on writing Uranium tests, see:**
+- `doc/developer-guide/testing/uranium-tests.en.rst` - Comprehensive Uranium test guide
+- Proxy Verifier format: https://github.com/yahoo/proxy-verifier
+
+## Development Workflow
+
+### Code Formatting
+Always format code before committing:
+```bash
+cmake --build build -t format
+```
+
+### Before Commit Checklist
+- Keep scope tight and avoid unrelated file churn.
+- Run formatter: `cmake --build build -t format` (or `build-dev` when used).
+- Run targeted tests for changed areas (or explain why tests were skipped).
+- Keep commit message body wrapped to 72 characters per line.
+- Describe why the change was needed, not only what changed.
+
+### Editing Safety
+- Do not revert unrelated working tree changes.
+- Prefer minimal diffs over broad refactors unless requested.
+- Do not edit generated artifacts unless the task explicitly requires it.
+- When touching behavior, add or update tests when practical.
+
+### Git Workflow
+- Branch off `master` for almost all PRs
+- PRs must pass all Jenkins CI jobs before merging
+- Use the GitHub PR workflow (not Jira)
+- Set appropriate labels: **Backport**, **WIP**, etc.
+
+### Commit Message Format
+When an agent creates commits, use a short imperative summary line (under 50
+characters when practical) plus concise body text (1-3 sentences) focused on
+"why" rather than only "what". If the PR fixes an issue, add 'Fixes:
+#<issue_number>'. Keep commit message body lines to 72 characters.
+
+## Architecture Overview
+
+### Core Components
+
+**I/O Core (`src/iocore/`):**
+- `eventsystem/` - Event-driven engine (Continuations, Events, Processors)
+- `cache/` - Disk and RAM cache implementation
+- `net/` - Network layer with TLS and QUIC support
+- `dns/` - Asynchronous DNS resolution
+- `hostdb/` - Internal DNS cache
+- `aio/` - Asynchronous I/O
+
+**Proxy Logic (`src/proxy/`):**
+- `http/` - HTTP/1.1 protocol implementation
+- `http2/` - HTTP/2 support
+- `http3/` - HTTP/3 implementation
+- `hdrs/` - Header parsing and management
+- `logging/` - Flexible logging system
+- `http/remap/` - URL remapping and routing
+
+**Management (`src/mgmt/`):**
+- JSONRPC server for runtime configuration and management
+- Configuration file parsing and validation
+
+**Base Libraries (`src/`):**
+- `tscore/` - Core utilities and data structures
+- `tsutil/` - Core utilities (metrics, debugging, regex, etc.)
+- `api/` - Plugin API implementation
+- `tscpp/api/` - C++ API wrapper for plugins
+- `cripts/` - Cripts scripting framework for plugins
+
+### Event-Driven Architecture
+
+ATS uses a **Continuation-based** programming model:
+- All async operations use Continuations (callback objects)
+- Events are dispatched through an event system
+- Multiple thread pools handle different event types
+- Non-blocking I/O throughout
+
+### Configuration Files
+
+Primary configs (installed to `/etc/trafficserver/` by default):
+- `records.yaml` - Main configuration (formerly records.config)
+- `remap.config` - URL remapping rules
+- `plugin.config` - Plugin loading configuration
+- `ip_allow.yaml` - IP access control
+- `ssl_multicert.config` - TLS certificate configuration
+- `sni.yaml` - SNI-based routing
+- `storage.config` - Cache storage configuration
+
+Configuration can be modified at runtime via:
+- `traffic_ctl config reload` (for some settings)
+- JSONRPC API
+
+## Plugin Development
+
+### Plugin Types
+- **Global plugins** - Loaded in `plugin.config`, affect all requests
+- **Remap plugins** - Loaded per remap rule, affect specific mapped requests
+
+### Key Plugin APIs
+Headers in `include/ts/`:
+- `ts.h` - Main plugin API
+- `remap.h` - Remap plugin API
+- `InkAPIPrivateIOCore.h` - Advanced internal APIs
+
+### Plugin Hooks
+Plugins register callbacks at various points in request processing:
+- `TS_HTTP_READ_REQUEST_HDR_HOOK`
+- `TS_HTTP_SEND_REQUEST_HDR_HOOK`
+- `TS_HTTP_READ_RESPONSE_HDR_HOOK`
+- `TS_HTTP_SEND_RESPONSE_HDR_HOOK`
+- Many more (see `ts.h`)
+
+### Example Plugins
+- `example/plugins/` - Simple example plugins
+- `plugins/` - Stable core plugins
+- `plugins/experimental/` - Experimental plugins
+
+## Common Development Patterns
+
+### When Modifying HTTP Processing
+1. Understand the state machine: `src/proxy/http/HttpSM.cc` - HTTP State Machine
+2. Hook into the appropriate stage via plugin hooks or core modification
+3. Use `HttpTxn` objects to access transaction state
+4. Headers are accessed via `HDRHandle` and field APIs
+
+### When Adding Configuration
+1. Define record in `src/records/RecordsConfig.cc`
+2. Add validation if needed
+3. Update documentation in `doc/admin-guide/`
+4. Configuration can be read via `REC_` APIs
+
+### When Working with Cache
+- Cache is content-addressable, keyed by URL (modifiable via plugins)
+- Cache operations are async, continuation-based
+- Cache has RAM and disk tiers
+- Cache code is in `src/iocore/cache/`
+
+### When Debugging
+1. Enable debug tags in `records.yaml`:
+   ```yaml
+   proxy.config.diags.debug.enabled: 1
+   proxy.config.diags.debug.tags: http|cache
+   ```
+2. Check logs in `/var/log/trafficserver/`:
+   - `diags.log` - Debug output
+   - `error.log` - Errors and warnings
+3. Use `traffic_top` for live statistics
+4. Use `traffic_ctl` for runtime inspection
+
+**Debug Controls in Code:**
+```cpp
+static DbgCtl dbg_ctl{"my_component"};
+SMDebug(dbg_ctl, "Processing request for URL: %s", url);
+```
+
+## Important Conventions
+
+### License Headers
+- Always add Apache License 2.0 headers to the top of new source and test files
+- This includes `.cc`, `.h`, `.py`, and other code files
+- Follow the existing license header format used in the codebase
+
+### Comments
+In general, comments should explain "why" and not "what"; no narration,
+restated signatures, review-round residue, tracker tags or agent names, and
+never previous behavior — what the code used to do and why it changed go in
+the PR and commit message. Functions and classes should state their
+responsibilities and the semantics of the variables - do not restate the type
+of the variable. For instance, "Returns a std::string" is worse than useless -
+the reader of the code can see the return type. Explain what the string is and
+means in the context of its use in the codebase, such as "Returns the parsed
+URL", for example. These comment instructions apply to the whole code base,
+including production code, tests, Python, CMake and replay YAML files.
+
+### Code Style
+- `.editorconfig` and `.clang-format` is the source of truth for baseline formatting rules.
+- C++20 standard (nothing from C++23 or later)
+- Use RAII principles
+- Prefer smart pointers for ownership
+- Don't use templates unless needed and appropriate
+- Run `cmake --build build -t format` before committing
+- Source code line length: 132 characters maximum
+
+**C++ Formatting (Mozilla-based style):**
+- Indentation: 2 spaces for C/C++
+- Braces: Linux style (opening brace on same line)
+- Pointer alignment: Right (`Type *ptr`, not `Type* ptr`)
+- Variable declarations: Add empty line after declarations before subsequent code
+- Avoid naked conditions (always use braces with if statements)
+
+**Naming Conventions:**
+- CamelCase for classes: `HttpSM`, `NetVConnection`
+- snake_case for variables and functions: `server_entry`, `handle_api_return()`
+- UPPER_CASE for macros and constants: `HTTP_SM_SET_DEFAULT_HANDLER`
+- Private member variables use both `_` and `m_` prefixes in the source code;
+  be consistent with the surrounding code. For new files, prefer the `_` prefix
+  because that reflects the community consensus.
+- Boolean variables and functions returning boolean values are named as
+  predicates: use `was_modified` rather than `modified`.
+
+**Doxygen Comments:**
+
+When adding doxygen comments:
+
+- `@brief` is assumed for the first sentence, so give a brief summary right
+  after `/** ` without using `@brief`.
+- In the description of classes, functions, and member variables, convey the
+  responsibility of the item being described (its role and intent), not just
+  what the code obviously does.
+- Use `@a <name>` to reference a function argument by name in prose
+  (e.g. "If @a size is zero..."). Use `@c <text>` for inline code or
+  constants (e.g. `@c true`, `@c NULL`, `@c MyEnum::VALUE`).
+- Use `@ref`, `@see`, or `@sa` to cross-reference related types or functions
+  when that helps convey how items interact.
+- Use `@param` with `[in]`, `[out]`, or `[in,out]` to indicate the
+  parameter's direction, followed by a description of its meaning.
+- Use `@return` to describe the semantics of the returned value. Don't
+  restate the type; that is obvious from the signature and rendered docs.
+- Use `@note` for non-obvious caveats and `@warning` for hazards (e.g. lock
+  ordering, lifetime, or threading constraints).
+- Use `@code` ... `@endcode` for embedded usage examples.
+- For templates, document type parameters with `@tparam`.
+
+Conventions specific to this codebase:
+
+- Every new header file should start with a `/** @file` block (see existing
+  headers in `include/` for the standard license/section layout).
+- Prefer trailing briefs for data members and enumerators, e.g.
+  `int max_conns{0}; ///< Maximum concurrent connections.`
+- Use single-line `///` briefs for short function or type docs where a full
+  `/** ... */` block would be overkill.
+
+**Modern C++ Patterns (Preferred):**
+```cpp
+// GOOD - Modern C++20
+auto buffer = std::make_unique<MIOBuffer>(alloc_index);
+for (const auto &entry : container) {
+  if (auto *vc = entry.get_vc(); vc != nullptr) {
+    // Process vc
+  }
+}
+
+// AVOID - Legacy C-style
+MIOBuffer *buffer = (MIOBuffer*)malloc(sizeof(MIOBuffer));
+```
+
+### Python Code Style (for tests and tools)
+- Python 3.11+ with proper type annotations
+- 4-space indentation, never TABs
+- Type annotations on all function signatures
+- Document every parameter in a function docstring with `:param <name>:`.
+  Include units and other constraints that are not evident from the type, such
+  as documenting timeout values in seconds.
+- Prefer f-strings over `str.format()` when building command lines, config lines,
+  and `Testers` expressions.
+
+### Memory Management
+- Custom allocators supported (jemalloc, mimalloc)
+- Use `ats_malloc` family for large allocations
+- IOBuffers for network data (zero-copy where possible)
+
+### Threading
+- Event threads handle most work
+- DNS has dedicated threads
+- Disk I/O uses thread pool
+- Most code should be async/event-driven, not thread-based
+
+### Error Handling
+- Return error codes for recoverable errors
+- Use `ink_release_assert` for unrecoverable errors
+- Log errors appropriately (ERROR vs WARNING vs NOTE)
+
+## Key Files for Understanding Architecture
+
+- `include/iocore/eventsystem/Continuation.h` - Core async pattern
+- `src/proxy/http/HttpSM.cc` - HTTP request state machine
+- `src/iocore/net/UnixNetVConnection.cc` - Network connection handling
+- `src/iocore/cache/Cache.cc` - Cache implementation
+- `src/proxy/http/remap/RemapConfig.cc` - URL remapping logic
+- `include/ts/ts.h` - Plugin API
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the project's security policy, threat model,
+scope, and vulnerability reporting process.
+
+## Resources
+
+- Official docs: https://trafficserver.apache.org/
+- Developer wiki: https://github.com/apache/trafficserver/wiki
+- CI dashboard: https://ci.trafficserver.apache.org/
+- Proxy Verifier: https://github.com/yahoo/proxy-verifier

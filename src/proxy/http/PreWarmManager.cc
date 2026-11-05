@@ -2,7 +2,7 @@
 
   Pre-Warming NetVConnection
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -79,7 +79,7 @@ alpn_name_for_stat(int alpn_id)
 void
 parse_authority(std::string &fqdn, int32_t &port, std::string_view authority)
 {
-  if (auto pos = authority.find(":"); pos != std::string::npos) {
+  if (auto pos = authority.find(':'); pos != std::string::npos) {
     fqdn = authority.substr(0, pos);
     port = static_cast<in_port_t>(std::stoi(authority.substr(pos + 1).data()));
   } else {
@@ -168,7 +168,7 @@ PreWarmSM::retry()
 void
 PreWarmSM::stop()
 {
-  if (handler == &PreWarmSM::state_closed) {
+  if (handler.is<&PreWarmSM::state_closed>()) {
     // do nothing
     return;
   }
@@ -199,7 +199,7 @@ PreWarmSM::destroy()
 NetVConnection *
 PreWarmSM::move_netvc()
 {
-  if (handler != &PreWarmSM::state_open) {
+  if (!handler.is<&PreWarmSM::state_open>()) {
     return nullptr;
   }
 
@@ -526,7 +526,7 @@ PreWarmSM::is_inactive_timeout_expired(ink_hrtime now)
 void
 PreWarmSM::process_hostdb_info(HostDBRecord *r)
 {
-  ink_release_assert(this->handler == &PreWarmSM::state_dns_lookup);
+  ink_release_assert(this->handler.is<&PreWarmSM::state_dns_lookup>());
 
   this->handleEvent(EVENT_HOST_DB_LOOKUP, r);
 }
@@ -534,7 +534,7 @@ PreWarmSM::process_hostdb_info(HostDBRecord *r)
 void
 PreWarmSM::process_srv_info(HostDBRecord *r)
 {
-  ink_release_assert(this->handler == &PreWarmSM::state_dns_lookup);
+  ink_release_assert(this->handler.is<&PreWarmSM::state_dns_lookup>());
 
   this->handleEvent(EVENT_SRV_LOOKUP, r);
 }
@@ -576,6 +576,7 @@ PreWarmSM::_connect(const IpEndpoint &addr)
     opt.ssl_client_cert_name        = http_conf_params->oride.ssl_client_cert_filename;
     opt.ssl_client_private_key_name = http_conf_params->oride.ssl_client_private_key_filename;
     opt.ssl_client_ca_cert_name     = http_conf_params->oride.ssl_client_ca_cert_filename;
+    opt.ssl_client_ca_cert_path     = http_conf_params->oride.ssl_client_ca_cert_path;
 
     SCOPED_MUTEX_LOCK(lock, mutex, this_ethread());
     connect_action_handle = sslNetProcessor.connect_re(this, &addr.sa, opt);
@@ -750,7 +751,7 @@ PreWarmQueue::state_running(int event, void * /* data ATS_UNUSED */)
 void
 PreWarmQueue::push(const PreWarm::SPtrConstDst &dst, PreWarmSM *sm)
 {
-  ink_release_assert(sm->handler == &PreWarmSM::state_open);
+  ink_release_assert(sm->handler.is<&PreWarmSM::state_open>());
 
   if (auto res = _map.find(dst); res != _map.end()) {
     Queue *init_list = res->second.init_list;
@@ -790,7 +791,7 @@ PreWarmQueue::dequeue(const PreWarm::SPtrConstDst &target)
     sm = q->front();
     q->pop_front();
 
-    if (sm->handler == &PreWarmSM::state_open) {
+    if (sm->handler.is<&PreWarmSM::state_open>()) {
       _cop_list.remove(sm);
       break;
     }
@@ -830,7 +831,7 @@ PreWarmQueue::_new_prewarm_sm(const PreWarm::SPtrConstDst &dst, const PreWarm::S
 void
 PreWarmQueue::_delete_prewarm_sm(PreWarmSM *sm)
 {
-  ink_release_assert(sm->handler == &PreWarmSM::state_closed);
+  ink_release_assert(sm->handler.is<&PreWarmSM::state_closed>());
 
   _cop_list.remove(sm);
 
@@ -923,7 +924,7 @@ PreWarmQueue::_reconfigure()
       // copy from old info
       const Info &old_info = res->second;
 
-      new_map[dst] = Info{old_info.init_list, old_info.open_list, conf, old_info.stats_ids, old_info.stat};
+      new_map[dst] = Info{old_info.init_list, old_info.open_list, std::move(conf), old_info.stats_ids, old_info.stat};
     } else {
       // make new info
       PreWarm::SPtrConstStatsIds stats_ids;
@@ -936,7 +937,7 @@ PreWarmQueue::_reconfigure()
 
       Queue *init_list = new Queue();
       Queue *open_list = new Queue();
-      new_map[dst]     = Info{init_list, open_list, conf, stats_ids, {}};
+      new_map[dst]     = Info{init_list, open_list, std::move(conf), std::move(stats_ids), {}};
     }
   }
 
@@ -983,7 +984,7 @@ void
 PreWarmQueue::_delete_closed_sm(Queue *q)
 {
   for (auto it = q->begin(); it != q->end();) {
-    if ((*it)->handler == &PreWarmSM::state_closed) {
+    if ((*it)->handler.is<&PreWarmSM::state_closed>()) {
       _delete_prewarm_sm(*it);
       it = q->erase(it);
     } else {
@@ -1179,7 +1180,7 @@ PreWarmManager::_register_stats(const PreWarm::ParsedSNIConf &parsed_conf)
       } else {
         ++stats_counter;
         counters[j] = metric;
-        Dbg(dbg_ctl_v_prewarm_init, "conter stat id=%d name=%s", Metrics::Counter::lookup(name), name);
+        Dbg(dbg_ctl_v_prewarm_init, "counter stat id=%d name=%s", Metrics::Counter::lookup(name), name);
       }
     }
 

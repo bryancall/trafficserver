@@ -2,7 +2,7 @@
 
   URL rewriting.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -22,8 +22,12 @@
 
  */
 
+#include "tscore/ink_ascii_tolower.h"
+
 #include "proxy/http/remap/UrlRewrite.h"
+#include "proxy/http/remap/RemapYamlConfig.h"
 #include "iocore/eventsystem/ConfigProcessor.h"
+#include "mgmt/config/ConfigContextDiags.h"
 #include "proxy/ReverseProxy.h"
 #include "tscore/Layout.h"
 #include "tscore/Filenames.h"
@@ -75,22 +79,36 @@ UrlRewrite::get_acl_behavior_policy(ACLBehaviorPolicy &policy)
 }
 
 bool
-UrlRewrite::load()
+UrlRewrite::load(ConfigContext ctx)
 {
   ats_scoped_str config_file_path;
 
-  config_file_path = RecConfigReadConfigPath("proxy.config.url_remap.filename", ts::filename::REMAP);
-  if (!config_file_path) {
-    Warning("%s Unable to locate %s. No remappings in effect", modulePrefix, ts::filename::REMAP);
-    return false;
-  }
+  // Try remap.yaml first
+  config_file_path  = RecConfigReadConfigPath("proxy.config.url_remap_yaml.filename", ts::filename::REMAP_YAML);
+  this->_remap_yaml = true;
 
+  if (!config_file_path || !swoc::file::exists(swoc::file::path(config_file_path))) {
+    CfgLoadLog(ctx, DL_Note, "%s failed to load, fall back to %s", ts::filename::REMAP_YAML, ts::filename::REMAP);
+    // Fall back to remap.config if remap.yaml not found
+    this->_remap_yaml = false;
+    config_file_path  = RecConfigReadConfigPath("proxy.config.url_remap.filename", ts::filename::REMAP);
+    if (!config_file_path) {
+      CfgLoadLog(ctx, DL_Warning, "%s Unable to locate %s. No remappings in effect", modulePrefix, ts::filename::REMAP);
+      return false;
+    }
+  }
+  return load_table(std::string(config_file_path.get()), nullptr, ctx);
+}
+
+bool
+UrlRewrite::load_table(const std::string &path, YAML::Node const *remap_node, ConfigContext ctx)
+{
   this->ts_name = nullptr;
   if (auto rec_str{RecGetRecordStringAlloc("proxy.config.proxy_name")}; rec_str) {
     this->ts_name = ats_stringdup(rec_str);
   }
   if (this->ts_name == nullptr) {
-    Warning("%s Unable to determine proxy name.  Incorrect redirects could be generated", modulePrefix);
+    CfgLoadLog(ctx, DL_Warning, "%s Unable to determine proxy name.  Incorrect redirects could be generated", modulePrefix);
     this->ts_name = ats_strdup("");
   }
 
@@ -99,7 +117,7 @@ UrlRewrite::load()
     this->http_default_redirect_url = ats_stringdup(rec_str);
   }
   if (this->http_default_redirect_url == nullptr) {
-    Warning("%s Unable to determine default redirect url for \"referer\" filter.", modulePrefix);
+    CfgLoadLog(ctx, DL_Warning, "%s Unable to determine default redirect url for \"referer\" filter.", modulePrefix);
     this->http_default_redirect_url = ats_strdup("http://www.apache.org");
   }
 
@@ -119,7 +137,7 @@ UrlRewrite::load()
     fs::file_status status       = fs::status(compilerPath, ec);
 
     if (ec || !swoc::file::is_regular_file(status)) {
-      Error("Configured plugin compiler path '%s' is not a regular file", buf);
+      CfgLoadFail(ctx, "Configured plugin compiler path '%s' is not a regular file", buf);
       return false;
     } else {
       // This also adds the configuration directory (etc/trafficserver) to find Cripts etc.
@@ -132,20 +150,22 @@ UrlRewrite::load()
   Dbg(dbg_ctl_url_rewrite_regex, "strategyFactory file: %s", sf.c_str());
   strategyFactory = new NextHopStrategyFactory(sf.c_str());
 
-  if (TS_SUCCESS == this->BuildTable(config_file_path)) {
+  if (TS_SUCCESS == this->BuildTable(path.c_str(), remap_node, ctx)) {
     int n_rules = this->rule_count(); // Minimum # of rules to be considered a valid configuration.
     int required_rules;
     required_rules = RecGetRecordInt("proxy.config.url_remap.min_rules_required").value_or(0);
+    Dbg(dbg_ctl_url_rewrite, "n_rules: %d, required_rules: %d", n_rules, required_rules);
     if (n_rules >= required_rules) {
       _valid = true;
       if (dbg_ctl_url_rewrite.on()) {
         Print();
       }
     } else {
-      Warning("%s %d rules defined but %d rules required, configuration is invalid.", modulePrefix, n_rules, required_rules);
+      CfgLoadLog(ctx, DL_Warning, "%s %d rules defined but %d rules required, configuration is invalid.", modulePrefix, n_rules,
+                 required_rules);
     }
   } else {
-    Warning("something failed during BuildTable() -- check your remap plugins!");
+    CfgLoadLog(ctx, DL_Warning, "something failed during BuildTable() -- check your remap plugins!");
   }
 
   // ACL Matching Policy
@@ -479,8 +499,8 @@ UrlRewrite::PerformACLFiltering(HttpTransact::State *s, const url_mapping *const
       if (rp->method_restriction_enabled) {
         if (method_wksidx >= 0 && method_wksidx < HTTP_WKSIDX_METHODS_CNT) {
           method_matches = rp->standard_method_lookup[method_wksidx];
-        } else if (!rp->nonstandard_methods.empty()) {
-          method_matches = false;
+        } else if (rp->nonstandard_methods.empty()) {
+          method_matches = false; // No nonstandard methods, nothing to match against
         } else {
           auto method{s->hdr_info.client_request.method_get()};
           method_matches = rp->nonstandard_methods.count(std::string{method});
@@ -629,7 +649,7 @@ UrlRewrite::PerformACLFiltering(HttpTransact::State *s, const url_mapping *const
 
 /**
    Determines if a redirect is to occur and if so, figures out what the
-   redirect is. This was plaguiarized from UrlRewrite::Remap. redirect_url
+   redirect is. This was plagiarized from UrlRewrite::Remap. redirect_url
    ought to point to the new, mapped URL when the function exits.
 */
 mapping_type
@@ -666,24 +686,12 @@ UrlRewrite::Remap_redirect(HTTPHdr *request_header, URL *redirect_url)
   if (host.empty() && reverse_proxy != 0) { // Server request.  Use the host header to figure out where
                                             // it goes.  Host header parsing is same as in ::Remap
     auto host_hdr{request_header->value_get(static_cast<std::string_view>(MIME_FIELD_HOST))};
+    int  parsed_port = 0;
+    bool has_port    = false;
 
-    const char *tmp = static_cast<const char *>(memchr(host_hdr.data(), ':', host_hdr.length()));
-
-    int host_len;
-    if (tmp == nullptr) {
-      host_len = static_cast<int>(host_hdr.length());
-    } else {
-      host_len     = tmp - host_hdr.data();
-      request_port = ink_atoi(tmp + 1, static_cast<int>(host_hdr.length()) - host_len);
-
-      // If atoi fails, try the default for the
-      //   protocol
-      if (request_port == 0) {
-        request_port = request_url->port_get();
-      }
+    if (http_parse_host_header(host_hdr, host, parsed_port, has_port)) {
+      request_port = has_port ? parsed_port : request_url->port_get();
     }
-
-    host = {host_hdr.data(), static_cast<std::string_view::size_type>(host_len)};
   }
   // Temporary Redirects have precedence over Permanent Redirects
   // the rationale behind this is that network administrators might
@@ -816,7 +824,7 @@ UrlRewrite::InsertForwardMapping(mapping_type maptype, url_mapping *mapping, con
 
 */
 int
-UrlRewrite::BuildTable(const char *path)
+UrlRewrite::BuildTable(const char *path, YAML::Node const *remap_node, ConfigContext ctx)
 {
   ink_assert(forward_mappings.empty());
   ink_assert(reverse_mappings.empty());
@@ -829,13 +837,28 @@ UrlRewrite::BuildTable(const char *path)
   ink_assert(num_rules_redirect_temporary == 0);
   ink_assert(num_rules_forward_with_recv_port == 0);
 
+  // A supplied node is only reachable through the yaml parser; otherwise the node is silently
+  // dropped and @a path is parsed as a remap.config file name.
+  ink_release_assert(!remap_node || is_remap_yaml());
+
   forward_mappings.hash_lookup.reset(new URLTable);
   reverse_mappings.hash_lookup.reset(new URLTable);
   permanent_redirects.hash_lookup.reset(new URLTable);
   temporary_redirects.hash_lookup.reset(new URLTable);
   forward_mappings_with_recv_port.hash_lookup.reset(new URLTable);
 
-  if (!remap_parse_config(path, this)) {
+  bool parse_success;
+  if (is_remap_yaml()) {
+    if (remap_node) {
+      parse_success = remap_parse_yaml(remap_node, this, ctx);
+    } else {
+      parse_success = remap_parse_yaml(path, this, ctx);
+    }
+  } else {
+    parse_success = remap_parse_config(path, this, ctx);
+  }
+
+  if (!parse_success) {
     return TS_ERROR;
   }
 
@@ -923,10 +946,7 @@ UrlRewrite::_mappingLookup(MappingsStore &mappings, URL *request_url, int reques
     return false;
   }
 
-  // lowercase
-  for (int i = 0; i < request_host_len; ++i) {
-    request_host_lower[i] = tolower(request_host[i]);
-  }
+  ts::ascii::tolower_copy(request_host_lower, request_host, request_host_len);
   request_host_lower[request_host_len] = 0;
 
   bool         retval       = false;
@@ -1049,6 +1069,8 @@ UrlRewrite::_regexMappingLookup(RegexMappingList &regex_mappings, URL *request_u
       continue;
     }
 
+    // The regex is compiled anchored at both ends (see process_regex_mapping_config), so a
+    // successful match spans the entire request host, never a leading or trailing substring.
     int match_result = list_iter->regular_expression.exec(std::string_view(request_host, request_host_len), matches);
 
     if (match_result > 0) {
@@ -1091,4 +1113,36 @@ UrlRewrite::_destroyList(RegexMappingList &mappings)
     delete list_iter;
   }
   mappings.clear();
+}
+
+/**
+ * Convert a YAML rule type string to a mapping_type enum.
+ */
+mapping_type
+get_mapping_type(const char *type_str, BUILD_TABLE_INFO *bti)
+{
+  // Check to see whether is a reverse or forward mapping
+  if (!strcasecmp("reverse_map", type_str)) {
+    Dbg(dbg_ctl_url_rewrite, "[BuildTable] - mapping_type::REVERSE_MAP");
+    return mapping_type::REVERSE_MAP;
+  } else if (!strcasecmp("map", type_str)) {
+    Dbg(dbg_ctl_url_rewrite, "[BuildTable] - %s",
+        ((bti->remap_optflg & REMAP_OPTFLG_MAP_WITH_REFERER) == 0) ? "mapping_type::FORWARD_MAP" :
+                                                                     "mapping_type::FORWARD_MAP_REFERER");
+    return ((bti->remap_optflg & REMAP_OPTFLG_MAP_WITH_REFERER) == 0) ? mapping_type::FORWARD_MAP :
+                                                                        mapping_type::FORWARD_MAP_REFERER;
+  } else if (!strcasecmp("redirect", type_str)) {
+    Dbg(dbg_ctl_url_rewrite, "[BuildTable] - mapping_type::PERMANENT_REDIRECT");
+    return mapping_type::PERMANENT_REDIRECT;
+  } else if (!strcasecmp("redirect_temporary", type_str)) {
+    Dbg(dbg_ctl_url_rewrite, "[BuildTable] - mapping_type::TEMPORARY_REDIRECT");
+    return mapping_type::TEMPORARY_REDIRECT;
+  } else if (!strcasecmp("map_with_referer", type_str)) {
+    Dbg(dbg_ctl_url_rewrite, "[BuildTable] - mapping_type::FORWARD_MAP_REFERER");
+    return mapping_type::FORWARD_MAP_REFERER;
+  } else if (!strcasecmp("map_with_recv_port", type_str)) {
+    Dbg(dbg_ctl_url_rewrite, "[BuildTable] - mapping_type::FORWARD_MAP_WITH_RECV_PORT");
+    return mapping_type::FORWARD_MAP_WITH_RECV_PORT;
+  }
+  return mapping_type::NONE;
 }

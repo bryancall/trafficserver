@@ -37,6 +37,7 @@
 
 SCENARIO("Testing NextHopRoundRobin class, using policy 'rr-strict'", "[NextHopRoundRobin]")
 {
+  time_t const now = time(nullptr); // Elapsed test time must not make down hosts retryable.
   // We need this to build a HdrHeap object in build_request();
   // No thread setup, forbid use of thread local allocators.
   cmd_disable_pfreelist = true;
@@ -71,19 +72,19 @@ SCENARIO("Testing NextHopRoundRobin class, using policy 'rr-strict'", "[NextHopR
 
         // first request.
         build_request(10001, &sm, nullptr, "rabbit.net", nullptr);
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "p1.foo.com") == 0);
 
         // second request.
         build_request(10002, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "p2.foo.com") == 0);
 
         // third request.
         build_request(10003, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "p1.foo.com") == 0);
 
         // did not reset result, kept it as last parent selected was p1.fo.com, mark it down and we should only select p2.foo.com
@@ -92,13 +93,13 @@ SCENARIO("Testing NextHopRoundRobin class, using policy 'rr-strict'", "[NextHopR
         // fourth request, p1 is down should select p2.
         build_request(10004, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "p2.foo.com") == 0);
 
         // fifth request, p1 is down should still select p2.
         build_request(10005, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "p2.foo.com") == 0);
 
         // mark down p2.
@@ -107,13 +108,13 @@ SCENARIO("Testing NextHopRoundRobin class, using policy 'rr-strict'", "[NextHopR
         // fifth request, p1 and p2 are both down, should get s1.bar.com from failover ring.
         build_request(10006, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "s1.bar.com") == 0);
 
         // sixth request, p1 and p2 are still down, should get s1.bar.com from failover ring.
         build_request(10007, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "s1.bar.com") == 0);
 
         // mark down s1.
@@ -122,7 +123,7 @@ SCENARIO("Testing NextHopRoundRobin class, using policy 'rr-strict'", "[NextHopR
         // seventh request, p1, p2, s1 are down, should get s2.bar.com from failover ring.
         build_request(10008, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "s2.bar.com") == 0);
 
         // mark down s2.
@@ -131,26 +132,26 @@ SCENARIO("Testing NextHopRoundRobin class, using policy 'rr-strict'", "[NextHopR
         // eighth request, p1, p2, s1, s2 are down, should get ParentResultType::DIRECT as go_direct is true
         build_request(10009, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(result->result == ParentResultType::DIRECT);
 
         // check that nextHopExists() returns false when all parents are down.
         CHECK(strategy->nextHopExists(txnp) == false);
 
-        // change the request time to trigger a retry.
-        time_t now = (time(nullptr) + 5);
+        // Advance past the retry window to trigger a retry.
+        time_t const retry_now = time(nullptr) + 5;
 
         // ninth request, p1 and p2 are still down, should get p2.foo.com as it will be retried
         build_request(10010, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp, nullptr, now);
+        strategy->findNextHop(txnp, nullptr, retry_now);
         REQUIRE(result->result == ParentResultType::SPECIFIED);
         CHECK(strcmp(result->hostname, "p2.foo.com") == 0);
 
         // tenth request, p1 should now be retried.
         build_request(10011, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp, nullptr, now);
+        strategy->findNextHop(txnp, nullptr, retry_now);
         REQUIRE(result->result == ParentResultType::SPECIFIED);
         CHECK(strcmp(result->hostname, "p1.foo.com") == 0);
       }
@@ -161,6 +162,7 @@ SCENARIO("Testing NextHopRoundRobin class, using policy 'rr-strict'", "[NextHopR
 
 SCENARIO("Testing NextHopRoundRobin class, using policy 'first-live'", "[NextHopRoundRobin]")
 {
+  time_t const now = time(nullptr); // Elapsed test time must not make down hosts retryable.
   // We need this to build a HdrHeap object in build_request();
   // No thread setup, forbid use of thread local allocators.
   cmd_disable_pfreelist = true;
@@ -195,13 +197,13 @@ SCENARIO("Testing NextHopRoundRobin class, using policy 'first-live'", "[NextHop
 
         // first request.
         build_request(10012, &sm, nullptr, "rabbit.net", nullptr);
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "p1.foo.com") == 0);
 
         // second request.
         build_request(10013, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "p1.foo.com") == 0);
 
         // mark down p1.
@@ -210,16 +212,16 @@ SCENARIO("Testing NextHopRoundRobin class, using policy 'first-live'", "[NextHop
         // third request.
         build_request(10014, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp);
+        strategy->findNextHop(txnp, nullptr, now);
         CHECK(strcmp(result->hostname, "p2.foo.com") == 0);
 
-        // change the request time to trigger a retry.
-        time_t now = (time(nullptr) + 5);
+        // Advance past the retry window to trigger a retry.
+        time_t const retry_now = time(nullptr) + 5;
 
         // fourth request, p1 should be marked for retry
         build_request(10015, &sm, nullptr, "rabbit.net", nullptr);
         result->reset();
-        strategy->findNextHop(txnp, nullptr, now);
+        strategy->findNextHop(txnp, nullptr, retry_now);
         CHECK(strcmp(result->hostname, "p1.foo.com") == 0);
       }
       br_destroy(sm);
@@ -376,6 +378,75 @@ SCENARIO("Testing NextHopRoundRobin class, using policy 'latched'", "[NextHopRou
         build_request(10024, &sm, nullptr, "rabbit.net", nullptr);
         strategy->findNextHop(txnp);
         CHECK(strcmp(result->hostname, "p3.foo.com") == 0);
+      }
+      br_destroy(sm);
+    }
+  }
+}
+
+SCENARIO("Testing NextHopHealthStatus failCount overflow saturation", "[NextHopHealthStatus]")
+{
+  // No thread setup, forbid use of thread local allocators.
+  cmd_disable_pfreelist = true;
+  http_init();
+
+  GIVEN("Loading the round-robin-tests.yaml config for overflow test.")
+  {
+    NextHopStrategyFactory          nhf(TS_SRC_DIR "/round-robin-tests.yaml");
+    NextHopSelectionStrategy *const strategy = nhf.strategyInstance("rr-strict-exhaust-ring");
+
+    REQUIRE(nhf.strategies_loaded == true);
+    REQUIRE(strategy != nullptr);
+
+    WHEN("failCount is near UINT32_MAX and markNextHop is called")
+    {
+      HttpSM        sm;
+      ParentResult *result = &sm.t_state.parent_result;
+      TSHttpTxn     txnp   = reinterpret_cast<TSHttpTxn>(&sm);
+
+      // Select a host so result is populated.
+      build_request(20001, &sm, nullptr, "rabbit.net", nullptr);
+      strategy->findNextHop(txnp);
+      REQUIRE(result->result == ParentResultType::SPECIFIED);
+      REQUIRE(result->hostname != nullptr);
+
+      // Get the HostRecord for the selected host.
+      std::shared_ptr<HostRecord> host_rec;
+      for (auto &group : strategy->host_groups) {
+        for (auto &h : group) {
+          if (h->hostname == result->hostname) {
+            host_rec = h;
+            break;
+          }
+        }
+        if (host_rec) {
+          break;
+        }
+      }
+      REQUIRE(host_rec != nullptr);
+
+      // Set failCount to UINT32_MAX - 1 to test saturation.
+      host_rec->failCount = UINT32_MAX - 1;
+      host_rec->failedAt  = time(nullptr);
+
+      // Set fail_threshold very high so set_unavailable doesn't interfere.
+      extern char _my_txn_conf[];
+      auto       *oride            = reinterpret_cast<OverridableHttpConfigParams *>(_my_txn_conf);
+      oride->parent_fail_threshold = static_cast<int64_t>(UINT32_MAX) + 1;
+      oride->parent_retry_time     = 30; // large retry window so we stay in the increment path
+
+      THEN("failCount saturates at UINT32_MAX and does not wrap to 0")
+      {
+        // First markNextHop: UINT32_MAX-1 -> UINT32_MAX
+        strategy->markNextHop(txnp, result->hostname, result->port, NHCmd::MARK_DOWN);
+        CHECK(host_rec->failCount.load() == UINT32_MAX);
+
+        // Second markNextHop: should stay at UINT32_MAX (saturated)
+        strategy->markNextHop(txnp, result->hostname, result->port, NHCmd::MARK_DOWN);
+        CHECK(host_rec->failCount.load() == UINT32_MAX);
+
+        // Verify host is still available (threshold not met since threshold > UINT32_MAX)
+        CHECK(host_rec->available.load() == true);
       }
       br_destroy(sm);
     }

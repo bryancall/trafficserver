@@ -125,6 +125,43 @@ each lua script:
 - **'do_global_send_response'**
 - **'do_global_cache_lookup_complete'**
 - **'do_global_read_cache'**
+- **'__shutdown__'**
+
+The ``__shutdown__`` function is invoked once per Lua state when |ATS| is
+shutting down. It can be used to perform cleanup tasks such as flushing state or
+releasing resources. It takes no arguments and its return value is ignored.
+
+Example::
+
+    function __shutdown__()
+        ts.debug('ATS shutting down, cleaning up resources')
+    end
+
+Because ``__shutdown__`` commonly releases process global resources, no Lua code
+runs in any of the plugin's Lua states while the ``__shutdown__`` functions are
+invoked: the plugin waits for every state to become idle first, and no Lua
+callback enters a state after that. If a state is still executing Lua after five
+seconds, the ``__shutdown__`` functions are skipped rather than run concurrently
+with it, and that is reported in the error log. Once every state is idle, the
+plugin retains all state mutexes until process exit, including after the
+``__shutdown__`` functions return. Requests waiting to enter those states remain
+blocked until process exit. Each ``__shutdown__`` function should return promptly
+so that |ATS| can finish shutting down.
+
+This covers the states used by remap instances of the plugin as well, since
+global and remap scripts can share process global resources through native
+libraries. It means that once ``__shutdown__`` has run, a remap instance is left
+in place rather than torn down: its ``__clean__`` function is not called during
+shutdown.
+|TS| already skips that teardown whenever a transaction still holds a lease on
+the remap configuration at shutdown, so ``__clean__`` should not be relied on as
+a shutdown hook in any case.
+
+Note that with ``proxy.config.plugin.dynamic_reload_mode`` enabled, which is the
+default, a remap instance of this plugin is loaded from a private copy of the
+plugin with Lua states of its own. Those states are not covered by a global
+plugin's ``__shutdown__``, so resources shared between a global script and a
+remap script should not be released from ``__shutdown__``.
 
 We can write this in plugin.config:
 
@@ -4735,6 +4772,8 @@ Http config constants
     TS_LUA_CONFIG_HTTP_SERVER_MIN_KEEP_ALIVE_CONNS
     TS_LUA_CONFIG_HTTP_PER_SERVER_CONNECTION_MAX
     TS_LUA_CONFIG_HTTP_PER_SERVER_CONNECTION_MATCH
+    TS_LUA_CONFIG_HTTP_PER_SERVER_CONNECTION_METRIC_ENABLED
+    TS_LUA_CONFIG_HTTP_PER_SERVER_CONNECTION_METRIC_AGGREGATE
     TS_LUA_CONFIG_HTTP_CONNECT_ATTEMPTS_MAX_RETRIES
     TS_LUA_CONFIG_HTTP_CONNECT_ATTEMPTS_MAX_RETRIES_DOWN_SERVER
     TS_LUA_CONFIG_HTTP_CONNECT_DOWN_POLICY
@@ -4782,6 +4821,7 @@ Http config constants
     TS_LUA_CONFIG_WEBSOCKET_NO_ACTIVITY_TIMEOUT
     TS_LUA_CONFIG_WEBSOCKET_ACTIVE_TIMEOUT
     TS_LUA_CONFIG_HTTP_UNCACHEABLE_REQUESTS_BYPASS_PARENT
+    TS_LUA_CONFIG_HTTP_BYPASS_PARENT
     TS_LUA_CONFIG_HTTP_PARENT_PROXY_TOTAL_CONNECT_ATTEMPTS
     TS_LUA_CONFIG_HTTP_TRANSACTION_ACTIVE_TIMEOUT_IN
     TS_LUA_CONFIG_SRV_ENABLED
@@ -4811,6 +4851,7 @@ Http config constants
     TS_LUA_CONFIG_BODY_FACTORY_RESPONSE_SUPPRESSION_MODE
     TS_LUA_CONFIG_HTTP_CACHE_POST_METHOD
     TS_LUA_CONFIG_HTTP_CACHE_TARGETED_CACHE_CONTROL_HEADERS
+    TS_LUA_CONFIG_HTTP_CACHE_MAX_STALE_AGE_PERCENT
     TS_LUA_CONFIG_LAST_ENTRY
 
 :ref:`TOP <admin-plugins-ts-lua>`

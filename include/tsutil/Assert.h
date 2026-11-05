@@ -2,7 +2,7 @@
 
   Common assert definitions
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -28,7 +28,7 @@
 namespace ts
 {
 
-void do_abort(const SourceLocation &loc, const char *expr, const char *message = nullptr);
+[[noreturn]] void do_abort(const SourceLocation &loc, const char *expr, const char *message = nullptr) noexcept;
 
 }
 

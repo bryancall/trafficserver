@@ -2,7 +2,7 @@
 
   Http2ClientSession.cc
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -54,6 +54,9 @@ Http2ClientSession::destroy()
     REMEMBER(NO_EVENT, this->recursion)
     Http2SsnDebug("session destroy");
     if (_vc) {
+      cached_client_addr.assign(_vc->get_remote_addr());
+      cached_effective_client_addr.assign(_vc->get_effective_remote_addr());
+      cached_local_addr.assign(_vc->get_local_addr());
       _vc->do_io_close();
       _vc = nullptr;
     }
@@ -80,6 +83,8 @@ Http2ClientSession::start()
   SET_HANDLER(&Http2ClientSession::main_event_handler);
   HTTP2_SET_SESSION_HANDLER(&Http2ClientSession::state_read_connection_preface);
 
+  _vc->set_inactivity_timeout(HRTIME_SECONDS(Http2::accept_no_activity_timeout));
+
   VIO *read_vio = this->do_io_read(this, INT64_MAX, this->read_buffer);
   write_vio     = this->do_io_write(this, INT64_MAX, this->_write_buffer_reader);
 
@@ -97,12 +102,12 @@ Http2ClientSession::new_connection(NetVConnection *new_vc, MIOBuffer *iobuf, IOB
   ink_assert(new_vc->mutex->thread_holding == this_ethread());
   Metrics::Gauge::increment(http2_rsb.current_client_session_count);
   Metrics::Counter::increment(http2_rsb.total_client_connection_count);
+  this->_increment_total_client_connections_stat(new_vc);
   this->_milestones.mark(Http2SsnMilestone::OPEN);
 
   // Unique client session identifier.
-  this->con_id = ProxySession::next_connection_id();
-  this->_vc    = new_vc;
-  _vc->set_inactivity_timeout(HRTIME_SECONDS(Http2::accept_no_activity_timeout));
+  this->con_id         = ProxySession::next_connection_id();
+  this->_vc            = new_vc;
   this->schedule_event = nullptr;
   this->mutex          = new_vc->mutex;
 
@@ -136,6 +141,9 @@ Http2ClientSession::new_connection(NetVConnection *new_vc, MIOBuffer *iobuf, IOB
 
   this->_handle_if_ssl(new_vc);
 
+  if (has_session_hook(TS_HTTP_SSN_START_HOOK)) {
+    _vc->cancel_inactivity_timeout();
+  }
   do_api_callout(TS_HTTP_SSN_START_HOOK);
 }
 
@@ -269,6 +277,12 @@ Http2ClientSession::decrement_current_active_connections_stat()
 }
 
 sockaddr const *
+Http2ClientSession::get_client_addr() const
+{
+  return _vc ? _vc->get_effective_remote_addr() : &cached_effective_client_addr.sa;
+}
+
+sockaddr const *
 Http2ClientSession::get_remote_addr() const
 {
   return _vc ? _vc->get_remote_addr() : &cached_client_addr.sa;
@@ -353,9 +367,8 @@ Http2ClientSession::is_protocol_framed() const
 uint64_t
 Http2ClientSession::get_received_frame_count(uint64_t type) const
 {
-  if (type == 999) { // TS_SSN_INFO_RECEIVED_FRAME_COUNT_H2_UNKNOWN in apidefs.h.in
-    return this->_frame_counts_in[HTTP2_FRAME_TYPE_MAX];
-  } else {
-    return this->_frame_counts_in[type];
+  if (type > HTTP2_FRAME_TYPE_MAX) {
+    type = HTTP2_FRAME_TYPE_MAX;
   }
+  return this->_frame_counts_in[type];
 }

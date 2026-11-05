@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -60,6 +60,7 @@ public:
   virtual bool                    is_handshake_completed() const          = 0;
   virtual QUICVersion             negotiated_version() const              = 0;
   virtual std::string_view        negotiated_application_name() const     = 0;
+  virtual void                    on_stream_updated()                     = 0;
 };
 
 class QUICConnection : public QUICConnectionInfoProvider

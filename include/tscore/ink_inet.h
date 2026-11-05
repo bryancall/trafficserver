@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -27,6 +27,7 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <optional>
 #include <string_view>
 #include <sys/un.h>
 
@@ -34,6 +35,7 @@
 
 #include "tscore/ink_memory.h"
 #include "tscore/ink_apidefs.h"
+#include "tscore/ink_string.h"
 #include "swoc/bwf_fwd.h"
 
 #if !TS_HAS_IN6_IS_ADDR_UNSPECIFIED
@@ -77,6 +79,7 @@ extern const std::string_view IP_PROTO_TAG_HTTP_QUIC;
 extern const std::string_view IP_PROTO_TAG_HTTP_3;
 extern const std::string_view IP_PROTO_TAG_HTTP_QUIC_D29;
 extern const std::string_view IP_PROTO_TAG_HTTP_3_D29;
+extern const std::string_view IP_PROTO_TAG_H3QX;
 
 struct IpAddr; // forward declare.
 struct UnAddr; // forward declare.
@@ -149,10 +152,16 @@ union IpEndpoint {
 /** Return the detected maximum listen(2) backlog for TCP. */
 int ats_tcp_somaxconn();
 
+/** Return the system's maximum listen(2) backlog, or nothing if it could not be read or is out of range.
+
+    Unlike @c ats_tcp_somaxconn(), this never substitutes a default, so a caller can tell a real limit from a guess.
+*/
+std::optional<int> ats_tcp_somaxconn_detected();
+
 /** Parse a string for pieces of an IP address.
 
     This doesn't parse the actual IP address, but picks it out from @a
-    src. It is intended to deal with the brackets that can optionally
+    str. It is intended to deal with the brackets that can optionally
     surround an IP address (usually IPv6) which in turn are used to
     differentiate between an address and an attached port. E.g.
     @code
@@ -162,7 +171,7 @@ int ats_tcp_somaxconn();
 
     @return 0 if an address was found, non-zero otherwise.
 */
-int ats_ip_parse(std::string_view  src,           ///< [in] String to search.
+int ats_ip_parse(std::string_view  str,           ///< [in] String to search.
                  std::string_view *addr,          ///< [out] Range containing IP address.
                  std::string_view *port,          ///< [out] Range containing port.
                  std::string_view *rest = nullptr ///< [out] Remnant past the addr/port if any.
@@ -725,7 +734,7 @@ ats_is_ip_loopback(IpEndpoint const *ip)
 }
 
 /// Check for multicast.
-/// @return @true if @a ip is multicast.
+/// @return @c true if @a ip is multicast.
 inline bool
 ats_is_ip_multicast(sockaddr const *ip)
 {
@@ -733,7 +742,7 @@ ats_is_ip_multicast(sockaddr const *ip)
                 (AF_INET6 == ip->sa_family && IN6_IS_ADDR_MULTICAST(&ats_ip6_addr_cast(ip))));
 }
 /// Check for multicast.
-/// @return @true if @a ip is multicast.
+/// @return @c true if @a ip is multicast.
 inline bool
 ats_is_ip_multicast(IpEndpoint const *ip)
 {
@@ -741,7 +750,7 @@ ats_is_ip_multicast(IpEndpoint const *ip)
 }
 
 /// Check for Private.
-/// @return @true if @a ip is private.
+/// @return @c true if @a ip is private.
 inline bool
 ats_is_ip_private(sockaddr const *ip)
 {
@@ -762,7 +771,7 @@ ats_is_ip_private(sockaddr const *ip)
 }
 
 /// Check for Private.
-/// @return @true if @a ip is private.
+/// @return @c true if @a ip is private.
 inline bool
 ats_is_ip_private(IpEndpoint const *ip)
 {
@@ -770,7 +779,7 @@ ats_is_ip_private(IpEndpoint const *ip)
 }
 
 /// Check for Link Local.
-/// @return @true if @a ip is link local.
+/// @return @c true if @a ip is link local.
 inline bool
 ats_is_ip_linklocal(sockaddr const *ip)
 {
@@ -788,7 +797,7 @@ ats_is_ip_linklocal(sockaddr const *ip)
 }
 
 /// Check for Link Local.
-/// @return @true if @a ip is link local.
+/// @return @c true if @a ip is link local.
 inline bool
 ats_is_ip_linklocal(IpEndpoint const *ip)
 {
@@ -1167,9 +1176,9 @@ ats_ip_nptop(IpEndpoint const *addr, ///< Address.
   return ats_ip_nptop(&addr->sa, dst, size);
 }
 
-/** Convert @a text to an IP address and write it to @a addr.
+/** Convert @a src to an IP address and write it to @a ip.
 
-    @a text is expected to be an explicit address, not a hostname.  No
+    @a src is expected to be an explicit address, not a hostname.  No
     hostname resolution is done. The call must provide an @a ip large
     enough to hold the address value.
 
@@ -1183,8 +1192,8 @@ ats_ip_nptop(IpEndpoint const *addr, ///< Address.
 
     @return 0 on success, non-zero on failure.
 */
-int ats_ip_pton(const std::string_view &text, ///< [in] text.
-                sockaddr               *addr  ///< [out] address
+int ats_ip_pton(const std::string_view &src, ///< [in] text.
+                sockaddr               *ip   ///< [out] address
 );
 
 /** Convert @a text to an IP address and write it to @a addr.
@@ -1271,9 +1280,9 @@ uint64_t ats_ip_port_hash(sockaddr const *addr);
     if @a dst is insufficient.
     @return The length of the resulting string (not including nul).
 */
-int ats_ip_to_hex(sockaddr const *addr, ///< Address to convert. Must be IP.
-                  char           *dst,  ///< Destination buffer.
-                  size_t          len   ///< Length of @a dst.
+int ats_ip_to_hex(sockaddr const *src, ///< Address to convert. Must be IP.
+                  char           *dst, ///< Destination buffer.
+                  size_t          len  ///< Length of @a dst.
 );
 
 /** Storage for an IP address.
@@ -1610,16 +1619,21 @@ struct UnAddr {
 
   UnAddr() { _path[0] = 0; }
 
-  UnAddr(self const &addr) { strncpy(_path, addr._path, TS_UNIX_SIZE); }
-  explicit UnAddr(const char *path) { strncpy(_path, path, TS_UNIX_SIZE - 1); }
-  explicit UnAddr(const std::string &path) { strncpy(_path, path.c_str(), TS_UNIX_SIZE); }
+  UnAddr(self const &addr) { ink_strlcpy(_path, addr._path, TS_UNIX_SIZE); }
+  explicit UnAddr(const char *path) { ink_strlcpy(_path, path, TS_UNIX_SIZE); }
+  explicit UnAddr(const std::string &path) { ink_strlcpy(_path, path.c_str(), TS_UNIX_SIZE); }
 
   explicit UnAddr(sockaddr const *addr) { this->assign(addr); }
   explicit UnAddr(sockaddr_un const *addr) { this->assign(ats_ip_sa_cast(addr)); }
   /// Construct from @c IpEndpoint.
   explicit UnAddr(IpEndpoint const &addr) { this->assign(&addr.sa); }
   /// Construct from @c IpEndpoint.
-  explicit UnAddr(IpEndpoint const *addr) { this->assign(&addr->sa); }
+  explicit UnAddr(IpEndpoint const *addr) : UnAddr()
+  {
+    if (addr) {
+      this->assign(&addr->sa);
+    }
+  }
   /// Assign sockaddr storage.
   self &assign(sockaddr const *addr);
 
@@ -1639,7 +1653,7 @@ struct UnAddr {
   operator=(self const &addr)
   {
     if (this != &addr) {
-      strncpy(_path, addr._path, TS_UNIX_SIZE);
+      ink_strlcpy(_path, addr._path, TS_UNIX_SIZE);
     }
     return *this;
   }
@@ -1651,13 +1665,17 @@ inline UnAddr &
 UnAddr::assign(sockaddr const *addr)
 {
   if (addr) {
-    strncpy(_path, ats_unix_cast(addr)->sun_path, TS_UNIX_SIZE);
+    // A kernel sockaddr_un may carry a full, unterminated sun_path.
+    strncpy(_path, ats_unix_cast(addr)->sun_path, TS_UNIX_SIZE - 1);
+    _path[TS_UNIX_SIZE - 1] = '\0';
+  } else {
+    _path[0] = '\0';
   }
   return *this;
 }
 
 /// Write IP @a addr to storage @a dst.
-/// @return @s dst.
+/// @return @a dst.
 sockaddr *ats_ip_set(sockaddr     *dst,     ///< Destination storage.
                      IpAddr const &addr,    ///< source address.
                      in_port_t     port = 0 ///< port, network byte order.

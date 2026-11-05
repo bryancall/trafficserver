@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -90,6 +90,9 @@ enum class MimeParseState {
 #define MIME_FIELD_SLOTNUM_MAX     (MIME_FIELD_SLOTNUM_MASK - 1)
 #define MIME_FIELD_SLOTNUM_UNKNOWN MIME_FIELD_SLOTNUM_MAX
 
+#define MIME_FIELD_FREE_SLOT_NONE          -1
+#define MIME_FIELD_FREE_SLOT_UNINITIALIZED -2
+
 /***********************************************************************
  *                                                                     *
  *                    MIMEField & MIMEFieldBlockImpl                   *
@@ -99,16 +102,19 @@ enum class MimeParseState {
 struct MIMEHdrImpl;
 
 struct MIMEField {
-  const char *m_ptr_name;                   // 4
-  const char *m_ptr_value;                  // 4
-  MIMEField  *m_next_dup;                   // 4
-  int16_t     m_wks_idx;                    // 2
-  uint16_t    m_len_name;                   // 2
-  uint32_t    m_len_value             : 24; // 3
-  uint8_t     m_n_v_raw_printable     : 1;  // 1/8
-  uint8_t     m_n_v_raw_printable_pad : 3;  // 3/8
-  uint8_t     m_readiness             : 2;  // 2/8
-  uint8_t     m_flags                 : 2;  // 2/8
+  const char *m_ptr_name;  // 4
+  const char *m_ptr_value; // 4
+  union {
+    MIMEField *m_next_dup;  // 4
+    int32_t    m_free_next; ///< Slot number of the next deleted field.
+  };
+  int16_t  m_wks_idx;                    // 2
+  uint16_t m_len_name;                   // 2
+  uint32_t m_len_value             : 24; // 3
+  uint8_t  m_n_v_raw_printable     : 1;  // 1/8
+  uint8_t  m_n_v_raw_printable_pad : 3;  // 3/8
+  uint8_t  m_readiness             : 2;  // 2/8
+  uint8_t  m_flags                 : 2;  // 2/8
 
   bool
   is_dup_head() const
@@ -169,10 +175,10 @@ struct MIMEField {
   time_t   value_get_date() const;
   int      value_get_comma_list(StrList *list) const;
 
-  void name_set(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view name);
+  bool name_set(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view name);
   bool name_is_valid(uint32_t invalid_char_bits = is_control_BIT) const;
 
-  void value_set(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view value);
+  bool value_set(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view value);
   void value_set_int(HdrHeap *heap, MIMEHdrImpl *mh, int32_t value);
   void value_set_uint(HdrHeap *heap, MIMEHdrImpl *mh, uint32_t value);
   void value_set_int64(HdrHeap *heap, MIMEHdrImpl *mh, int64_t value);
@@ -304,7 +310,8 @@ struct MIMEHdrImpl : public HdrHeapObjImpl {
     friend struct MIMEHdrImpl;
   };
 
-  // HdrHeapObjImpl is 4 bytes, so this will result in 4 bytes padding
+  // HdrHeapObjImpl is 4 bytes, so this uses the 4 bytes that would otherwise be padding.
+  int32_t  m_free_slot; ///< Slot number at the head of the deleted field free list.
   uint64_t m_presence_bits;
   uint32_t m_slot_accelerators[4];
 
@@ -720,7 +727,6 @@ void     mime_hdr_presence_unset(MIMEHdrImpl *h, int well_known_str_index);
 void mime_hdr_sanity_check(MIMEHdrImpl *mh);
 
 void mime_init();
-void mime_init_cache_control_cooking_masks();
 void mime_init_date_format_table();
 
 MIMEHdrImpl        *mime_hdr_create(HdrHeap *heap);
@@ -749,6 +755,7 @@ int        mime_hdr_fields_count(MIMEHdrImpl *mh);
 
 void       mime_field_init(MIMEField *field);
 MIMEField *mime_field_create(HdrHeap *heap, MIMEHdrImpl *mh);
+MIMEField *mime_field_create_for_name(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view name);
 MIMEField *mime_field_create_named(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view name);
 
 void mime_hdr_field_attach(MIMEHdrImpl *mh, MIMEField *field, int check_for_dups, MIMEField *prev_dup);
@@ -763,7 +770,7 @@ MIMEField *mime_hdr_prepare_for_value_set(HdrHeap *heap, MIMEHdrImpl *mh, std::s
 
 void mime_field_destroy(MIMEHdrImpl *mh, MIMEField *field);
 
-void mime_field_name_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int16_t name_wks_idx_or_neg1, std::string_view name,
+bool mime_field_name_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int16_t name_wks_idx_or_neg1, std::string_view name,
                          bool must_copy_string);
 
 int32_t     mime_field_value_get_int(const MIMEField *field);
@@ -779,12 +786,12 @@ void mime_field_value_delete_comma_val(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField
 void mime_field_value_extend_comma_val(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int idx, std::string_view new_piece);
 void mime_field_value_insert_comma_val(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int idx, std::string_view new_piece);
 
-void mime_field_value_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, std::string_view value, bool must_copy_string);
+bool mime_field_value_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, std::string_view value, bool must_copy_string);
 void mime_field_value_set_int(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int32_t value);
 void mime_field_value_set_uint(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, uint32_t value);
 void mime_field_value_set_int64(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int64_t value);
 void mime_field_value_set_date(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, time_t value);
-void mime_field_name_value_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int16_t name_wks_idx_or_neg1,
+bool mime_field_name_value_set(HdrHeap *heap, MIMEHdrImpl *mh, MIMEField *field, int16_t name_wks_idx_or_neg1,
                                std::string_view name, std::string_view value, int n_v_raw_printable, int n_v_raw_length,
                                bool must_copy_strings);
 
@@ -837,18 +844,18 @@ bool     mime_parse_integer(const char *&buf, const char *end, int *integer);
 /*-------------------------------------------------------------------------
   -------------------------------------------------------------------------*/
 
-inline void
+inline bool
 MIMEField::name_set(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view name)
 {
   const char *name_wks;
 
   if (hdrtoken_is_wks(name.data())) {
     int16_t name_wks_idx = hdrtoken_wks_to_index(name.data());
-    mime_field_name_set(heap, mh, this, name_wks_idx, name, true);
+    return mime_field_name_set(heap, mh, this, name_wks_idx, name, true);
   } else {
     int field_name_wks_idx = hdrtoken_tokenize(name.data(), static_cast<int>(name.length()), &name_wks);
-    mime_field_name_set(heap, mh, this, field_name_wks_idx,
-                        field_name_wks_idx == -1 ? name : std::string_view{name_wks, name.length()}, true);
+    return mime_field_name_set(heap, mh, this, field_name_wks_idx,
+                               field_name_wks_idx == -1 ? name : std::string_view{name_wks, name.length()}, true);
   }
 }
 
@@ -903,10 +910,10 @@ MIMEField::value_get_comma_list(StrList *list) const
 /*-------------------------------------------------------------------------
   -------------------------------------------------------------------------*/
 
-inline void
+inline bool
 MIMEField::value_set(HdrHeap *heap, MIMEHdrImpl *mh, std::string_view value)
 {
-  mime_field_value_set(heap, mh, this, value, true);
+  return mime_field_value_set(heap, mh, this, value, true);
 }
 
 inline void
@@ -1184,7 +1191,7 @@ MIMEHdr::fields_count() const
 inline MIMEField *
 MIMEHdr::field_create(std::string_view name)
 {
-  MIMEField *field = mime_field_create(m_heap, m_mime);
+  MIMEField *field = name.empty() ? mime_field_create(m_heap, m_mime) : mime_field_create_for_name(m_heap, m_mime, name);
 
   if (!name.empty()) {
     auto length{static_cast<int>(name.length())};
@@ -1533,11 +1540,15 @@ MIMEHdr::get_age() const
 {
   int64_t age = value_get_int64(static_cast<std::string_view>(MIME_FIELD_AGE));
 
-  if (age < 0) // We should ignore negative Age: values
+  if (age < 0) {
     return 0;
+  }
 
-  if ((4 == sizeof(time_t)) && (age > INT_MAX)) // Overflow
-    return -1;
+  // RFC 9111 §1.2.2: "the greatest positive integer it can conveniently
+  // represent" — any Age >= ~68 years is effectively infinity for caching.
+  if (age >= INT32_MAX) {
+    return INT32_MAX;
+  }
 
   return age;
 }
@@ -1545,6 +1556,7 @@ MIMEHdr::get_age() const
 /*-------------------------------------------------------------------------
   -------------------------------------------------------------------------*/
 
+// Overflow rejected upstream in validate_hdr_content_length (RFC 9112 §6.3).
 inline int64_t
 MIMEHdr::get_content_length() const
 {
@@ -1608,6 +1620,7 @@ MIMEHdr::get_if_range_date() const
 /*-------------------------------------------------------------------------
   -------------------------------------------------------------------------*/
 
+// RFC 9110 §7.6.2: clamp to implementation max. Saturating mime_parse_int is sufficient.
 inline int32_t
 MIMEHdr::get_max_forwards() const
 {

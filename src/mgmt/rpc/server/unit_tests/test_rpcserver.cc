@@ -23,16 +23,27 @@
 #include <catch2/reporters/catch_reporter_event_listener.hpp>
 #include <catch2/reporters/catch_reporter_registrars.hpp>
 #include <catch2/interfaces/catch_interfaces_config.hpp>
+#include <catch2/internal/catch_context.hpp>
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include <thread>
 #include <future>
 #include <chrono>
 #include <fstream>
+#include <cerrno>
+#include <cstring>
+#include <cstdlib>
+#include <vector>
+#include <functional>
 
 #include "swoc/swoc_file.h"
 
@@ -71,12 +82,128 @@ add_method_handler(const std::string &name, Func &&call)
 
 namespace
 {
-const std::string sockPath{"tests/var/jsonrpc20_test.sock"};
-const std::string lockPath{"tests/var/jsonrpc20_test.lock"};
-constexpr int     default_backlog{5};
-constexpr int     default_maxRetriesOnTransientErrors{64};
-constexpr size_t  default_incoming_req_max_size{32000 * 3};
-DbgCtl            dbg_ctl{"rpc.test.client"};
+/// Registers a method handler and removes it when the scope ends.
+///
+/// Catch2 re-runs a TEST_CASE body once per leaf SECTION. Registering at the top of the body and
+/// removing at the bottom only works while every assertion passes: REQUIRE is fatal, so a failure
+/// inside a SECTION unwinds before the trailing removal and the handler survives into the next
+/// SECTION's run, where re-registering it fails. One real failure then reports as two, and the
+/// second points at a registration that was never the problem.
+class ScopedMethodHandler
+{
+public:
+  template <typename Func> explicit ScopedMethodHandler(std::string name, Func &&call) : _name{std::move(name)}
+  {
+    _registered = rpc::add_method_handler(_name, std::forward<Func>(call));
+  }
+
+  ~ScopedMethodHandler() noexcept
+  {
+    if (!_registered) {
+      return;
+    }
+    // Nothing may leave this destructor: it runs during stack unwinding when a SECTION failed, and
+    // an exception escaping it ends the whole test binary. Even CHECK throws once Catch2 aborts the
+    // run (-a, -x N), after it has recorded the failure.
+    try {
+      INFO("handler: " << _name);
+      CHECK(rpc::test_remove_handler(_name));
+    } catch (std::exception const &ex) {
+      // CHECK catches what test_remove_handler throws, so this is INFO or Catch2 itself failing.
+      try {
+        FAIL_CHECK("exception while removing handler '" << _name << "': " << ex.what());
+      } catch (...) {
+      }
+    } catch (...) {
+      // Only Catch2's abort gets here, and CHECK has already recorded the failure.
+    }
+  }
+
+  ScopedMethodHandler(ScopedMethodHandler const &)            = delete;
+  ScopedMethodHandler &operator=(ScopedMethodHandler const &) = delete;
+
+  [[nodiscard]] bool
+  registered() const
+  {
+    return _registered;
+  }
+
+private:
+  std::string _name;
+  bool        _registered{false};
+};
+
+constexpr std::string_view rpc_test_dir_template{"ats_rpc_XXXXXX"};
+constexpr std::string_view rpc_test_socket_name{"s"};
+constexpr std::string_view rpc_test_lock_name{"l"};
+constexpr size_t           max_rpc_socket_path_size{sizeof(sockaddr_un::sun_path) - 1};
+
+fs::path         rpcTestDir;
+std::string      sockPath;
+std::string      lockPath;
+constexpr int    default_backlog{5};
+constexpr int    default_maxRetriesOnTransientErrors{64};
+constexpr size_t default_incoming_req_max_size{32000 * 3};
+DbgCtl           dbg_ctl{"rpc.test.client"};
+
+/** Prepare JSONRPC socket paths beneath @a base.
+ *
+ * This owns creation of the per-run test directory and publishes the socket
+ * and lock paths shared by the JSONRPC test server and clients.
+ *
+ * @param[in] base Candidate parent directory for the test directory.
+ * @param[out] error Reason setup failed, if a usable directory was not created.
+ * @return @c true if the socket and lock paths are ready for this test run.
+ */
+bool
+try_setup_rpc_test_paths(fs::path const &base, std::string &error)
+{
+  fs::path const     template_path    = base / rpc_test_dir_template;
+  std::string const &dir_template     = template_path.string();
+  fs::path const     socket_file_path = template_path / rpc_test_socket_name;
+  std::string const &socket_path      = socket_file_path.string();
+
+  if (socket_path.size() > max_rpc_socket_path_size) {
+    error = "JSONRPC test socket path is too long under " + base.string() + ": " + socket_path;
+    return false;
+  }
+
+  std::vector<char> mutable_template{dir_template.begin(), dir_template.end()};
+  mutable_template.push_back('\0');
+
+  char *created_dir = mkdtemp(mutable_template.data());
+  if (created_dir == nullptr) {
+    error = "Failed to create JSONRPC test directory under " + base.string() + ": " + std::strerror(errno);
+    return false;
+  }
+
+  rpcTestDir = fs::path{created_dir};
+  sockPath   = (rpcTestDir / rpc_test_socket_name).string();
+  lockPath   = (rpcTestDir / rpc_test_lock_name).string();
+  return true;
+}
+
+/** Prepare JSONRPC socket paths for the test run.
+ *
+ * This prefers the environment temporary directory, then falls back to @c /tmp
+ * when the generated Unix-domain socket path would be too long or setup fails.
+ *
+ * @param[out] error Reason setup failed, if no candidate directory works.
+ * @return @c true if the socket and lock paths are ready for this test run.
+ */
+bool
+setup_rpc_test_paths(std::string &error)
+{
+  if (try_setup_rpc_test_paths(fs::temp_directory_path(), error)) {
+    error.clear();
+    return true;
+  }
+  if (try_setup_rpc_test_paths(fs::path{"/tmp"}, error)) {
+    error.clear();
+    return true;
+  }
+  return false;
+}
 
 } // end anonymous namespace
 
@@ -88,6 +215,11 @@ struct RPCServerTestListener : Catch::EventListenerBase {
   void
   testRunStarting(Catch::TestRunInfo const & /* testRunInfo ATS_UNUSED */) override
   {
+    std::string setup_error;
+    bool const  setup_ok = setup_rpc_test_paths(setup_error);
+    INFO(setup_error);
+    REQUIRE(setup_ok);
+
     Layout::create();
     init_diags("rpc", nullptr);
     RecProcessInit();
@@ -107,12 +239,15 @@ struct RPCServerTestListener : Catch::EventListenerBase {
                  R"(",  "backlog": 5,"max_retry_on_transient_errors": 64, "incoming_request_max_size": 32000 }}})"};
     YAML::Node configNode = YAML::Load(confStr);
     serverConfig.load(configNode["rpc"]);
+    // Report this loudly: otherwise every socket test just fails later with a
+    // confusing "no such file" on the socket path, which is especially noisy
+    // now that each test case runs as its own process.
     try {
       jsonrpcServer = new rpc::RPCServer(serverConfig);
 
       jsonrpcServer->start_thread();
     } catch (std::exception const &ex) {
-      Dbg(dbg_ctl, "Oops: %s", ex.what());
+      std::fprintf(stderr, "Failed to start the JSONRPC test server on %s: %s\n", sockPath.c_str(), ex.what());
     }
   }
 
@@ -122,6 +257,11 @@ struct RPCServerTestListener : Catch::EventListenerBase {
   {
     if (jsonrpcServer) {
       delete jsonrpcServer; // will stop the thread
+    }
+
+    std::error_code ec;
+    if (!rpcTestDir.empty()) {
+      fs::remove_all(rpcTestDir, ec);
     }
   }
 
@@ -257,6 +397,10 @@ private:
   }
 };
 
+struct TestableIPCSocketClient : shared::rpc::IPCSocketClient {
+  using shared::rpc::IPCSocketClient::_safe_write;
+};
+
 // helper function to send a request and update the promise when the response is done.
 // This is to be used in a multithread test.
 void
@@ -266,13 +410,81 @@ send_request(std::string json, std::promise<std::string> p)
   auto              resp = rpc_client.query(json);
   p.set_value(resp);
 }
+
+TEST_CASE("IPCSocketClient write returns when the peer stops reading", "[socket][client]")
+{
+  int fds[2];
+  REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+  int const flags = ::fcntl(fds[0], F_GETFL, 0);
+  REQUIRE(flags >= 0);
+  REQUIRE(::fcntl(fds[0], F_SETFL, flags | O_NONBLOCK) == 0);
+
+  std::vector<char> fill(4096, 'x');
+  while (true) {
+    ssize_t const ret = ::write(fds[0], fill.data(), fill.size());
+    if (ret < 0) {
+      REQUIRE((errno == EAGAIN || errno == EWOULDBLOCK));
+      break;
+    }
+    REQUIRE(ret > 0);
+  }
+
+  TestableIPCSocketClient rpc_client;
+  pid_t const             pid = ::fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    ::close(fds[1]);
+    char const byte = 'x';
+    auto const ret  = rpc_client._safe_write(fds[0], &byte, 1);
+    auto const err  = errno;
+    ::close(fds[0]);
+    _exit(ret == -1 && err == ETIMEDOUT ? 0 : 1);
+  }
+
+  int        status         = 0;
+  bool       child_exited   = false;
+  auto const child_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (std::chrono::steady_clock::now() < child_deadline) {
+    auto const wait_ret = ::waitpid(pid, &status, WNOHANG);
+    if (wait_ret == pid) {
+      child_exited = true;
+      break;
+    }
+    REQUIRE(wait_ret == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  if (!child_exited) {
+    auto const wait_ret = ::waitpid(pid, &status, WNOHANG);
+    if (wait_ret == pid) {
+      child_exited = true;
+    } else {
+      REQUIRE(wait_ret == 0);
+    }
+  }
+
+  if (!child_exited) {
+    ::kill(pid, SIGKILL);
+    REQUIRE(::waitpid(pid, &status, 0) == pid);
+    FAIL("_safe_write did not return when the nonblocking socket stayed unwritable");
+  }
+
+  ::close(fds[0]);
+  ::close(fds[1]);
+
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+}
 } // namespace
 TEST_CASE("Sending 'concurrent' requests to the rpc server.", "[thread]")
 {
   SECTION("A registered handlers")
   {
-    rpc::add_method_handler("some_foo", &some_foo);
-    rpc::add_method_handler("some_foo2", &some_foo);
+    ScopedMethodHandler some_foo_handler{"some_foo", &some_foo};
+    ScopedMethodHandler some_foo2_handler{"some_foo2", &some_foo};
+    REQUIRE(some_foo_handler.registered());
+    REQUIRE(some_foo2_handler.registered());
 
     std::promise<std::string> p1;
     std::promise<std::string> p2;
@@ -327,7 +539,8 @@ DEFINE_JSONRPC_PROTO_FUNCTION(do_nothing) // id, params, resp
 
 TEST_CASE("Basic message sending to a running server", "[socket]")
 {
-  REQUIRE(rpc::add_method_handler("do_nothing", &do_nothing));
+  ScopedMethodHandler handler{"do_nothing", &do_nothing};
+  REQUIRE(handler.registered());
   SECTION("Basic single request to the rpc server")
   {
     const int S{500};
@@ -339,12 +552,50 @@ TEST_CASE("Basic message sending to a running server", "[socket]")
       REQUIRE(resp == R"({"jsonrpc": "2.0", "result": {"size": ")" + std::to_string(S) + R"("}, "id": "EfGh-1"})");
     }());
   }
-  REQUIRE(rpc::test_remove_handler("do_nothing"));
+}
+
+TEST_CASE("JSONRPC socket inode permissions reflect restricted_api config", "[socket][permissions]")
+{
+  SECTION("restricted_api=true yields mode 0700 on the socket inode")
+  {
+    auto confStr{
+      R"({"rpc": { "enabled": true, "unix": { "lock_path_name": ")" + lockPath + R"(", "sock_path_name": ")" + sockPath +
+      R"(",  "backlog": 5, "max_retry_on_transient_errors": 64, "incoming_request_max_size": 32000, "restricted_api": true }}})"};
+    YAML::Node n = YAML::Load(confStr);
+    restart_json_rpc_server(n);
+
+    // Restore the default test server configuration on scope exit, even if an
+    // assertion below fails (REQUIRE throws), so subsequent test cases are not
+    // left running against the restricted-api server.
+    struct ConfigRestorer {
+      std::function<void()> restore;
+      ~ConfigRestorer()
+      {
+        try {
+          restore();
+        } catch (...) {
+        }
+      }
+    } config_restorer{[&]() {
+      auto       restoreStr{R"({"rpc": { "enabled": true, "unix": { "lock_path_name": ")" + lockPath + R"(", "sock_path_name": ")" +
+                      sockPath +
+                      R"(",  "backlog": 5, "max_retry_on_transient_errors": 64, "incoming_request_max_size": 32000 }}})"};
+      YAML::Node restoreN = YAML::Load(restoreStr);
+      restart_json_rpc_server(restoreN);
+    }};
+
+    struct stat st {
+    };
+    REQUIRE(::stat(sockPath.c_str(), &st) == 0);
+    CHECK(S_ISSOCK(st.st_mode));
+    CHECK((st.st_mode & 0777) == 0700);
+  }
 }
 
 TEST_CASE("Sending a message bigger than the internal server's buffer. 32000", "[buffer][error]")
 {
-  REQUIRE(rpc::add_method_handler("do_nothing32000", &do_nothing));
+  ScopedMethodHandler handler{"do_nothing32000", &do_nothing};
+  REQUIRE(handler.registered());
   const int S{32000}; // + the rest of the json message.
   auto json{R"({"jsonrpc": "2.0", "method": "do_nothing32000", "params": {"msg":")" + random_string(S) + R"("}, "id":"32k_1"})"};
 
@@ -368,13 +619,22 @@ TEST_CASE("Sending a message bigger than the internal server's buffer. 32000", "
       auto              resp = rpc_client.query(json);
       REQUIRE(resp == R"({"jsonrpc": "2.0", "result": {"size": "32000"}, "id": "32k_1"})");
     }());
+
+    const int oversized_message_size{64000};
+    auto      oversized_json{R"({"jsonrpc": "2.0", "method": "do_nothing32000", "params": {"msg":")" +
+                        random_string(oversized_message_size) + R"("}, "id":"over-limit"})"};
+    REQUIRE_NOTHROW([&]() {
+      ScopedLocalSocket rpc_client;
+      auto              resp = rpc_client.query(oversized_json);
+      REQUIRE(resp.empty());
+    }());
   }
-  REQUIRE(rpc::test_remove_handler("do_nothing32000"));
 }
 
 TEST_CASE("Test with invalid json message", "[socket]")
 {
-  REQUIRE(rpc::add_method_handler("do_nothing", &do_nothing));
+  ScopedMethodHandler handler{"do_nothing", &do_nothing};
+  REQUIRE(handler.registered());
 
   SECTION("A rpc server")
   {
@@ -387,12 +647,12 @@ TEST_CASE("Test with invalid json message", "[socket]")
       CHECK(resp == R"({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}})");
     }());
   }
-  REQUIRE(rpc::test_remove_handler("do_nothing"));
 }
 
 TEST_CASE("Test with chunks", "[socket][chunks]")
 {
-  REQUIRE(rpc::add_method_handler("do_nothing", &do_nothing));
+  ScopedMethodHandler handler{"do_nothing", &do_nothing};
+  REQUIRE(handler.registered());
 
   SECTION("Sending request by chunks")
   {
@@ -409,12 +669,12 @@ TEST_CASE("Test with chunks", "[socket][chunks]")
       REQUIRE(resp == R"({"jsonrpc": "2.0", "result": {"size": ")" + std::to_string(S) + R"("}, "id": "chunk-parts-3"})");
     }());
   }
-  REQUIRE(rpc::test_remove_handler("do_nothing"));
 }
 
 TEST_CASE("Test with chunks - disconnect after second part", "[socket][chunks]")
 {
-  REQUIRE(rpc::add_method_handler("do_nothing", &do_nothing));
+  ScopedMethodHandler handler{"do_nothing", &do_nothing};
+  REQUIRE(handler.registered());
 
   SECTION("Sending request by chunks")
   {
@@ -432,12 +692,12 @@ TEST_CASE("Test with chunks - disconnect after second part", "[socket][chunks]")
       REQUIRE(resp == "");
     }());
   }
-  REQUIRE(rpc::test_remove_handler("do_nothing"));
 }
 
 TEST_CASE("Test with chunks - incomplete message", "[socket][chunks]")
 {
-  REQUIRE(rpc::add_method_handler("do_nothing", &do_nothing));
+  ScopedMethodHandler handler{"do_nothing", &do_nothing};
+  REQUIRE(handler.registered());
 
   SECTION("Sending request by chunks, broken message")
   {
@@ -455,7 +715,18 @@ TEST_CASE("Test with chunks - incomplete message", "[socket][chunks]")
       REQUIRE(resp == R"({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}})");
     }());
   }
-  REQUIRE(rpc::test_remove_handler("do_nothing"));
+}
+
+// Fails on purpose, so the guard's CHECK throws into its catch (...); see test_jsonrpcserver.guard_abort.
+TEST_CASE("ScopedMethodHandler reports a failed removal when Catch2 aborts", "[.][guard_abort]")
+{
+  if (std::getenv("RPC_TEST_GUARD_ABORT") == nullptr || Catch::getCurrentContext().getConfig()->abortAfter() != 1) {
+    SKIP("run by ctest as test_jsonrpcserver.guard_abort");
+  }
+
+  ScopedMethodHandler handler{"guard_abort_handler", &do_nothing};
+  REQUIRE(handler.registered());
+  REQUIRE(rpc::test_remove_handler("guard_abort_handler"));
 }
 
 // Enable toggle

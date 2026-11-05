@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -26,6 +26,7 @@
 #include <netinet/in.h>
 #include <iostream>
 #include <list>
+#include <utility>
 
 #include "swoc/swoc_file.h"
 #include "swoc/Scalar.h"
@@ -33,6 +34,7 @@
 #include "tsutil/ts_errata.h"
 
 #include "tscore/Version.h"
+#include "iocore/cache/CacheVersion.h"
 #include "tscore/ink_memory.h"
 #include "tsutil/Regex.h"
 #include "tscore/ink_file.h"
@@ -71,8 +73,8 @@ namespace ts
     (_e)->w[4] = (_x)->w[4]; \
   } while (0)
 
-constexpr static uint8_t CACHE_DB_MAJOR_VERSION = 24;
-constexpr static uint8_t CACHE_DB_MINOR_VERSION = 1;
+constexpr static uint8_t CACHE_DB_MAJOR_VERSION = ::CACHE_DB_MAJOR_VERSION;
+constexpr static uint8_t CACHE_DB_MINOR_VERSION = ::CACHE_DB_MINOR_VERSION;
 /// Maximum allowed volume index.
 constexpr static int MAX_VOLUME_IDX          = 255;
 constexpr static int ENTRIES_PER_BUCKET      = 4;
@@ -290,7 +292,7 @@ struct url_matcher {
       while (fileContent) {
         swoc::TextView line = fileContent.take_prefix_at('\n');
         std::string    reg_str(line.data(), line.size());
-        str_vec.push_back(reg_str);
+        str_vec.push_back(std::move(reg_str));
         count++;
       }
       patterns = (const char **)ats_malloc(count * sizeof(char *));
@@ -513,7 +515,11 @@ struct StripeSM {
 
   /// Check a buffer for being valid stripe metadata.
   /// @return @c true if valid, @c false otherwise.
-  static bool validateMeta(StripeMeta const *meta);
+  static bool
+  validateMeta(StripeMeta const *meta)
+  {
+    return StripeMeta::MAGIC == meta->magic && meta->version <= CACHE_DB_VERSION;
+  }
 
   /// Load metadata for this stripe.
   Errata loadMeta();

@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -27,6 +27,8 @@
 #include "iocore/net/quic/QUICStreamManager.h"
 #include "iocore/net/quic/QUICStreamAdapter.h"
 #include "iocore/net/quic/QUICStream.h"
+
+#include <algorithm>
 
 class MockQUICContext;
 
@@ -190,6 +192,11 @@ class MockQUICConnectionInfoProvider : public QUICConnectionInfoProvider
   negotiated_application_name() const override
   {
     return negotiated_application_name_sv;
+  }
+
+  void
+  on_stream_updated() override
+  {
   }
 };
 
@@ -431,6 +438,11 @@ public:
     return negotiated_application_name_sv;
   }
 
+  void
+  on_stream_updated() override
+  {
+  }
+
   int             _transmit_count   = 0;
   int             _retransmit_count = 0;
   Ptr<ProxyMutex> _mutex;
@@ -519,11 +531,17 @@ protected:
   Ptr<IOBufferBlock>
   _read(size_t len) override
   {
-    this->_sending_data_len  -= len;
-    Ptr<IOBufferBlock> block  = make_ptr<IOBufferBlock>(new_IOBufferBlock());
+    len                      = std::min(len, this->_sending_data_len);
+    Ptr<IOBufferBlock> block = make_ptr<IOBufferBlock>(new_IOBufferBlock());
     block->alloc(iobuffer_size_to_index(len, BUFFER_SIZE_INDEX_32K));
     block->fill(len);
     return block;
+  }
+
+  void
+  _consume(size_t len) override
+  {
+    this->_sending_data_len -= std::min(len, this->_sending_data_len);
   }
 
 private:

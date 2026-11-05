@@ -1,6 +1,6 @@
 /** @file
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,6 +23,8 @@
 
 #include "proxy/logging/LogConfig.h"
 #include "proxy/logging/LogObject.h"
+
+#include "tsutil/StringCompare.h"
 
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
@@ -73,9 +75,9 @@ convert<std::unique_ptr<LogFormat>>::decode(const Node &node, std::unique_ptr<Lo
   LogEscapeType escape_type = LOG_ESCAPE_NONE; // default value
   if (node["escape"]) {
     std::string escape = node["escape"].as<std::string>();
-    if (!strncasecmp(escape.c_str(), "json", 4)) {
+    if (ts::iequals(escape, "json")) {
       escape_type = LOG_ESCAPE_JSON;
-    } else if (!strncasecmp(escape.c_str(), "none", 4)) {
+    } else if (ts::iequals(escape, "none")) {
       escape_type = LOG_ESCAPE_NONE;
     } else {
       throw YAML::ParserException(node.Mark(), "invalid 'escape' argument '" + escape + "' for format name '" + name + "'");

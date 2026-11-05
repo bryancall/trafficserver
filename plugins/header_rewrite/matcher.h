@@ -60,6 +60,7 @@ enum class CondModifiers : int {
   MOD_PRE    = 1 << 6,
   MOD_SUF    = 1 << 7,
   MOD_MID    = 1 << 8, // Essentially a substring
+  MOD_NORM   = 1 << 9, // Normalize (percent-decode) the value before use
 };
 
 inline CondModifiers
@@ -209,7 +210,7 @@ public:
 
           field.ltrim_if(&isspace).rtrim_if(&isspace);
           values.insert(convert(std::string(field)));
-          start       = ++cur + skip_quotes;
+          start       = ++cur;
           skip_quotes = 0;
         } else {
           ++cur;

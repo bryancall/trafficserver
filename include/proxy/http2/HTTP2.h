@@ -2,7 +2,7 @@
  *
  *  Fundamental HTTP/2 protocol definitions and parsers.
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -30,6 +30,8 @@
 #include "records/RecDefs.h"
 
 #include "tsutil/Metrics.h"
+
+#include <atomic>
 
 using ts::Metrics;
 
@@ -108,6 +110,7 @@ struct Http2StatsBlock {
   Metrics::Counter::AtomicType *insufficient_avg_window_update;
   Metrics::Counter::AtomicType *max_concurrent_streams_exceeded_in;
   Metrics::Counter::AtomicType *max_concurrent_streams_exceeded_out;
+  Metrics::Counter::AtomicType *max_active_streams_exceeded_in;
   Metrics::Counter::AtomicType *data_frames_in;
   Metrics::Counter::AtomicType *headers_frames_in;
   Metrics::Counter::AtomicType *priority_frames_in;
@@ -372,8 +375,20 @@ bool http2_parse_goaway(IOVec, Http2Goaway &);
 
 bool http2_parse_window_update(IOVec, uint32_t &);
 
+// Returns true if appending `payload_length` more bytes to an
+// existing CONTINUATION header-block accumulator of `current_length` would
+// overflow a uint32_t. Used by Http2ConnectionState::rcv_continuation_frame()
+// to reject crafted CONTINUATION chains whose total payload would wrap the
+// 32-bit accumulator and pair an undersized ats_realloc() with a memcpy at
+// the pre-wrap offset.
+static inline bool
+http2_continuation_length_would_overflow(uint32_t current_length, uint32_t payload_length)
+{
+  return current_length > UINT32_MAX - payload_length;
+}
+
 Http2ErrorCode http2_decode_header_blocks(HTTPHdr *, const uint8_t *, const uint32_t, uint32_t *, HpackHandle &, bool, uint32_t,
-                                          bool is_outbound = false);
+                                          uint32_t, bool is_outbound = false);
 
 Http2ErrorCode http2_encode_header_blocks(HTTPHdr *, uint8_t *, uint32_t, uint32_t *, HpackHandle &, int32_t);
 
@@ -398,29 +413,30 @@ enum class Http2FlowControlPolicy {
 class Http2
 {
 public:
-  static uint32_t               max_concurrent_streams_in;
-  static uint32_t               min_concurrent_streams_in;
-  static uint32_t               max_active_streams_in;
-  static bool                   throttling;
-  static uint32_t               stream_priority_enabled;
-  static uint32_t               initial_window_size_in;
-  static Http2FlowControlPolicy flow_control_policy_in;
-  static uint32_t               max_frame_size;
-  static uint32_t               header_table_size;
-  static uint32_t               max_header_list_size;
-  static uint32_t               accept_no_activity_timeout;
-  static uint32_t               no_activity_timeout_in;
-  static uint32_t               active_timeout_in;
-  static uint32_t               incomplete_header_timeout_in;
-  static uint32_t               push_diary_size;
-  static uint32_t               zombie_timeout_in;
+  static uint32_t                            max_concurrent_streams_in;
+  static uint32_t                            min_concurrent_streams_in;
+  static uint32_t                            max_active_streams_in;
+  static uint32_t                            max_active_streams_policy_in;
+  static bool                                throttling;
+  static uint32_t                            stream_priority_enabled;
+  static uint32_t                            initial_window_size_in;
+  static std::atomic<Http2FlowControlPolicy> flow_control_policy_in;
+  static uint32_t                            max_frame_size;
+  static uint32_t                            header_table_size;
+  static uint32_t                            max_header_list_size;
+  static uint32_t                            accept_no_activity_timeout;
+  static uint32_t                            no_activity_timeout_in;
+  static uint32_t                            active_timeout_in;
+  static uint32_t                            incomplete_header_timeout_in;
+  static uint32_t                            push_diary_size;
+  static uint32_t                            zombie_timeout_in;
 
-  static uint32_t               max_concurrent_streams_out;
-  static uint32_t               min_concurrent_streams_out;
-  static uint32_t               max_active_streams_out;
-  static uint32_t               no_activity_timeout_out;
-  static uint32_t               initial_window_size_out;
-  static Http2FlowControlPolicy flow_control_policy_out;
+  static uint32_t                            max_concurrent_streams_out;
+  static uint32_t                            min_concurrent_streams_out;
+  static uint32_t                            max_active_streams_out;
+  static uint32_t                            no_activity_timeout_out;
+  static uint32_t                            initial_window_size_out;
+  static std::atomic<Http2FlowControlPolicy> flow_control_policy_out;
 
   static float    stream_error_rate_threshold;
   static uint32_t stream_error_sampling_threshold;
@@ -428,6 +444,7 @@ public:
   static int32_t  max_settings_per_minute;
   static int32_t  max_settings_frames_per_minute;
   static int32_t  max_ping_frames_per_minute;
+  static int32_t  max_ping_frames_per_minute_out;
   static int32_t  max_priority_frames_per_minute;
   static int32_t  max_rst_stream_frames_per_minute;
   static int32_t  max_continuation_frames_per_minute;

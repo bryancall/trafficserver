@@ -2,7 +2,7 @@
 
   The implementations of the Metrics::Counter API class.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -22,6 +22,7 @@
  */
 
 #include "tsutil/Assert.h"
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -42,16 +43,31 @@ Metrics::instance()
   return _instance;
 }
 
+Metrics &
+Metrics::hidden_instance()
+{
+  // Separate storage from instance(). Hidden metrics are never published.
+  static std::shared_ptr<Storage> _hidden_store = std::make_shared<Storage>();
+  thread_local Metrics            _instance(_hidden_store);
+
+  return _instance;
+}
+
 void
 Metrics::Storage::addBlob() // The mutex must be held before calling this!
 {
   auto blob = std::make_unique<Metrics::NamesAndAtomics>();
 
-  debug_assert(blob);
-  debug_assert(_cur_blob < MAX_BLOBS);
+  auto const cur_blob = static_cast<uint16_t>(_next_free.load(std::memory_order_relaxed) >> 16);
 
-  _blobs[++_cur_blob] = std::move(blob);
-  _cur_off            = 0;
+  debug_assert(blob);
+  // The write below is to _blobs[cur_blob + 1], so the last usable blob index is MAX_BLOBS - 1.
+  release_assert(cur_blob < MAX_BLOBS - 1);
+
+  _blobs[cur_blob + 1] = std::move(blob);
+
+  // One store publishes both; the install above is sequenced before it.
+  _next_free.store(_pack(cur_blob + 1, 0), std::memory_order_release);
 }
 
 Metrics::IdType
@@ -61,18 +77,34 @@ Metrics::Storage::create(std::string_view name, const MetricType type)
   auto            it = _lookups.find(name);
 
   if (it != _lookups.end()) {
+    // Re-creating a name relists it: same slot, same atomic, and whatever value it accumulated
+    // while it was out of the listing. A name in _lookups always names an allocated slot.
+    set_listed(it->second, true);
+
     return it->second;
   }
 
-  Metrics::IdType           id    = _makeId(_cur_blob, _cur_off, type);
-  Metrics::NamesAndAtomics *blob  = _blobs[_cur_blob].get();
+  // The slot is written below and the bookkeeping only then advances, calling addBlob() once the
+  // offset reaches MAX_SIZE. Refusing the final slot of the final blob keeps addBlob() from ever
+  // being reached in an exhausted store, at a cost of one slot out of MAX_BLOBS * MAX_SIZE.
+  auto const [cur_blob, cur_off] = _splitID(static_cast<IdType>(_next_free.load(std::memory_order_relaxed)));
+
+  if (cur_blob >= MAX_BLOBS - 1 && cur_off >= MAX_SIZE - 1) {
+    return 0; // Slot 0 is the reserved bad_id. Cannot grow further.
+  }
+
+  Metrics::IdType           id    = _makeId(cur_blob, cur_off, type);
+  Metrics::NamesAndAtomics *blob  = _blobs[cur_blob].get();
   Metrics::NameStorage     &names = std::get<0>(*blob);
 
-  names[_cur_off] = std::make_tuple(std::string(name), id);
-  _lookups.emplace(std::get<0>(names[_cur_off]), id);
+  names[cur_off] = std::make_tuple(std::string(name), id);
+  _lookups.emplace(std::get<0>(names[cur_off]), id);
 
-  if (++_cur_off >= MAX_SIZE) {
-    addBlob(); // This resets _cur_off to 0 as well
+  if (cur_off + 1 >= MAX_SIZE) {
+    addBlob();
+  } else {
+    // Publishes the slot's name.
+    _next_free.store(_pack(cur_blob, cur_off + 1), std::memory_order_release);
   }
 
   return id;
@@ -94,22 +126,23 @@ Metrics::Storage::lookup(const std::string_view name) const
 Metrics::AtomicType *
 Metrics::Storage::lookup(Metrics::IdType id, std::string_view *out_name, Metrics::MetricType *out_type) const
 {
-  auto [blob_ix, offset]         = _splitID(id);
-  Metrics::NamesAndAtomics *blob = _blobs[blob_ix].get();
+  auto [blob_ix, offset] = _splitID(id);
 
-  // Do a sanity check on the ID, to make sure we don't index outside of the realm of possibility.
-  if (!blob || (blob_ix == _cur_blob && offset > _cur_off)) {
-    blob   = _blobs[0].get();
-    offset = 0;
+  // Anything not naming an allocated slot resolves to the reserved bad_id slot.
+  if (!_is_allocated(id)) {
+    blob_ix = 0;
+    offset  = 0;
   }
+
+  Metrics::NamesAndAtomics *blob = _blobs[blob_ix].get();
 
   if (out_name) {
     *out_name = std::get<0>(std::get<0>(*blob)[offset]);
   }
 
   if (out_type) {
-    // don't trust the passed in id to get the type as it might have been manufactured (i.e. from iterators)
-    // so get the type from the storage tuple.
+    // don't trust the passed in id to get the type as it might have been manufactured, so get the
+    // type from the storage tuple.
     *out_type = _extractType(std::get<1>(std::get<0>(*blob)[offset]));
   }
 
@@ -140,14 +173,15 @@ Metrics::Storage::lookup(const std::string_view name, Metrics::IdType *out_id, M
 std::string_view
 Metrics::Storage::name(Metrics::IdType id) const
 {
-  auto [blob_ix, offset]         = _splitID(id);
-  Metrics::NamesAndAtomics *blob = _blobs[blob_ix].get();
+  auto [blob_ix, offset] = _splitID(id);
 
-  // Do a sanity check on the ID, to make sure we don't index outside of the realm of possibility.
-  if (!blob || (blob_ix == _cur_blob && offset > _cur_off)) {
-    blob   = _blobs[0].get();
-    offset = 0;
+  // Anything not naming an allocated slot resolves to the reserved bad_id slot.
+  if (!_is_allocated(id)) {
+    blob_ix = 0;
+    offset  = 0;
   }
+
+  Metrics::NamesAndAtomics *blob = _blobs[blob_ix].get();
 
   const std::string &result = std::get<0>(std::get<0>(*blob)[offset]);
 
@@ -160,65 +194,37 @@ Metrics::Storage::type(IdType id) const
   return _extractType(id);
 }
 
-Metrics::SpanType
-Metrics::Storage::createSpan(size_t size, Metrics::MetricType type, Metrics::IdType *id)
-{
-  release_assert(size <= MAX_SIZE);
-  std::lock_guard lock(_mutex);
-
-  if (_cur_off + size > MAX_SIZE) {
-    addBlob();
-  }
-
-  Metrics::IdType           span_start = _makeId(_cur_blob, _cur_off, type);
-  Metrics::NamesAndAtomics *blob       = _blobs[_cur_blob].get();
-  Metrics::AtomicStorage   &atomics    = std::get<1>(*blob);
-  Metrics::SpanType         span       = Metrics::SpanType(&atomics[_cur_off], size);
-
-  if (id) {
-    *id = span_start;
-  }
-
-  _cur_off += size;
-
-  return span;
-}
-
 bool
-Metrics::Storage::rename(Metrics::IdType id, std::string_view name)
+Metrics::Storage::set_listed(Metrics::IdType id, bool listed)
 {
-  auto [blob_ix, offset]         = _splitID(id);
-  Metrics::NamesAndAtomics *blob = _blobs[blob_ix].get();
-
-  // We can only rename Metrics that are already allocated
-  if (!blob || (blob_ix == _cur_blob && offset > _cur_off)) {
+  if (!_is_allocated(id)) {
     return false;
   }
 
-  std::string    &cur = std::get<0>(std::get<0>(*blob)[offset]);
-  std::lock_guard lock(_mutex);
+  auto [blob_ix, offset]         = _splitID(id);
+  Metrics::NamesAndAtomics *blob = _blobs[blob_ix].get();
 
-  if (cur.length() > 0) {
-    _lookups.erase(cur);
+  // Only this bit, so a flag added later is not clobbered by unlisting or relisting.
+  if (listed) {
+    std::get<2>(*blob)[offset].fetch_and(static_cast<uint8_t>(~UNLISTED), MEMORY_ORDER);
+  } else {
+    std::get<2>(*blob)[offset].fetch_or(UNLISTED, MEMORY_ORDER);
   }
-  cur = name;
-  _lookups.emplace(cur, id);
 
   return true;
 }
 
-// Iterator implementation
-void
-Metrics::iterator::next()
+bool
+Metrics::Storage::listed(Metrics::IdType id) const
 {
-  auto [blob, offset] = _metrics._splitID(_it);
-
-  if (++offset == MAX_SIZE) {
-    ++blob;
-    offset = 0;
+  if (!_is_allocated(id)) {
+    return false;
   }
 
-  _it = _makeId(blob, offset, MetricType::COUNTER);
+  auto [blob_ix, offset]         = _splitID(id);
+  Metrics::NamesAndAtomics *blob = _blobs[blob_ix].get();
+
+  return (std::get<2>(*blob)[offset].load(MEMORY_ORDER) & UNLISTED) == 0;
 }
 
 namespace details
@@ -226,6 +232,7 @@ namespace details
   struct DerivedMetric {
     Metrics::IdType                    metric;
     std::vector<Metrics::AtomicType *> derived_from;
+    Metrics::Derived::Op               op{Metrics::Derived::Op::SUM};
   };
 
   struct DerivativeMetrics {
@@ -239,12 +246,30 @@ namespace details
       std::lock_guard l(metrics_lock);
 
       for (auto &m : metrics) {
-        int64_t sum = 0;
-
-        for (auto d : m.derived_from) {
-          sum += d->load();
+        if (m.derived_from.empty()) {
+          continue;
         }
-        instance[m.metric].store(sum);
+
+        // Seeded from the first source rather than from zero: a zero seed is correct only for
+        // SUM, and would clamp every MIN result to <= 0.
+        int64_t value = m.derived_from.front()->load();
+
+        for (auto it = m.derived_from.begin() + 1; it != m.derived_from.end(); ++it) {
+          int64_t const v = (*it)->load();
+
+          switch (m.op) {
+          case Metrics::Derived::Op::SUM:
+            value += v;
+            break;
+          case Metrics::Derived::Op::MAX:
+            value = std::max(value, v);
+            break;
+          case Metrics::Derived::Op::MIN:
+            value = std::min(value, v);
+            break;
+          }
+        }
+        instance[m.metric].store(value);
       }
     }
 
@@ -252,7 +277,59 @@ namespace details
     push_back(const DerivedMetric &m)
     {
       std::lock_guard l(metrics_lock);
-      metrics.push_back(std::move(m));
+      metrics.push_back(m);
+    }
+
+    void
+    add_source(Metrics::IdType id, Metrics::AtomicType *source, Metrics::Derived::Op op)
+    {
+      if (!source) {
+        return;
+      }
+
+      std::lock_guard l(metrics_lock);
+      auto            it = std::find_if(metrics.begin(), metrics.end(), [id](DerivedMetric const &m) { return m.metric == id; });
+
+      if (it == metrics.end()) {
+        metrics.push_back(DerivedMetric{id, {source}, op});
+      } else if (std::find(it->derived_from.begin(), it->derived_from.end(), source) == it->derived_from.end()) {
+        // Already registered sources are skipped so repeated registration is harmless.
+        it->derived_from.push_back(source);
+      }
+
+      // Under the lock, and after the source is registered. create() has already relisted, but a
+      // remove_source that emptied the list concurrently would otherwise be free to unlist after
+      // this source was added, leaving a metric that is recomputed but never enumerated.
+      Metrics::instance().relist(id);
+    }
+
+    void
+    remove_source(Metrics::IdType id, Metrics::AtomicType *source)
+    {
+      if (!source) {
+        return;
+      }
+
+      std::lock_guard l(metrics_lock);
+      auto            it = std::find_if(metrics.begin(), metrics.end(), [id](DerivedMetric const &m) { return m.metric == id; });
+
+      if (it == metrics.end()) {
+        return;
+      }
+
+      auto src = std::find(it->derived_from.begin(), it->derived_from.end(), source);
+
+      if (src == it->derived_from.end()) {
+        return; // Not a source of this metric, so nothing about it changes.
+      }
+
+      it->derived_from.erase(src);
+
+      // Under the lock with the erase, for the reason given in add_source. The entry stays, holding
+      // no sources: update() skips those, and add_source finds it again if a contributor returns.
+      if (it->derived_from.empty()) {
+        Metrics::instance().unlist(id);
+      }
     }
 
     static DerivativeMetrics &
@@ -273,14 +350,25 @@ Metrics::Derived::derive(const std::initializer_list<Metrics::Derived::DerivedMe
   for (auto &m : metrics) {
     details::DerivedMetric dm{};
     dm.metric = instance._create(m.derived_name, m.derived_type);
+    dm.op     = m.op;
 
     for (auto &d : m.derived_from) {
+      Metrics::AtomicType *ptr = nullptr;
+
       if (std::holds_alternative<Metrics::AtomicType *>(d)) {
-        dm.derived_from.push_back(std::get<Metrics::AtomicType *>(d));
+        ptr = std::get<Metrics::AtomicType *>(d);
       } else if (std::holds_alternative<Metrics::IdType>(d)) {
-        dm.derived_from.push_back(instance.lookup(std::get<Metrics::IdType>(d)));
-      } else if (std::holds_alternative<std::string_view>(d)) {
-        dm.derived_from.push_back(instance.lookup(instance.lookup(std::get<std::string_view>(d))));
+        auto id = std::get<Metrics::IdType>(d);
+        ptr     = instance.valid(id) ? instance.lookup(id) : nullptr;
+      } else {
+        auto id = instance.lookup(std::get<std::string_view>(d));
+        ptr     = (id != Metrics::NOT_FOUND) ? instance.lookup(id) : nullptr;
+      }
+
+      // A source that does not resolve is skipped. Passing an unresolved id to lookup() would
+      // silently land on the reserved bad_id slot and contribute its value to the aggregate.
+      if (ptr) {
+        dm.derived_from.push_back(ptr);
       }
     }
     details::DerivativeMetrics::instance().push_back(dm);
@@ -291,6 +379,28 @@ void
 Metrics::Derived::update_derived()
 {
   details::DerivativeMetrics::instance().update();
+}
+
+void
+Metrics::Derived::add_source(std::string_view derived_name, Metrics::MetricType type, Metrics::AtomicType *source, Op op)
+{
+  // Resolved here rather than in the helper because _create is private to Metrics.
+  auto id = Metrics::instance()._create(derived_name, type);
+
+  details::DerivativeMetrics::instance().add_source(id, source, op);
+}
+
+void
+Metrics::Derived::remove_source(std::string_view derived_name, Metrics::AtomicType *source)
+{
+  auto &instance = Metrics::instance();
+  auto  id       = instance.lookup(derived_name);
+
+  if (id == Metrics::NOT_FOUND) {
+    return;
+  }
+
+  details::DerivativeMetrics::instance().remove_source(id, source);
 }
 
 Metrics::StaticString &

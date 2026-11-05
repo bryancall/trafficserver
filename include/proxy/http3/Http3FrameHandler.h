@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -31,7 +31,7 @@ class Http3FrameHandler
 {
 public:
   virtual ~Http3FrameHandler(){};
-  virtual std::vector<Http3FrameType> interests()                                                     = 0;
-  virtual Http3ErrorUPtr              handle_frame(std::shared_ptr<const Http3Frame> frame,
-                                                   Http3StreamType                   s_type = Http3StreamType::UNKNOWN) = 0;
+  virtual std::vector<Http3FrameType> const &interests()                                                     = 0;
+  virtual Http3ErrorUPtr                     handle_frame(std::shared_ptr<const Http3Frame> frame,
+                                                          Http3StreamType                   s_type = Http3StreamType::UNKNOWN) = 0;
 };

@@ -2,7 +2,7 @@
 
   Record message definitions
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -32,9 +32,6 @@
 #include "P_RecCore.h"
 #include "tscore/Layout.h"
 #include "swoc/MemSpan.h"
-
-static RecMessageRecvCb g_recv_cb     = nullptr;
-static void            *g_recv_cookie = nullptr;
 
 //-------------------------------------------------------------------------
 // RecMessageAlloc
@@ -220,22 +217,6 @@ RecMessageUnmarshalNext(RecMessage *msg, RecMessageItr *itr, RecRecord **record)
   }
 
   *record = r;
-
-  return REC_ERR_OKAY;
-}
-
-//-------------------------------------------------------------------------
-// RecMessageRegisterRecvCb
-//-------------------------------------------------------------------------
-
-int
-RecMessageRegisterRecvCb(RecMessageRecvCb recv_cb, void *cookie)
-{
-  if (g_recv_cb) {
-    return REC_ERR_FAIL;
-  }
-  g_recv_cookie = cookie;
-  g_recv_cb     = recv_cb;
 
   return REC_ERR_OKAY;
 }

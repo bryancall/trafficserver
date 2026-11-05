@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -55,6 +55,9 @@ public:
   void           add_transaction(HQTransaction *trans);
   void           remove_transaction(HQTransaction *trans);
   HQTransaction *get_transaction(QUICStreamId);
+
+protected:
+  void _close_transactions();
 
 private:
   // this should be unordered map?

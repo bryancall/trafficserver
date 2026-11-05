@@ -2,7 +2,7 @@
 
   P_SSLClientCoordinator.h - coordinate the loading of SSL related configs
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -21,11 +21,13 @@
   limitations under the License.
  */
 
-// A class to pass the ConfigUpdateHandler, so both SSLConfig and SNIConfig get updated
-// when the relevant files/configs get updated.
+#include "mgmt/config/ConfigContext.h"
+
+// A class to coordinate the loading of SSL related configs (SSLConfig, SNIConfig,
+// SSLCertificateConfig). All are reloaded together when any of the trigger records change.
 class SSLClientCoordinator
 {
 public:
   static void startup();
-  static void reconfigure();
+  static void reconfigure(ConfigContext ctx = {});
 };

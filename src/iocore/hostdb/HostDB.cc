@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -25,6 +25,7 @@
 #include "swoc/swoc_file.h"
 #include "tscore/Regression.h"
 #include "tsutil/ts_bw_format.h"
+#include "tsutil/LocalBuffer.h"
 
 #include "P_HostDB.h"
 // Gross
@@ -150,7 +151,7 @@ check_for_retry(HostDBMark &mark, HostResStyle style)
 // Function Prototypes
 //
 HostDBHash &
-HostDBHash::set_host(TextView name)
+HostDBHash::set_host(swoc::TextView name)
 {
   host_name = name;
 
@@ -213,10 +214,10 @@ HostDBCache::HostDBCache() {}
 bool
 HostDBCache::is_pending_dns_for_hash(const CryptoHash &hash)
 {
-  ts::shared_mutex                  &bucket_lock = hostDB.refcountcache->lock_for_key(hash.fold());
-  std::shared_lock<ts::shared_mutex> lock{bucket_lock};
-  bool                               retval = false;
-  Queue<HostDBContinuation>         &q      = pending_dns_for_hash(hash);
+  ts::shared_mutex          &bucket_lock = hostDB.refcountcache->lock_for_key(hash.fold());
+  ts::read_guard             lock{bucket_lock};
+  bool                       retval = false;
+  Queue<HostDBContinuation> &q      = pending_dns_for_hash(hash);
   for (HostDBContinuation *c = q.head; c; c = static_cast<HostDBContinuation *>(c->link.next)) {
     if (hash == c->hash.hash) {
       retval = true;
@@ -229,10 +230,10 @@ HostDBCache::is_pending_dns_for_hash(const CryptoHash &hash)
 bool
 HostDBCache::remove_from_pending_dns_for_hash(const CryptoHash &hash, HostDBContinuation *c)
 {
-  bool                               retval      = false;
-  ts::shared_mutex                  &bucket_lock = hostDB.refcountcache->lock_for_key(hash.fold());
-  std::unique_lock<ts::shared_mutex> lock{bucket_lock};
-  Queue<HostDBContinuation>         &q = pending_dns_for_hash(hash);
+  bool                       retval      = false;
+  ts::shared_mutex          &bucket_lock = hostDB.refcountcache->lock_for_key(hash.fold());
+  ts::write_guard            lock{bucket_lock};
+  Queue<HostDBContinuation> &q = pending_dns_for_hash(hash);
   if (q.in(c)) {
     q.remove(c);
     retval = true;
@@ -252,6 +253,12 @@ HostDBCache *
 HostDBProcessor::cache()
 {
   return &hostDB;
+}
+
+void
+HostDBProcessor::clear()
+{
+  hostDB.refcountcache->clear();
 }
 
 int
@@ -468,32 +475,26 @@ probe(HostDBHash const &hash, bool ignore_timeout)
   }
 
   // Otherwise HostDB is enabled, so we'll do our thing
-  uint64_t          folded_hash = hash.hash.fold();
-  ts::shared_mutex &bucket_lock = hostDB.refcountcache->lock_for_key(folded_hash);
+  uint64_t folded_hash = hash.hash.fold();
 
-  Ptr<HostDBRecord> record;
-  {
-    std::shared_lock<ts::shared_mutex> lock{bucket_lock};
-
-    // get the record from cache
-    record = hostDB.refcountcache->get(folded_hash);
-    // If there was nothing in the cache-- this is a miss
-    if (record.get() == nullptr) {
-      record = probe_ip(hash);
-      if (!record) {
-        record = probe_hostfile(hash);
-      }
-      return record;
+  // get the record from cache
+  Ptr<HostDBRecord> record = hostDB.refcountcache->get(folded_hash);
+  // If there was nothing in the cache-- this is a miss
+  if (record.get() == nullptr) {
+    record = probe_ip(hash);
+    if (!record) {
+      record = probe_hostfile(hash);
     }
+    return record;
+  }
 
-    // If the dns response was failed, and we've hit the failed timeout, lets stop returning it
-    if (record->is_failed() && record->is_ip_fail_timeout()) {
-      return NO_RECORD;
-      // if we aren't ignoring timeouts, and we are past it-- then remove the record
-    } else if (!ignore_timeout && record->is_ip_timeout() && !record->serve_stale_but_revalidate()) {
-      Metrics::Counter::increment(hostdb_rsb.ttl_expires);
-      return NO_RECORD;
-    }
+  // If the dns response was failed, and we've hit the failed timeout, lets stop returning it
+  if (record->is_failed() && record->is_ip_fail_timeout()) {
+    return NO_RECORD;
+    // if we aren't ignoring timeouts, and we are past it-- then remove the record
+  } else if (!ignore_timeout && record->is_ip_timeout() && !record->serve_stale_but_revalidate()) {
+    Metrics::Counter::increment(hostdb_rsb.ttl_expires);
+    return NO_RECORD;
   }
 
   // If the record is stale, but we want to revalidate-- lets start that up
@@ -566,12 +567,8 @@ HostDBProcessor::getby(Continuation *cont, cb_process_result_pfn cb_process_resu
     bool loop = lock.is_locked();
     while (loop) {
       loop = false; // Only loop on explicit set for retry.
-      // find the partition lock
-      ts::shared_mutex &bucket_lock = hostDB.refcountcache->lock_for_key(hash.hash.fold());
-
-      // If we can get the lock and a level 1 probe succeeds, return
-      HostDBRecord::Handle               r = probe(hash, false);
-      std::shared_lock<ts::shared_mutex> lock{bucket_lock};
+      // If a level 1 probe succeeds, return
+      HostDBRecord::Handle r = probe(hash, false);
       if (r) {
         // fail, see if we should retry with alternate
         if (hash.db_mark != HOSTDB_MARK_SRV && r->is_failed() && hash.host_name) {
@@ -811,8 +808,8 @@ HostDBContinuation::dnsPendingEvent(int event, Event *e)
       timeout = eventProcessor.schedule_in(this, HOST_DB_RETRY_PERIOD);
       return EVENT_CONT;
     }
-    if (!action.cancelled && action.continuation) {
-      action.continuation->handleEvent(EVENT_HOST_DB_LOOKUP, nullptr);
+    if (action.continuation) {
+      action.call_back(EVENT_HOST_DB_LOOKUP, nullptr);
     }
     if (hostDB.remove_from_pending_dns_for_hash(hash.hash, this)) {
       hostdb_cont_free(this);
@@ -837,6 +834,7 @@ HostDBContinuation::dnsEvent(int event, HostEnt *e)
     // Event should be immediate or interval.
     if (!action.continuation) {
       // Nothing to do, give up.
+      bool cleanup_self = false;
       if (event == EVENT_INTERVAL) {
         // Timeout - clear all queries queued up for this FQDN because none of the other ones have sent an
         // actual DNS query. If the request rate is high enough this can cause a persistent queue where the
@@ -846,9 +844,9 @@ HostDBContinuation::dnsEvent(int event, HostEnt *e)
       } else {
         // "local" signal to give up, usually due this being one of those "other" queries.
         // That generally means @a this has already been removed from the queue, but just in case...
-        hostDB.pending_dns_for_hash(hash.hash).remove(this);
+        cleanup_self = hostDB.remove_from_pending_dns_for_hash(hash.hash, this);
       }
-      if (hostDB.remove_from_pending_dns_for_hash(hash.hash, this)) {
+      if (cleanup_self) {
         hostdb_cont_free(this);
       }
       return EVENT_DONE;
@@ -862,8 +860,8 @@ HostDBContinuation::dnsEvent(int event, HostEnt *e)
     // We don't try a different family here because a timeout indicates
     // a server issue that won't be fixed by asking for a different
     // address family.
-    if (!action.cancelled && action.continuation) {
-      action.continuation->handleEvent(EVENT_HOST_DB_LOOKUP, nullptr);
+    if (action.continuation) {
+      action.call_back(EVENT_HOST_DB_LOOKUP, nullptr);
     }
     action = nullptr;
     return EVENT_DONE;
@@ -947,9 +945,14 @@ HostDBContinuation::dnsEvent(int event, HostEnt *e)
       auto rr_info = r->rr_info();
       // Fill in record type specific data.
       if (hash.is_srv()) {
-        char *pos = rr_info.rebind<char>().end();
-        SRV  *q[valid_records];
+        char                      *pos = rr_info.rebind<char>().end();
+        ts::LocalBuffer<SRV *, 16> q_buf(valid_records);
+        SRV                      **q = q_buf.data();
         ink_assert(valid_records <= static_cast<int>(hostdb_round_robin_max_count));
+        // The loop below assigns every element, but ts::LocalBuffer hands back raw storage and the
+        // static analyzer cannot follow the loop well enough to see that. Pre-fill so the sort below
+        // is never reported as reading an uninitialized pointer.
+        std::fill_n(q, valid_records, nullptr);
         for (int i = 0; i < valid_records; ++i) {
           q[i] = &e->srv_hosts.hosts[i];
         }
@@ -989,10 +992,9 @@ HostDBContinuation::dnsEvent(int event, HostEnt *e)
     }
 
     if (!serve_stale) { // implies r != old_r
-      ts::shared_mutex                  &bucket_lock = hostDB.refcountcache->lock_for_key(hash.hash.fold());
-      std::unique_lock<ts::shared_mutex> lock{bucket_lock};
-      auto const                         duration_till_revalidate = r->expiry_time().time_since_epoch();
-      auto const                         seconds_till_revalidate  = duration_cast<ts_seconds>(duration_till_revalidate).count();
+      auto const duration_till_revalidate = r->expiry_time().time_since_epoch();
+      auto const seconds_till_revalidate  = duration_cast<ts_seconds>(duration_till_revalidate).count();
+
       hostDB.refcountcache->put(r->key, r.get(), r->_record_size, seconds_till_revalidate);
     } else {
       Warning("Fallback to serving stale record, skip re-update of hostdb for %.*s", int(query_name.size()), query_name.data());
@@ -1083,7 +1085,7 @@ HostDBContinuation::probeEvent(int /* event ATS_UNUSED */, Event *e)
 
   if (!hostdb_enable || (!*hash.host_name && !hash.ip.isValid())) {
     if (action.continuation) {
-      action.continuation->handleEvent(EVENT_HOST_DB_LOOKUP, nullptr);
+      action.call_back(EVENT_HOST_DB_LOOKUP, nullptr);
     }
     hostdb_cont_free(this);
     return EVENT_DONE;
@@ -1118,9 +1120,9 @@ HostDBContinuation::probeEvent(int /* event ATS_UNUSED */, Event *e)
 int
 HostDBContinuation::set_check_pending_dns()
 {
-  ts::shared_mutex                  &bucket_lock = hostDB.refcountcache->lock_for_key(hash.hash.fold());
-  std::unique_lock<ts::shared_mutex> lock{bucket_lock};
-  Queue<HostDBContinuation>         &q = hostDB.pending_dns_for_hash(hash.hash);
+  ts::shared_mutex          &bucket_lock = hostDB.refcountcache->lock_for_key(hash.hash.fold());
+  ts::write_guard            lock{bucket_lock};
+  Queue<HostDBContinuation> &q = hostDB.pending_dns_for_hash(hash.hash);
   this->setThreadAffinity(this_ethread());
   if (q.in(this)) {
     Metrics::Counter::increment(hostdb_rsb.insert_duplicate_to_pending_dns);
@@ -1146,8 +1148,8 @@ HostDBContinuation::remove_and_trigger_pending_dns()
   HostDBContinuation       *c           = nullptr;
   ts::shared_mutex         &bucket_lock = hostDB.refcountcache->lock_for_key(hash.hash.fold());
   {
-    std::unique_lock<ts::shared_mutex> lock{bucket_lock};
-    Queue<HostDBContinuation>         &q = hostDB.pending_dns_for_hash(hash.hash);
+    ts::write_guard            lock{bucket_lock};
+    Queue<HostDBContinuation> &q = hostDB.pending_dns_for_hash(hash.hash);
     q.remove(this);
     c = q.head;
     while (c) {
@@ -1317,14 +1319,14 @@ HostDBRecord::select_best_http(ts_time now, ts_seconds fail_window, sockaddr con
       // Starting at the current target, search for a valid one.
       for (unsigned short i = 0; i < rr_count; i++) {
         auto target = &info[this->rr_idx(i)];
-        if (target->select(now, fail_window)) {
+        if (!target->is_down(now, fail_window)) {
           best_alive = target;
           break;
         }
       }
     }
   } else {
-    if (info[0].select(now, fail_window)) {
+    if (!info[0].is_down(now, fail_window)) {
       best_alive = &info[0];
     }
   }
@@ -1601,23 +1603,23 @@ HostDBRecord::select_best_srv(char *target, InkRand *rand, ts_time now, ts_secon
 {
   ink_assert(rr_count <= 0 || static_cast<unsigned int>(rr_count) < hostdb_round_robin_max_count);
 
-  int         i      = 0;
   int         live_n = 0;
   uint32_t    weight = 0, p = INT32_MAX;
   HostDBInfo *result = nullptr;
   auto        rr     = this->rr_info();
   // Array of live targets, sized by @a live_n
-  HostDBInfo *live[rr.count()];
-  for (auto &target : rr) {
+  ts::LocalBuffer<HostDBInfo *, 16> live_buf(rr.count());
+  HostDBInfo                      **live = live_buf.data();
+  for (auto &rr_target : rr) {
     // skip down targets.
-    if (rr[i].is_down(now, fail_window)) {
+    if (rr_target.is_down(now, fail_window)) {
       continue;
     }
 
-    if (target.data.srv.srv_priority <= p) {
-      p               = target.data.srv.srv_priority;
-      weight         += target.data.srv.srv_weight;
-      live[live_n++]  = &target;
+    if (rr_target.data.srv.srv_priority <= p) {
+      p               = rr_target.data.srv.srv_priority;
+      weight         += rr_target.data.srv.srv_weight;
+      live[live_n++]  = &rr_target;
     } else {
       break;
     }
@@ -1627,7 +1629,8 @@ HostDBRecord::select_best_srv(char *target, InkRand *rand, ts_time now, ts_secon
     result = this->select_next_rr(now, fail_window);
   } else {
     uint32_t xx = rand->random() % weight;
-    for (i = 0; i < live_n - 1 && xx >= live[i]->data.srv.srv_weight; ++i) {
+    int      i  = 0;
+    for (; i < live_n - 1 && xx >= live[i]->data.srv.srv_weight; ++i) {
       xx -= live[i]->data.srv.srv_weight;
     }
 
@@ -1647,7 +1650,7 @@ HostDBRecord::select_next_rr(ts_time now, ts_seconds fail_window)
   auto rr_info = this->rr_info();
   for (unsigned idx = 0, limit = rr_info.count(); idx < limit; ++idx) {
     auto &target = rr_info[this->next_rr()];
-    if (target.select(now, fail_window)) {
+    if (!target.is_down(now, fail_window)) {
       return &target;
     }
   }
@@ -1706,13 +1709,19 @@ ResolveInfo::set_active(HostDBInfo *info)
 }
 
 bool
-ResolveInfo::select_next_rr()
+ResolveInfo::select_next_rr(ts_time now, ts_seconds fail_window)
 {
   if (active) {
     if (auto rr_info{this->record->rr_info()}; rr_info.count() > 1) {
-      unsigned limit = active - rr_info.data(), idx = (limit + 1) % rr_info.count();
-      while ((idx = (idx + 1) % rr_info.count()) != limit && !rr_info[idx].is_alive()) {}
-      active = &rr_info[idx];
+      const unsigned limit = active - rr_info.data();
+      size_t         idx   = (limit + 1) % rr_info.count();
+      for (; idx != limit; idx = (idx + 1) % rr_info.count()) {
+        if (!rr_info[idx].is_down(now, fail_window)) {
+          active = &rr_info[idx];
+          break;
+        }
+      }
+
       return idx != limit; // if the active record was actually changed.
     }
   }

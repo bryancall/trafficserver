@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -165,7 +165,7 @@ private:
   HTTPParser           http_parser;
   HTTPHdr              client_response_hdr;
   ChunkedHandler       chunked_handler;
-  TSFetchEvent         callback_events;
+  TSFetchEvent         callback_events{};
   TSFetchWakeUpOptions callback_options    = NO_CALLBACK;
   bool                 req_finished        = false;
   bool                 header_done         = false;

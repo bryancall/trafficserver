@@ -44,7 +44,7 @@ namespace rpc::comm
 /// @brief Unix Domain Socket implementation that deals with the JSON RPC call handling mechanism.
 ///
 /// Very basic and straight forward implementation of an unix socket domain. The implementation
-/// follows the \link BaseCommInterface.
+/// follows the @ref BaseCommInterface.
 ///
 /// @note The server will keep reading the client's requests till the buffer is full or there is no more data in the wire.
 ///       Buffer size = 32k
@@ -64,6 +64,7 @@ class IPCSocketServer : public BaseCommInterface
   /// the client object around.
   struct Client {
     /// @param fd Peer's socket.
+    /// @param[in] max_req_size Maximum accepted request size in bytes.
     Client(int fd, size_t max_req_size);
     /// Destructor will close the socket(if opened);
     ~Client();
@@ -144,7 +145,7 @@ private:
   void close();
   void late_check_peer_credentials(int peedFd, TSRPCHandlerOptions const &options, swoc::Errata &errata) const;
 
-  std::atomic_bool _running;
+  std::atomic_bool _running{false};
 
   struct sockaddr_un _serverAddr;
   int                _socket{-1};

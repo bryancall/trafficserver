@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -94,6 +94,7 @@ struct CacheDisk : public Continuation {
 
   // Extra configuration values
   int            forced_volume_num = -1; ///< Volume number for this disk.
+  ats_scoped_str span_name;              ///< Span name
   ats_scoped_str hash_base_string;       ///< Base string for hash seed.
 
   CacheDisk() : Continuation(new_ProxyMutex()) {}

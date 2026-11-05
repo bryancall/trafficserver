@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -130,6 +130,10 @@ extern int cache_config_agg_write_backlog;
 extern int cache_config_ram_cache_compress;
 extern int cache_config_ram_cache_compress_percent;
 extern int cache_config_ram_cache_use_seen_filter;
+extern int cache_config_ram_cache_s3fifo_main_percent;
+extern int cache_config_ram_cache_s3fifo_ghost_size_percent;
+extern int cache_config_ram_cache_s3fifo_ghost_mem_percent;
+extern int cache_config_ram_cache_s3fifo_promote_threshold;
 extern int cache_config_hit_evacuate_percent;
 extern int cache_config_hit_evacuate_size_limit;
 extern int cache_config_force_sector_size;
@@ -138,17 +142,17 @@ extern int cache_config_mutex_retry_delay;
 extern int cache_read_while_writer_retry_delay;
 extern int cache_config_read_while_writer_max_retries;
 
-#define PUSH_HANDLER(_x)                                          \
-  do {                                                            \
-    ink_assert(handler != (ContinuationHandler)(&CacheVC::dead)); \
-    save_handler = handler;                                       \
-    handler      = (ContinuationHandler)(_x);                     \
+#define PUSH_HANDLER(_x)                       \
+  do {                                         \
+    ink_assert(!handler.is<&CacheVC::dead>()); \
+    save_handler = handler;                    \
+    handler.set<_x>();                         \
   } while (0)
 
-#define POP_HANDLER                                               \
-  do {                                                            \
-    handler = save_handler;                                       \
-    ink_assert(handler != (ContinuationHandler)(&CacheVC::dead)); \
+#define POP_HANDLER                            \
+  do {                                         \
+    handler = save_handler;                    \
+    ink_assert(!handler.is<&CacheVC::dead>()); \
   } while (0)
 
 struct CacheRemoveCont : public Continuation {
@@ -319,6 +323,7 @@ CacheVC::die()
 {
   if (vio.op == VIO::WRITE) {
     if (f.update && total_len) {
+      ink_assert(alternate.valid());
       alternate.object_key_set(earliest_key);
     }
     if (!is_io_in_progress()) {
@@ -330,7 +335,7 @@ CacheVC::die()
     return EVENT_CONT;
   } else {
     if (is_io_in_progress()) {
-      save_handler = reinterpret_cast<ContinuationHandler>(&CacheVC::openReadClose);
+      save_handler.set<&CacheVC::openReadClose>();
     } else {
       SET_HANDLER(&CacheVC::openReadClose);
       if (!recursive) {

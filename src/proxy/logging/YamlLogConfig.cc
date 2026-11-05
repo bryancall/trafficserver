@@ -1,6 +1,6 @@
 /** @file
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -22,10 +22,12 @@
 #include "proxy/logging/YamlLogConfig.h"
 #include "proxy/logging/YamlLogConfigDecoders.h"
 
+#include "mgmt/config/ConfigContextDiags.h"
 #include "proxy/logging/LogConfig.h"
 #include "proxy/logging/LogObject.h"
 
 #include "tscore/EnumDescriptor.h"
+#include "tsutil/StringCompare.h"
 
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
@@ -45,7 +47,7 @@ YamlLogConfig::parse(const char *cfgFilename)
   try {
     result = loadLogConfig(cfgFilename);
   } catch (std::exception &ex) {
-    Error("%s", ex.what());
+    CfgLoadLog(cfg->reload_ctx, DL_Error, "%s", ex.what());
     result = false;
   }
   return result;
@@ -61,14 +63,14 @@ YamlLogConfig::loadLogConfig(const char *cfgFilename)
   }
 
   if (!config.IsMap()) {
-    Error("malformed %s file; expected a map", cfgFilename);
+    CfgLoadLog(cfg->reload_ctx, DL_Error, "malformed %s file; expected a map", cfgFilename);
     return false;
   }
 
   if (config["logging"]) {
     config = config["logging"];
   } else {
-    Error("malformed %s file; expected a toplevel 'logging' node", cfgFilename);
+    CfgLoadLog(cfg->reload_ctx, DL_Error, "malformed %s file; expected a toplevel 'logging' node", cfgFilename);
     return false;
   }
 
@@ -132,6 +134,7 @@ std::set<std::string> valid_log_object_keys = {"filename",
                                                "rolling_max_count",
                                                "rolling_allow_empty",
                                                "pipe_buffer_size",
+                                               "binary_log_version",
                                                "fast"};
 
 LogObject *
@@ -174,9 +177,9 @@ YamlLogConfig::decodeLogObject(const YAML::Node &node)
   LogFileFormat file_type = LOG_FILE_ASCII; // default value
   if (node["mode"]) {
     std::string mode = node["mode"].as<std::string>();
-    file_type        = (0 == strncasecmp(mode.c_str(), "bin", 3) || (1 == mode.size() && mode[0] == 'b') ?
+    file_type        = (ts::iequals(mode, "binary") || ts::iequals(mode, "bin") || ts::iequals(mode, "b") ?
                           LOG_FILE_BINARY :
-                          (0 == strcasecmp(mode.c_str(), "ascii_pipe") ? LOG_FILE_PIPE : LOG_FILE_ASCII));
+                          (ts::iequals(mode, "ascii_pipe") ? LOG_FILE_PIPE : LOG_FILE_ASCII));
   }
 
   int obj_rolling_enabled      = cfg->rolling_enabled;
@@ -232,11 +235,27 @@ YamlLogConfig::decodeLogObject(const YAML::Node &node)
     }
   }
 
+  // On-disk binary segment version (default: current). 2 emits the pre-v3
+  // layout for parsers that don't yet understand v3; binary logs only.
+  int binary_log_version = LOG_SEGMENT_VERSION;
+  if (node["binary_log_version"]) {
+    binary_log_version = node["binary_log_version"].as<int>();
+    if (!log_segment_version_supported(binary_log_version)) {
+      Warning("Invalid binary_log_version '%d' (supported %d-%d); using %d", binary_log_version, LOG_SEGMENT_VERSION_MIN_SUPPORTED,
+              LOG_SEGMENT_VERSION, LOG_SEGMENT_VERSION);
+      binary_log_version = LOG_SEGMENT_VERSION;
+    } else if (file_type != LOG_FILE_BINARY) {
+      Warning("binary_log_version only applies to binary logs; ignoring for this object");
+      binary_log_version = LOG_SEGMENT_VERSION;
+    }
+  }
+
   auto logObject = new LogObject(cfg, fmt, cfg->logfile_dir, filename.c_str(), file_type, header.c_str(),
                                  static_cast<Log::RollingEnabledValues>(obj_rolling_enabled), cfg->preproc_threads,
                                  obj_rolling_interval_sec, obj_rolling_offset_hr, obj_rolling_size_mb, /* auto_created */ false,
                                  /* rolling_max_count */ obj_rolling_max_count, /* rolling_min_count */ obj_rolling_min_count,
-                                 /* reopen_after_rolling */ obj_rolling_allow_empty > 0, pipe_buffer_size, fast);
+                                 /* reopen_after_rolling */ obj_rolling_allow_empty > 0, pipe_buffer_size, fast,
+                                 static_cast<unsigned>(binary_log_version));
 
   // Generate LogDeletingInfo entry for later use
   std::string ext;

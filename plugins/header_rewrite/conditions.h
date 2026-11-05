@@ -48,7 +48,7 @@ public:
   void operator=(const ConditionTrue &) = delete;
 
   void
-  append_value(std::string &s, const Resources & /* res ATS_UNUSED */) override
+  do_append_value(std::string &s, const Resources & /* res ATS_UNUSED */) override
   {
     s += "TRUE";
   }
@@ -73,7 +73,7 @@ public:
   void operator=(const ConditionFalse &) = delete;
 
   void
-  append_value(std::string &s, const Resources & /* res ATS_UNUSED */) override
+  do_append_value(std::string &s, const Resources & /* res ATS_UNUSED */) override
   {
     s += "FALSE";
   }
@@ -102,7 +102,7 @@ public:
   void operator=(const SelfType &)  = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -124,7 +124,7 @@ public:
   void operator=(const SelfType &)  = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -145,7 +145,7 @@ public:
   void operator=(const SelfType &)  = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -166,7 +166,7 @@ public:
   void operator=(const ConditionAccess &)  = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -191,7 +191,7 @@ public:
   void operator=(const SelfType &)  = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -213,7 +213,7 @@ private:
     end   = buf + buf_len;
 
     while (start < end) {
-      if (strncasecmp(start, name, name_len) != 0) {
+      if (end - start < name_len || strncasecmp(start, name, name_len) != 0) {
         goto skip;
       }
 
@@ -255,9 +255,11 @@ class ConditionHeader : public Condition
   using SelfType    = ConditionHeader;
 
 public:
-  explicit ConditionHeader(bool client = false) : _client(client)
+  enum HeaderType { HEADER, CLIENT, SERVER };
+
+  explicit ConditionHeader(HeaderType type = HEADER) : _type(type)
   {
-    Dbg(dbg_ctl, "Calling CTOR for ConditionHeader, client %d", client);
+    Dbg(dbg_ctl, "Calling CTOR for ConditionHeader, type %d", static_cast<int>(type));
   }
 
   // noncopyable
@@ -265,13 +267,13 @@ public:
   void operator=(const SelfType &)  = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
 
 private:
-  bool _client;
+  HeaderType _type;
 };
 
 // url
@@ -282,7 +284,7 @@ class ConditionUrl : public Condition
   using SelfType    = ConditionUrl;
 
 public:
-  enum UrlType { CLIENT, URL, FROM, TO };
+  enum UrlType { CLIENT, URL, FROM, TO, SERVER };
 
   explicit ConditionUrl(const UrlType type) : _type(type) { Dbg(dbg_ctl, "Calling CTOR for ConditionUrl"); }
 
@@ -292,12 +294,14 @@ public:
 
   void initialize(Parser &p) override;
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
 
 private:
+  void log_error(const Resources &res, const char *message) const;
+
   UrlQualifiers _url_qual = URL_QUAL_NONE;
   UrlType       _type;
   std::string   _query_param; // Optional: specific query parameter name for QUERY sub-key
@@ -332,7 +336,7 @@ public:
   void operator=(const SelfType &) = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -352,7 +356,7 @@ class ConditionInternalTxn : public Condition
 
 public:
   void
-  append_value(std::string & /* s ATS_UNUSED */, const Resources & /* res ATS_UNUSED */) override
+  do_append_value(std::string & /* s ATS_UNUSED */, const Resources & /* res ATS_UNUSED */) override
   {
   }
 
@@ -376,7 +380,7 @@ public:
 
   void initialize(Parser &p) override;
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool
@@ -406,7 +410,7 @@ public:
   void operator=(const SelfType &)         = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -428,7 +432,7 @@ public:
 
   void initialize(Parser &p) override;
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -459,7 +463,7 @@ public:
 
   void initialize(Parser &p) override;
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
   // Make sure we know if the type is an int-type or a string.
   bool
@@ -475,8 +479,8 @@ public:
   }
 
 private:
-  virtual int64_t     get_geo_int(const sockaddr *addr) const;
-  virtual std::string get_geo_string(const sockaddr *addr) const;
+  virtual int64_t     get_geo_int(const sockaddr *addr, void *geo_handle) const;
+  virtual std::string get_geo_string(const sockaddr *addr, void *geo_handle) const;
 
 protected:
   bool
@@ -505,7 +509,7 @@ public:
 
   void initialize(Parser &p) override;
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -533,7 +537,7 @@ public:
 
   void initialize(Parser &p) override;
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool
@@ -568,7 +572,7 @@ public:
 
   void initialize(Parser &p) override;
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
   static constexpr const char *TAG = "INBOUND";
 
@@ -586,7 +590,7 @@ private:
 #if TS_HAS_CRIPTS
   bool _mtls_cert = false;
 #endif
-  void append_value(std::string &s, const Resources &res, NetworkSessionQualifiers qual);
+  void do_append_value(std::string &s, const Resources &res, NetworkSessionQualifiers qual);
 };
 
 class ConditionStringLiteral : public Condition
@@ -602,7 +606,7 @@ public:
   ConditionStringLiteral(const SelfType &) = delete;
   void operator=(const SelfType &)         = delete;
 
-  void append_value(std::string &s, const Resources & /* res ATS_UNUSED */) override;
+  void do_append_value(std::string &s, const Resources & /* res ATS_UNUSED */) override;
 
 protected:
   bool eval(const Resources & /* res ATS_UNUSED */) override;
@@ -626,7 +630,7 @@ public:
   void operator=(const SelfType &)                = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -647,7 +651,7 @@ public:
   void operator=(const SelfType &)   = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -669,7 +673,7 @@ public:
   void operator=(const SelfType &) = delete;
 
   void initialize(Parser &p) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -693,7 +697,7 @@ public:
 
   void initialize(Parser &p) override;
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -715,7 +719,7 @@ public:
   void operator=(const SelfType &)    = delete;
 
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -758,7 +762,7 @@ public:
   }
 
   void
-  append_value(std::string & /* s ATS_UNUSED */, const Resources & /* res ATS_UNUSED */) override
+  do_append_value(std::string & /* s ATS_UNUSED */, const Resources & /* res ATS_UNUSED */) override
   {
     TSAssert(!"%{GROUP} should never be used as a condition value!");
     TSError("[%s] %%{GROUP} should never be used as a condition value!", PLUGIN_NAME);
@@ -798,17 +802,17 @@ private:
   bool       _end  = false;
 };
 
-// State Flags
+// State/Session Flags (parameterized by scope)
 class ConditionStateFlag : public Condition
 {
   using SelfType = ConditionStateFlag;
   // No matcher for this, it's all easy peasy
 
 public:
-  explicit ConditionStateFlag()
+  explicit ConditionStateFlag(TSUserArgType scope = TS_USER_ARGS_TXN) : _scope(scope)
   {
     static_assert(sizeof(void *) == 8, "State Variables requires a 64-bit system.");
-    Dbg(dbg_ctl, "Calling CTOR for ConditionStateFlag");
+    Dbg(dbg_ctl, "Calling CTOR for ConditionStateFlag (scope=%s)", _scope_label(_scope));
   }
 
   // noncopyable
@@ -816,7 +820,7 @@ public:
   void operator=(const SelfType &)     = delete;
 
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -824,15 +828,22 @@ protected:
   bool
   need_txn_slot() const override
   {
-    return true;
+    return _scope == TS_USER_ARGS_TXN;
+  }
+
+  bool
+  need_ssn_slot() const override
+  {
+    return _scope == TS_USER_ARGS_SSN;
   }
 
 private:
-  int      _flag_ix = -1;
-  uint64_t _mask    = 0;
+  TSUserArgType _scope   = TS_USER_ARGS_TXN;
+  int           _flag_ix = -1;
+  uint64_t      _mask    = 0;
 };
 
-// INT8 state variables
+// State/Session INT8 variables (parameterized by scope)
 class ConditionStateInt8 : public Condition
 {
   using DataType    = uint8_t;
@@ -840,10 +851,10 @@ class ConditionStateInt8 : public Condition
   using SelfType    = ConditionStateInt8;
 
 public:
-  explicit ConditionStateInt8()
+  explicit ConditionStateInt8(TSUserArgType scope = TS_USER_ARGS_TXN) : _scope(scope)
   {
     static_assert(sizeof(void *) == 8, "State Variables requires a 64-bit system.");
-    Dbg(dbg_ctl, "Calling CTOR for ConditionStateInt8");
+    Dbg(dbg_ctl, "Calling CTOR for ConditionStateInt8 (scope=%s)", _scope_label(_scope));
   }
 
   // noncopyable
@@ -852,7 +863,7 @@ public:
 
   void initialize(Parser &p) override;
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -860,25 +871,31 @@ protected:
   bool
   need_txn_slot() const override
   {
-    return true;
+    return _scope == TS_USER_ARGS_TXN;
+  }
+
+  bool
+  need_ssn_slot() const override
+  {
+    return _scope == TS_USER_ARGS_SSN;
   }
 
 private:
-  // Little helper function to extract out the data from the TXN user pointer
   uint8_t
   _get_data(const Resources &res) const
   {
     TSAssert(_byte_ix >= 0 && _byte_ix < NUM_STATE_INT8S);
-    auto    ptr  = reinterpret_cast<uint64_t>(TSUserArgGet(res.state.txnp, _txn_slot));
+    auto    ptr  = _get_state_data(_scope, res);
     uint8_t data = (ptr & STATE_INT8_MASKS[_byte_ix]) >> (NUM_STATE_FLAGS + _byte_ix * 8);
 
     return data;
   }
 
-  int _byte_ix = -1;
+  TSUserArgType _scope   = TS_USER_ARGS_TXN;
+  int           _byte_ix = -1;
 };
 
-// INT16 state variables
+// State/Session INT16 variables (parameterized by scope)
 class ConditionStateInt16 : public Condition
 {
   using DataType    = uint16_t;
@@ -886,10 +903,10 @@ class ConditionStateInt16 : public Condition
   using SelfType    = ConditionStateInt16;
 
 public:
-  explicit ConditionStateInt16()
+  explicit ConditionStateInt16(TSUserArgType scope = TS_USER_ARGS_TXN) : _scope(scope)
   {
     static_assert(sizeof(void *) == 8, "State Variables requires a 64-bit system.");
-    Dbg(dbg_ctl, "Calling CTOR for ConditionStateInt16");
+    Dbg(dbg_ctl, "Calling CTOR for ConditionStateInt16 (scope=%s)", _scope_label(_scope));
   }
 
   // noncopyable
@@ -898,7 +915,7 @@ public:
 
   void initialize(Parser &p) override;
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
 
 protected:
   bool eval(const Resources &res) override;
@@ -906,18 +923,25 @@ protected:
   bool
   need_txn_slot() const override
   {
-    return true;
+    return _scope == TS_USER_ARGS_TXN;
+  }
+
+  bool
+  need_ssn_slot() const override
+  {
+    return _scope == TS_USER_ARGS_SSN;
   }
 
 private:
-  // Little helper function to extract out the data from the TXN user pointer
   uint16_t
   _get_data(const Resources &res) const
   {
-    auto ptr = reinterpret_cast<uint64_t>(TSUserArgGet(res.state.txnp, _txn_slot));
+    auto ptr = _get_state_data(_scope, res);
 
     return ((ptr & STATE_INT16_MASK) >> 48);
   }
+
+  TSUserArgType _scope = TS_USER_ARGS_TXN;
 };
 
 // Last regex capture
@@ -935,7 +959,8 @@ public:
   void operator=(const SelfType &)       = delete;
 
   void set_qualifier(const std::string &q) override;
-  void append_value(std::string &s, const Resources &res) override;
+  void do_append_value(std::string &s, const Resources &res) override;
+  void initialize(Parser &p) override;
 
 protected:
   bool eval(const Resources &res) override;

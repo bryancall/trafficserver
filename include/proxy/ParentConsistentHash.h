@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -41,7 +41,6 @@ class ParentConsistentHash : public ParentSelectionStrategy
   std::unique_ptr<ATSHash64>         hash[2];
   std::unique_ptr<ATSConsistentHash> chash[2];
   pRecord                           *parents[2];
-  bool                               foundParents[2][MAX_PARENTS];
   bool                               ignore_query;
   int                                secondary_mode;
   ParentHashAlgorithm                selected_algorithm;

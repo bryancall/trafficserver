@@ -2,7 +2,7 @@
 
   This file produces Unicorns and Rainbows for the ATS community
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -24,8 +24,33 @@
 #pragma once
 
 #include <sys/resource.h>
+#include <cstdint>
 
 rlim_t ink_get_fds_limit();
 void   ink_set_fds_limit(rlim_t);
 rlim_t ink_max_out_rlimit(int which);
 rlim_t ink_get_max_files();
+
+/** Get the current resident set size (RSS) of this process, in bytes.
+ *
+ * Unlike getrusage(2)'s ru_maxrss, this reports the *current* RSS rather than
+ * the peak, so it is suitable for a live gauge and can both rise and fall.
+ *
+ * Implemented via /proc/self/statm on Linux, task_info() on macOS, and
+ * sysctl(KERN_PROC_PID) on FreeBSD.
+ *
+ * @return current RSS in bytes (never more than INT64_MAX), or 0 if it could not be determined.
+ */
+uint64_t ink_get_current_rss();
+
+/** Convert a resident page count to bytes for ink_get_current_rss().
+ *
+ * No real resident set comes near INT64_MAX bytes, so a product above that (or a
+ * @a page_size of 0) means the count is not a real RSS. That is reported as 0,
+ * "could not be determined", rather than as a wrapped or saturated value.
+ *
+ * @param [in] pages     Number of resident pages.
+ * @param [in] page_size Size of a page, in bytes.
+ * @return @a pages * @a page_size, or 0 if that is not a plausible RSS.
+ */
+uint64_t ink_rss_pages_to_bytes(uint64_t pages, uint64_t page_size);

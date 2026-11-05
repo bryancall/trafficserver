@@ -2,7 +2,7 @@
 
   Powerful and easy-to-use command line parsing for ATS
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -34,9 +34,22 @@
 constexpr unsigned MORE_THAN_ZERO_ARG_N = ~0;
 // more than one arguments
 constexpr unsigned MORE_THAN_ONE_ARG_N = ~0 - 1;
+// zero or one argument
+constexpr unsigned AT_MOST_ONE_ARG_N = ~0 - 2;
 // customizable indent for help message
 constexpr int INDENT_ONE = 32;
 constexpr int INDENT_TWO = 46;
+
+/** Whether @a arg_num asks for a variable rather than a fixed number of values.
+
+    Use this in preference to comparing against the sentinels, so that adding another
+    variable arity does not silently leave a sentinel being treated as a literal count.
+ */
+constexpr bool
+is_variable_arg_num(unsigned arg_num)
+{
+  return arg_num == MORE_THAN_ZERO_ARG_N || arg_num == MORE_THAN_ONE_ARG_N || arg_num == AT_MOST_ONE_ARG_N;
+}
 
 namespace ts
 {
@@ -89,6 +102,12 @@ public:
   ~Arguments();
 
   ArgumentData get(std::string const &name);
+  /** Whether @a name has an entry.
+
+      @return @c true when the command or option has been parsed. Unlike get(), the called
+      flag is left alone, so this can be asked while parsing.
+   */
+  bool has(std::string const &name) const noexcept;
 
   void append(std::string const &key, ArgumentData const &value);
   // Append value to the arg to the map of key
@@ -98,8 +117,7 @@ public:
   // Print all we have in the parsed data to the console
   void show_all_configuration() const;
   /** Invoke the function associated with the parsed command.
-      @return The return value of the executed command (int).
-  */
+   */
   void invoke();
   // return true if there is any function to invoke
   bool has_action() const;
@@ -164,12 +182,21 @@ public:
 
     /** Create a mutually exclusive group of options
         @param group_name Identifier for the group
+        @param[in] required Whether exactly one option in the group must be supplied.
+        @param[in] description Description displayed in help output.
         @return The Command object for chaining.
     */
     Command &add_mutex_group(std::string const &group_name, bool required = false, std::string const &description = "");
 
     /** Add an option to a mutually exclusive group
         @param group_name The group to add the option to
+        @param[in] long_option Long option name.
+        @param[in] short_option Short option name.
+        @param[in] description Description displayed in help output.
+        @param[in] envvar Environment variable supplying the option value.
+        @param[in] arg_num Number of arguments accepted by the option.
+        @param[in] default_value Value used when the option is absent.
+        @param[in] key Key used to retrieve the parsed option value.
         @return The Command object for chaining.
     */
     Command &add_option_to_group(std::string const &group_name, std::string const &long_option, std::string const &short_option,
@@ -222,6 +249,29 @@ public:
     void version_message() const;
     // Helper method for parse()
     void append_option_data(Arguments &ret, AP_StrVec &args, int index);
+    /** Helper method to collect the values of an option or command into @a ret.
+        @param[in,out] ret The parsed arguments, which receive the values collected for @a name.
+        @param[in,out] args The remaining command line tokens; the occurrence and its values are
+        erased from it.
+        @param[in] name The key under which the values are stored in @a ret.
+        @param[in] arg_num The number of values the option or command takes, or one of the
+        variable arity markers such as @c MORE_THAN_ONE_ARG_N.
+        @param[in,out] index The position in @a args of the occurrence; moved back so that the
+        caller's increment visits the token that followed the consumed values.
+        @param[in] env_value The current value of the option's declared environment variable, or
+        empty when none is declared or it is currently unset. A missing value is reported
+        immediately whenever this is empty, matching behaviour with no variable support at all.
+        @param[out] was_bare Set to @c true when @a env_value is non-empty and the occurrence just
+        parsed had no value at all; left @c false otherwise, including for @c
+        AT_MOST_ONE_ARG_N, which fills immediately instead since repetition of that arity is
+        refused outright elsewhere. The caller resolves the variable once every occurrence has
+        been seen, so the result does not depend on the order occurrences appear in.
+        @return A usage error message, or empty if the values were collected.
+    */
+    std::string handle_args(Arguments &ret, AP_StrVec &args, std::string const &name, unsigned arg_num, unsigned &index,
+                            std::string const &env_value, bool &was_bare) const;
+    // Whether @a token names an option registered on this command
+    bool is_registered_option(std::string const &token) const;
     // Helper method to validate mutually exclusive groups
     void validate_mutex_groups(Arguments &ret) const;
     // Helper method to validate option dependencies
@@ -284,12 +334,21 @@ public:
 
   /** Create a mutually exclusive group of options
       @param group_name Identifier for the group
+      @param[in] required Whether exactly one option in the group must be supplied.
+      @param[in] description Description displayed in help output.
       @return The Command object for chaining.
   */
   Command &add_mutex_group(std::string const &group_name, bool required = false, std::string const &description = "");
 
   /** Add an option to a mutually exclusive group
       @param group_name The group to add the option to
+      @param[in] long_option Long option name.
+      @param[in] short_option Short option name.
+      @param[in] description Description displayed in help output.
+      @param[in] envvar Environment variable supplying the option value.
+      @param[in] arg_num Number of arguments accepted by the option.
+      @param[in] default_value Value used when the option is absent.
+      @param[in] key Key used to retrieve the parsed option value.
       @return The Command object for chaining.
   */
   Command &add_option_to_group(std::string const &group_name, std::string const &long_option, std::string const &short_option,
@@ -330,6 +389,14 @@ protected:
   static void do_exit(int code);
   // Enable test mode - makes do_exit() throw instead of calling exit() for unit testing
   static void set_test_mode(bool test = true);
+
+  /** Clear the parser-wide state held at file scope in ArgParser.cc.
+
+      Test-only. A program builds one parser and never reuses the state, but a unit test binary
+      runs many parsers in sequence, and set_default_command() or Command::set_default() would
+      otherwise leak default_command into every later test.
+  */
+  static void reset_global_state();
 
   // When true, do_exit() throws instead of calling exit()
   static bool _test_mode;

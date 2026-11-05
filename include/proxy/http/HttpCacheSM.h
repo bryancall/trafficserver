@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -127,6 +127,12 @@ public:
   is_compressed_in_ram()
   {
     return cache_read_vc ? (cache_read_vc->is_compressed_in_ram()) : false;
+  }
+
+  const HttpCacheKey &
+  get_cache_key() const
+  {
+    return cache_key;
   }
 
   void

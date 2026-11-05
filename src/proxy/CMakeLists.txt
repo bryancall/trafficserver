@@ -28,6 +28,7 @@ add_library(
   ParentSelectionStrategy.cc
   ParentSelection.cc
   Plugin.cc
+  PluginThreadContext.cc
   PluginVC.cc
   ProtocolProbeSessionAccept.cc
   ProxySession.cc
@@ -36,13 +37,14 @@ add_library(
   Transform.cc
   FetchSM.cc
   PluginHttpConnect.cc
+  VirtualHost.cc
 )
 add_library(ts::proxy ALIAS proxy)
 
 target_link_libraries(
   proxy
-  PUBLIC ts::inkcache ts::inkevent ts::tsutil ts::tscore ts::inknet
-  PRIVATE ts::rpcpublichandlers ts::jsonrpc_protocol ts::inkutils ts::tsapibackend
+  PUBLIC ts::inkcache ts::inkevent ts::tsutil ts::tscore ts::inknet ts::http
+  PRIVATE ts::http ts::rpcpublichandlers ts::jsonrpc_protocol ts::inkutils ts::tsapibackend ts::configmanager
 )
 
 add_subdirectory(hdrs)
@@ -51,7 +53,7 @@ add_subdirectory(http)
 add_subdirectory(http2)
 add_subdirectory(logging)
 
-if(TS_USE_QUIC)
+if(TS_USE_QUIC OR TS_USE_QMUX)
   add_subdirectory(http3)
 endif()
 

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -46,6 +46,8 @@
 #include "records/RecHttp.h"
 #include "proxy/ProxySession.h"
 #include "tscore/MgmtDefs.h"
+
+#include "swoc/bwf_ex.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -323,6 +325,7 @@ public:
     SCHEME_NOT_SUPPORTED,
     UNACCEPTABLE_TE_REQUIRED,
     INVALID_POST_CONTENT_LENGTH,
+    HEAD_CONTENT,
     TOTAL_TYPES
   };
 
@@ -655,10 +658,8 @@ public:
   };
 
   using ResponseAction = struct _ResponseAction {
-    bool             handled = false;
-    TSResponseAction action;
-
-    _ResponseAction() {}
+    bool             handled{false};
+    TSResponseAction action{};
   };
 
   struct State {
@@ -673,29 +674,30 @@ public:
 
     Arena arena;
 
-    bool force_dns                    = false;
-    bool is_upgrade_request           = false;
-    bool is_websocket                 = false;
-    bool did_upgrade_succeed          = false;
-    bool client_connection_allowed    = true;
-    bool acl_filtering_performed      = false;
-    bool api_cleanup_cache_read       = false;
-    bool api_server_response_no_store = false;
-    bool api_server_response_ignore   = false;
-    bool api_http_sm_shutdown         = false;
-    bool api_modifiable_cached_resp   = false;
-    bool api_server_request_body_set  = false;
-    bool api_req_cacheable            = false;
-    bool api_resp_cacheable           = false;
-    bool api_server_addr_set_retried  = false;
-    bool reverse_proxy                = false;
-    bool url_remap_success            = false;
-    bool api_skip_all_remapping       = false;
-    bool already_downgraded           = false;
-    bool transparent_passthrough      = false;
-    bool range_in_cache               = false;
-    bool is_method_stats_incremented  = false;
-    bool skip_ip_allow_yaml           = false;
+    bool force_dns                          = false;
+    bool is_upgrade_request                 = false;
+    bool is_websocket                       = false;
+    bool did_upgrade_succeed                = false;
+    bool client_connection_allowed          = true;
+    bool acl_filtering_performed            = false;
+    bool api_cleanup_cache_read             = false;
+    bool api_server_response_no_store       = false;
+    bool api_server_response_ignore         = false;
+    bool api_http_sm_shutdown               = false;
+    bool api_modifiable_cached_resp         = false;
+    bool api_server_request_body_set        = false;
+    bool api_req_cacheable                  = false;
+    bool api_resp_cacheable                 = false;
+    bool api_server_addr_set_retried        = false;
+    bool host_down_cache_fallback_attempted = false;
+    bool reverse_proxy                      = false;
+    bool url_remap_success                  = false;
+    bool api_skip_all_remapping             = false;
+    bool already_downgraded                 = false;
+    bool transparent_passthrough            = false;
+    bool range_in_cache                     = false;
+    bool is_method_stats_incremented        = false;
+    bool skip_ip_allow_yaml                 = false;
 
     /// True if we deferred opening the cache for write until after response headers.
     /// This is an optimization to avoid cache overhead for non-cacheable responses.
@@ -959,7 +961,13 @@ public:
       if (e != EIO) {
         this->cause_of_death_errno = e;
       }
-      Dbg(_dbg_ctl, "Setting upstream connection failure %d to %d", original_connect_result, this->current.server->connect_result);
+
+      if (_dbg_ctl.on()) {
+        std::string buf;
+        swoc::bwprint(buf, "Setting connect_result {::s} to {::s}", swoc::bwf::Errno(original_connect_result),
+                      swoc::bwf::Errno(this->current.server->connect_result));
+        Dbg(_dbg_ctl, "%s", buf.c_str());
+      }
     }
 
     MgmtInt
@@ -986,6 +994,12 @@ public:
 
   }; // End of State struct.
 
+  enum class AtHeaderSource {
+    CLIENT_REQUEST,
+    ORIGIN_RESPONSE,
+  };
+
+  static void strip_at_headers(HTTPHdr &header, AtHeaderSource source, std::int64_t sm_id);
   static void HandleBlindTunnel(State *s);
   static void StartRemapRequest(State *s);
   static void EndRemapRequest(State *s);
@@ -1001,7 +1015,6 @@ public:
   static void Forbidden(State *s);
   static void SelfLoop(State *s);
   static void TooEarly(State *s);
-  static void OriginDown(State *s);
   static void PostActiveTimeoutResponse(State *s);
   static void PostInactiveTimeoutResponse(State *s);
   static void DecideCacheLookup(State *s);
@@ -1030,10 +1043,8 @@ public:
   static void handle_transform_ready(State *s);
   static void handle_transform_cache_write(State *s);
   static void handle_response_from_parent(State *s);
-  static void handle_response_from_parent_plugin(State *s);
   static void handle_response_from_server(State *s);
-  static void delete_server_rr_entry(State *s, int max_retries);
-  static void retry_server_connection_not_open(State *s, ServerState_t conn_state, unsigned max_retries);
+  static void retry_server_connection_not_open(State *s, unsigned max_retries);
   static void error_log_connection_failure(State *s, ServerState_t conn_state);
   static void handle_server_connection_not_open(State *s);
   static void handle_forward_server_connection_open(State *s);
@@ -1043,6 +1054,7 @@ public:
   static void set_headers_for_cache_write(State *s, HTTPInfo *cache_info, HTTPHdr *request, HTTPHdr *response);
   static void set_header_for_transform(State *s, HTTPHdr *base_header);
   static void merge_response_header_with_cached_header(HTTPHdr *cached_header, HTTPHdr *response_header);
+  static bool compact_cached_response_header(HTTPHdr *cached_header);
   static void merge_warning_header(HTTPHdr *cached_header, HTTPHdr *response_header);
   static void SetCacheFreshnessLimit(State *s);
   static void HandleApiErrorJump(State *);
@@ -1077,12 +1089,13 @@ public:
   static bool handle_trace_and_options_requests(State *s, HTTPHdr *incoming_hdr);
   static void bootstrap_state_variables_from_request(State *s, HTTPHdr *incoming_request);
 
+  static uint8_t origin_server_connect_attempts_max_retries(State *s);
+
   // WARNING:  this function may be called multiple times for the same transaction.
   //
   static void initialize_state_variables_from_request(State *s, HTTPHdr *obsolete_incoming_request);
 
   static void initialize_state_variables_from_response(State *s, HTTPHdr *incoming_response);
-  static bool is_server_negative_cached(State *s);
   static bool is_cache_response_returnable(State *s);
   static bool is_stale_cache_response_returnable(State *s);
   static bool need_to_revalidate(State *s);
@@ -1095,7 +1108,7 @@ public:
   static bool is_response_valid(State *s, HTTPHdr *incoming_response);
 
   static void process_quick_http_filter(State *s, int method);
-  static bool will_this_request_self_loop(State *s);
+  static bool will_this_request_self_loop(State *s, bool is_outbound_transparent = false);
   static bool is_request_likely_cacheable(State *s, HTTPHdr *request);
   static bool is_cache_hit(CacheLookupResult_t r);
   static bool is_fresh_cache_hit(CacheLookupResult_t r);
@@ -1148,9 +1161,9 @@ using TransactEntryFunc_t = void (*)(HttpTransact::State *);
 
 /* The spec says about message body the following:
  *
- * All responses to the HEAD and CONNECT request method
- * MUST NOT include a message-body, even though the presence
- * of entity-header fields might lead one to believe they do.
+ * All responses to the HEAD request method MUST NOT include a
+ * message-body. Successful (2xx) responses to CONNECT MUST NOT
+ * include a message-body; error responses may.
  *
  * All 1xx (informational), 204 (no content), and 304 (not modified)
  * responses MUST NOT include a message-body.
@@ -1172,7 +1185,9 @@ is_response_body_precluded(HTTPStatus status_code)
 inline bool
 is_response_body_precluded(HTTPStatus status_code, int method)
 {
-  if ((method == HTTP_WKSIDX_HEAD) || (method == HTTP_WKSIDX_CONNECT) || is_response_body_precluded(status_code)) {
+  if ((method == HTTP_WKSIDX_HEAD) ||
+      (method == HTTP_WKSIDX_CONNECT && status_code >= HTTPStatus::OK && status_code < HTTPStatus::MULTIPLE_CHOICES) ||
+      is_response_body_precluded(status_code)) {
     return true;
   } else {
     return false;

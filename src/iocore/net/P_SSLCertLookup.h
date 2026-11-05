@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -26,10 +26,12 @@
 #include "iocore/eventsystem/ConfigProcessor.h"
 #include "iocore/net/SSLTypes.h"
 #include "records/RecCore.h"
+#include "tsutil/Bravo.h"
+#include <mutex>
+#include <shared_mutex>
 
 #include <set>
 #include <openssl/ssl.h>
-#include <mutex>
 #include <unordered_map>
 #include <utility>
 
@@ -46,7 +48,7 @@ enum class SSLCertContextOption {
 };
 
 /**
-   @brief Gather user provided settings from ssl_multicert.config in to this single struct
+   @brief Gather user provided settings from ssl_multicert.yaml in to this single struct
  */
 struct SSLMultiCertConfigParams {
   SSLMultiCertConfigParams() : opt(SSLCertContextOption::OPT_NONE)
@@ -65,6 +67,8 @@ struct SSLMultiCertConfigParams {
   ats_scoped_str       ocsp_response;          ///< prefetched OCSP response
   ats_scoped_str       dialog;                 ///< Private key dialog
   ats_scoped_str       servername;             ///< Destination server
+  bool                 rpk_enabled = false;    ///< Offer RFC 7250 raw public keys from this entry's cert/key alongside X.509
+  ats_scoped_str       client_rpk_ca;          ///< Trusted client raw public keys (PEM, one or more) for inbound mTLS pinning
   SSLCertContextOption opt;                    ///< SSLCertContext special handling option
 };
 
@@ -79,8 +83,6 @@ struct ssl_ticket_key_block {
   ssl_ticket_key_t keys[];
 };
 
-using shared_ssl_ticket_key_block = std::shared_ptr<ssl_ticket_key_block>;
-
 /** A certificate context.
 
     This holds data about a certificate and how it is used by the SSL logic. Current this is mainly
@@ -94,24 +96,17 @@ using shared_ssl_ticket_key_block = std::shared_ptr<ssl_ticket_key_block>;
 */
 struct SSLCertContext {
 private:
-  mutable std::mutex ctx_mutex;
-  shared_SSL_CTX     ctx;
+  mutable std::shared_mutex ctx_mutex;
+  shared_SSL_CTX            ctx;
 
 public:
-  SSLCertContext() : ctx_mutex(), ctx(nullptr), opt(SSLCertContextOption::OPT_NONE), userconfig(nullptr), keyblock(nullptr) {}
-  explicit SSLCertContext(SSL_CTX *c)
-    : ctx_mutex(), ctx(c, SSL_CTX_free), opt(SSLCertContextOption::OPT_NONE), userconfig(nullptr), keyblock(nullptr)
+  SSLCertContext() : ctx_mutex(), ctx(nullptr), opt(SSLCertContextOption::OPT_NONE), userconfig(nullptr) {}
+  explicit SSLCertContext(SSL_CTX *c) : ctx_mutex(), ctx(c, SSL_CTX_free), opt(SSLCertContextOption::OPT_NONE), userconfig(nullptr)
   {
   }
 
   SSLCertContext(shared_SSL_CTX sc, SSLCertContextType ctx_type, const shared_SSLMultiCertConfigParams &u)
-    : ctx_mutex(), ctx(std::move(sc)), ctx_type(ctx_type), opt(u->opt), userconfig(u), keyblock(nullptr)
-  {
-  }
-
-  SSLCertContext(shared_SSL_CTX sc, SSLCertContextType ctx_type, const shared_SSLMultiCertConfigParams &u,
-                 shared_ssl_ticket_key_block kb)
-    : ctx_mutex(), ctx(std::move(sc)), ctx_type(ctx_type), opt(u->opt), userconfig(u), keyblock(std::move(kb))
+    : ctx_mutex(), ctx(std::move(sc)), ctx_type(ctx_type), opt(u->opt), userconfig(u)
   {
   }
 
@@ -127,15 +122,18 @@ public:
   SSLCertContextType              ctx_type   = SSLCertContextType::GENERIC;
   SSLCertContextOption            opt        = SSLCertContextOption::OPT_NONE; ///< Special handling option.
   shared_SSLMultiCertConfigParams userconfig = nullptr;                        ///< User provided settings
-  shared_ssl_ticket_key_block     keyblock   = nullptr;                        ///< session keys associated with this address
 };
 
 struct SSLCertLookup : public ConfigInfo {
   std::unique_ptr<SSLContextStorage> ssl_storage;
   std::unique_ptr<SSLContextStorage> ec_storage;
 
-  shared_SSL_CTX ssl_default;
-  bool           is_valid = true;
+  bool is_valid = true;
+  /// Some entry offers or pins RFC 7250 raw public keys, so on OpenSSL certificate selection has to
+  /// run before the library negotiates certificate types.
+  bool     has_raw_public_keys = false;
+  unsigned user_cert_count = 0; ///< Count of certificate-bearing entries successfully loaded by the last load(). Tunnel-only and
+                                ///< bootstrap entries are not counted.
 
   int insert(const char *name, SSLCertContext const &cc);
   int insert(const IpEndpoint &address, SSLCertContext const &cc);
@@ -146,6 +144,7 @@ struct SSLCertLookup : public ConfigInfo {
       @return @c A pointer to the matched context, @c nullptr if no match is found.
   */
   SSLCertContext *find(const IpEndpoint &address) const;
+  SSLCertContext *find(const IpEndpoint &address, [[maybe_unused]] SSLCertContextType ctxType) const;
 
   /** Find certificate context by name (FQDN).
       Exact matches have priority, then wildcards. Only destination based matches are checked.
@@ -154,10 +153,18 @@ struct SSLCertLookup : public ConfigInfo {
   SSLCertContext *find(const std::string &name, SSLCertContextType ctxType = SSLCertContextType::GENERIC) const;
 
   // Return the last-resort default TLS context if there is no name or address match.
-  SSL_CTX *
+  shared_SSL_CTX
   defaultContext() const
   {
-    return ssl_default.get();
+    ts::bravo::shared_lock<ts::bravo::shared_mutex> lock(default_ctx_mutex);
+    return ssl_default;
+  }
+
+  void
+  setDefaultContext(shared_SSL_CTX ctx) const
+  {
+    std::lock_guard<ts::bravo::shared_mutex> lock(default_ctx_mutex);
+    ssl_default = std::move(ctx);
   }
 
   unsigned        count(SSLCertContextType ctxType = SSLCertContextType::GENERIC) const;
@@ -170,6 +177,9 @@ struct SSLCertLookup : public ConfigInfo {
   ~SSLCertLookup() override;
 
 private:
+  mutable ts::bravo::shared_mutex default_ctx_mutex;
+  mutable shared_SSL_CTX          ssl_default;
+
   // Map cert_secret name to lookup keys
   std::unordered_map<std::string, std::vector<std::string>> cert_secret_registry;
 };

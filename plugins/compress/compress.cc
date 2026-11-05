@@ -23,11 +23,15 @@
 
 #include <cstring>
 #include <cinttypes>
+#include <string>
+#include <string_view>
 
 #include "ts/apidefs.h"
 #include "tscore/ink_config.h"
 
 #include <tsutil/PostScript.h>
+#include <tsutil/Metrics.h>
+#include <tsutil/StringCompare.h>
 
 #include "ts/ts.h"
 #include "tscore/ink_defs.h"
@@ -249,7 +253,7 @@ vary_header(TSMBuffer bufp, TSMLoc hdr_loc)
     count = TSMimeHdrFieldValuesCount(bufp, hdr_loc, ce_loc);
     for (idx = 0; idx < count; idx++) {
       const char *value = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, ce_loc, idx, &len);
-      if (len && strncasecmp("Accept-Encoding", value, len) == 0) {
+      if (len > 0 && ts::iequals("Accept-Encoding", std::string_view{value, static_cast<std::string_view::size_type>(len)})) {
         // Bail, Vary: Accept-Encoding already sent from origin
         TSHandleMLocRelease(bufp, hdr_loc, ce_loc);
         return TS_SUCCESS;
@@ -276,8 +280,9 @@ vary_header(TSMBuffer bufp, TSMLoc hdr_loc)
   return ret;
 }
 
-// FIXME: the etag alteration isn't proper. it should modify the value inside quotes
-//       specify a very header..
+// Compressed bytes differ from the origin's, so a strong ETag no longer holds. Weaken it
+// (RFC 9110 8.8.1) rather than suffixing it: every algorithm would share the same suffixed
+// strong tag, and the origin could never match it on revalidation.
 static TSReturnCode
 etag_header(TSMBuffer bufp, TSMLoc hdr_loc)
 {
@@ -290,16 +295,12 @@ etag_header(TSMBuffer bufp, TSMLoc hdr_loc)
     int         strl;
     const char *strv = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, ce_loc, -1, &strl);
 
-    // do not alter weak etags.
-    // FIXME: consider just making the etag weak for compressed content
-    if (strl >= 2) {
-      int changetag = 1;
-      if ((strv[0] == 'w' || strv[0] == 'W') && strv[1] == '/') {
-        changetag = 0;
-      }
-      if (changetag) {
-        ret = TSMimeHdrFieldValueAppend(bufp, hdr_loc, ce_loc, 0, "-df", 3);
-      }
+    if (strl >= 2 && !((strv[0] == 'w' || strv[0] == 'W') && strv[1] == '/')) {
+      // Copy before setting: strv points into the header heap being rewritten.
+      std::string weak_etag{"W/"};
+
+      weak_etag.append(strv, strl);
+      ret = TSMimeHdrFieldValueStringSet(bufp, hdr_loc, ce_loc, -1, weak_etag.data(), weak_etag.size());
     }
     TSHandleMLocRelease(bufp, hdr_loc, ce_loc);
   }
@@ -349,8 +350,18 @@ compress_transform_init(TSCont contp, Data *data)
   TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
 }
 
+static ts::Metrics::Counter::AtomicType *compress_stat_bytes_in = nullptr;
+
 static void
-compress_transform_one(Data *data, TSIOBufferReader upstream_reader, int amount)
+init_compress_stats()
+{
+  if (compress_stat_bytes_in == nullptr) {
+    compress_stat_bytes_in = ts::Metrics::Counter::createPtr("proxy.process.plugin.compress.bytes_in");
+  }
+}
+
+static void
+compress_transform_one(Data *data, TSIOBufferReader upstream_reader, int64_t amount)
 {
   TSIOBufferBlock downstream_blkp;
   int64_t         upstream_length;
@@ -369,6 +380,10 @@ compress_transform_one(Data *data, TSIOBufferReader upstream_reader, int amount)
 
     if (upstream_length > amount) {
       upstream_length = amount;
+    }
+
+    if (compress_stat_bytes_in != nullptr) {
+      compress_stat_bytes_in->increment(upstream_length);
     }
 
 #if HAVE_ZSTD_H
@@ -517,6 +532,17 @@ compress_transform(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
   return 0;
 }
 
+// the only compressible method is currently GET or POST.
+static bool
+is_compressible_method(TSMBuffer cbuf, TSMLoc chdr)
+{
+  int         method_length;
+  const char *method = TSHttpHdrMethodGet(cbuf, chdr, &method_length);
+
+  return (method_length == TS_HTTP_LEN_GET && memcmp(method, TS_HTTP_METHOD_GET, TS_HTTP_LEN_GET) == 0) ||
+         (method_length == TS_HTTP_LEN_POST && memcmp(method, TS_HTTP_METHOD_POST, TS_HTTP_LEN_POST) == 0);
+}
+
 static int
 is_content_compressible(TSHttpTxn txnp, bool server, HostConfiguration *host_configuration)
 {
@@ -569,12 +595,7 @@ is_content_compressible(TSHttpTxn txnp, bool server, HostConfiguration *host_con
     return 0;
   }
 
-  // the only compressible method is currently GET or POST.
-  int         method_length;
-  const char *method = TSHttpHdrMethodGet(cbuf, chdr, &method_length);
-
-  if (!((method_length == TS_HTTP_LEN_GET && memcmp(method, TS_HTTP_METHOD_GET, TS_HTTP_LEN_GET) == 0) ||
-        (method_length == TS_HTTP_LEN_POST && memcmp(method, TS_HTTP_METHOD_POST, TS_HTTP_LEN_POST) == 0))) {
+  if (!is_compressible_method(cbuf, chdr)) {
     debug("method is not GET or POST, not compressible");
     TSHandleMLocRelease(cbuf, TS_NULL_MLOC, chdr);
     TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
@@ -757,23 +778,16 @@ transformable(TSHttpTxn txnp, bool server, HostConfiguration *host_configuration
 }
 
 static void
-add_vary_header_for_compressible_content(TSHttpTxn txnp, bool server, HostConfiguration * /* hc ATS_UNUSED */)
+add_vary_header_to_server_response(TSHttpTxn txnp)
 {
   TSMBuffer resp_buf;
   TSMLoc    resp_loc;
 
-  // Get the response headers
-  if (server) {
-    if (TS_SUCCESS != TSHttpTxnServerRespGet(txnp, &resp_buf, &resp_loc)) {
-      return;
-    }
-  } else {
-    if (TS_SUCCESS != TSHttpTxnCachedRespGet(txnp, &resp_buf, &resp_loc)) {
-      return;
-    }
+  if (TS_SUCCESS != TSHttpTxnServerRespGet(txnp, &resp_buf, &resp_loc)) {
+    return;
   }
 
-  // Add Vary: Accept-Encoding header
+  // Add Vary: Accept-Encoding header to the origin response before caching.
   if (vary_header(resp_buf, resp_loc) != TS_SUCCESS) {
     error("failed to add Vary header for compressible content");
     TSHandleMLocRelease(resp_buf, TS_NULL_MLOC, resp_loc);
@@ -781,6 +795,209 @@ add_vary_header_for_compressible_content(TSHttpTxn txnp, bool server, HostConfig
   }
 
   TSHandleMLocRelease(resp_buf, TS_NULL_MLOC, resp_loc);
+}
+
+static void
+add_vary_header_to_client_response(TSHttpTxn txnp)
+{
+  TSMBuffer resp_buf;
+  TSMLoc    resp_loc;
+
+  if (TS_SUCCESS != TSHttpTxnClientRespGet(txnp, &resp_buf, &resp_loc)) {
+    return;
+  }
+
+  if (vary_header(resp_buf, resp_loc) != TS_SUCCESS) {
+    error("failed to add Vary header to client response");
+    TSHandleMLocRelease(resp_buf, TS_NULL_MLOC, resp_loc);
+    return;
+  }
+
+  TSHandleMLocRelease(resp_buf, TS_NULL_MLOC, resp_loc);
+}
+
+// A 304 carries the origin's strong ETag, which the cache would merge over the weakened ETag of a
+// stored compressed copy. Keep it weak when both name the same entity and the stored copy is
+// encoded; an identity copy's ETag is the origin's own, so it may legitimately become strong.
+static void
+keep_cached_etag_weak(TSHttpTxn txnp)
+{
+  TSMBuffer srv_buf;
+  TSMLoc    srv_loc;
+
+  if (TS_SUCCESS != TSHttpTxnServerRespGet(txnp, &srv_buf, &srv_loc)) {
+    return;
+  }
+  ts::PostScript srv_defer([&]() -> void { TSHandleMLocRelease(srv_buf, TS_NULL_MLOC, srv_loc); });
+
+  if (TSHttpHdrStatusGet(srv_buf, srv_loc) != TS_HTTP_STATUS_NOT_MODIFIED) {
+    return;
+  }
+
+  TSMBuffer cached_buf;
+  TSMLoc    cached_loc;
+
+  if (TS_SUCCESS != TSHttpTxnCachedRespGet(txnp, &cached_buf, &cached_loc)) {
+    return;
+  }
+  ts::PostScript cached_defer([&]() -> void { TSHandleMLocRelease(cached_buf, TS_NULL_MLOC, cached_loc); });
+
+  TSMLoc cached_ce = TSMimeHdrFieldFind(cached_buf, cached_loc, TS_MIME_FIELD_CONTENT_ENCODING, TS_MIME_LEN_CONTENT_ENCODING);
+
+  if (cached_ce == TS_NULL_MLOC) {
+    return;
+  }
+  TSHandleMLocRelease(cached_buf, cached_loc, cached_ce);
+
+  TSMLoc srv_etag = TSMimeHdrFieldFind(srv_buf, srv_loc, TS_MIME_FIELD_ETAG, TS_MIME_LEN_ETAG);
+
+  if (srv_etag == TS_NULL_MLOC) {
+    return;
+  }
+  ts::PostScript srv_etag_defer([&]() -> void { TSHandleMLocRelease(srv_buf, srv_loc, srv_etag); });
+
+  TSMLoc cached_etag = TSMimeHdrFieldFind(cached_buf, cached_loc, TS_MIME_FIELD_ETAG, TS_MIME_LEN_ETAG);
+
+  if (cached_etag == TS_NULL_MLOC) {
+    return;
+  }
+  ts::PostScript cached_etag_defer([&]() -> void { TSHandleMLocRelease(cached_buf, cached_loc, cached_etag); });
+
+  int              srv_len;
+  const char      *srv_str = TSMimeHdrFieldValueStringGet(srv_buf, srv_loc, srv_etag, -1, &srv_len);
+  int              cached_len;
+  const char      *cached_str = TSMimeHdrFieldValueStringGet(cached_buf, cached_loc, cached_etag, -1, &cached_len);
+  std::string_view srv_value{srv_str, static_cast<size_t>(srv_len)};
+  std::string_view cached_value{cached_str, static_cast<size_t>(cached_len)};
+
+  if (cached_value.starts_with("W/") && cached_value.substr(2) == srv_value) {
+    TSMimeHdrFieldValueStringSet(srv_buf, srv_loc, srv_etag, -1, cached_value.data(), cached_value.size());
+  }
+}
+
+// No transform runs on a bodyless 304, so it goes out with the origin's or the cached identity
+// copy's strong ETag. A 304 must carry the ETag its 200 would (RFC 9110 15.4.5), and this
+// request's 200 would have been compressed, so weaken it to match.
+static void
+weaken_client_not_modified_etag(TSHttpTxn txnp)
+{
+  TSMBuffer resp_buf;
+  TSMLoc    resp_loc;
+
+  if (TS_SUCCESS != TSHttpTxnClientRespGet(txnp, &resp_buf, &resp_loc)) {
+    return;
+  }
+  ts::PostScript resp_defer([&]() -> void { TSHandleMLocRelease(resp_buf, TS_NULL_MLOC, resp_loc); });
+
+  if (TSHttpHdrStatusGet(resp_buf, resp_loc) == TS_HTTP_STATUS_NOT_MODIFIED) {
+    etag_header(resp_buf, resp_loc);
+  }
+}
+
+static int
+not_modified_etag_plugin(TSCont contp, TSEvent event, void *edata)
+{
+  TSHttpTxn txnp = static_cast<TSHttpTxn>(edata);
+
+  switch (event) {
+  case TS_EVENT_HTTP_SEND_RESPONSE_HDR:
+    weaken_client_not_modified_etag(txnp);
+    break;
+
+  case TS_EVENT_HTTP_TXN_CLOSE:
+    TSContDestroy(contp);
+    break;
+
+  default:
+    fatal("compress 304 ETag unknown event");
+  }
+
+  TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
+
+  return 0;
+}
+
+// With nothing stored, an origin 304 has no representation to judge it by. It does say the
+// representation is unchanged, so if this request qualifies for compression by the same rules a 200
+// would, and the client holds the weak form of the origin's strong ETag (a copy this plugin
+// compressed), answer with the tag the client holds.
+static void
+weaken_unjudged_origin_not_modified(TSHttpTxn txnp, HostConfiguration *hc)
+{
+  TSMBuffer srv_buf;
+  TSMLoc    srv_loc;
+
+  if (TS_SUCCESS != TSHttpTxnServerRespGet(txnp, &srv_buf, &srv_loc)) {
+    return;
+  }
+  ts::PostScript srv_defer([&]() -> void { TSHandleMLocRelease(srv_buf, TS_NULL_MLOC, srv_loc); });
+
+  if (TSHttpHdrStatusGet(srv_buf, srv_loc) != TS_HTTP_STATUS_NOT_MODIFIED) {
+    return;
+  }
+
+  TSMBuffer cached_buf;
+  TSMLoc    cached_loc;
+
+  if (TS_SUCCESS == TSHttpTxnCachedRespGet(txnp, &cached_buf, &cached_loc)) {
+    TSHandleMLocRelease(cached_buf, TS_NULL_MLOC, cached_loc);
+    return;
+  }
+
+  TSMBuffer req_buf;
+  TSMLoc    req_loc;
+
+  if (TS_SUCCESS != TSHttpTxnClientReqGet(txnp, &req_buf, &req_loc)) {
+    return;
+  }
+  ts::PostScript req_defer([&]() -> void { TSHandleMLocRelease(req_buf, TS_NULL_MLOC, req_loc); });
+
+  int compress_type = COMPRESSION_TYPE_DEFAULT;
+  int algorithms    = ALGORITHM_DEFAULT;
+
+  if (!is_compressible_method(req_buf, req_loc) || !client_accepts_compression(txnp, true, hc, &compress_type, &algorithms)) {
+    return;
+  }
+
+  TSMLoc srv_etag = TSMimeHdrFieldFind(srv_buf, srv_loc, TS_MIME_FIELD_ETAG, TS_MIME_LEN_ETAG);
+
+  if (srv_etag == TS_NULL_MLOC) {
+    return;
+  }
+  ts::PostScript srv_etag_defer([&]() -> void { TSHandleMLocRelease(srv_buf, srv_loc, srv_etag); });
+
+  TSMLoc inm = TSMimeHdrFieldFind(req_buf, req_loc, TS_MIME_FIELD_IF_NONE_MATCH, TS_MIME_LEN_IF_NONE_MATCH);
+
+  if (inm == TS_NULL_MLOC) {
+    return;
+  }
+  ts::PostScript inm_defer([&]() -> void { TSHandleMLocRelease(req_buf, req_loc, inm); });
+
+  int              srv_len;
+  const char      *srv_str = TSMimeHdrFieldValueStringGet(srv_buf, srv_loc, srv_etag, -1, &srv_len);
+  std::string_view srv_value{srv_str, static_cast<size_t>(srv_len)};
+
+  if (srv_value.starts_with("W/") || srv_value.starts_with("w/")) {
+    return;
+  }
+
+  int const nvalues = TSMimeHdrFieldValuesCount(req_buf, req_loc, inm);
+
+  for (int i = 0; i < nvalues; i++) {
+    int         len;
+    const char *str = TSMimeHdrFieldValueStringGet(req_buf, req_loc, inm, i, &len);
+
+    if (str == nullptr) {
+      continue;
+    }
+
+    std::string_view tag{str, static_cast<size_t>(len)};
+
+    if (tag.starts_with("W/") && tag.substr(2) == srv_value) {
+      TSMimeHdrFieldValueStringSet(srv_buf, srv_loc, srv_etag, -1, tag.data(), tag.size());
+      return;
+    }
+  }
 }
 
 static void
@@ -809,17 +1026,27 @@ compress_transform_add(TSHttpTxn txnp, HostConfiguration *hc, int compress_type,
 }
 
 static void
-handle_compression_and_vary(TSHttpTxn txnp, bool server, HostConfiguration *hc, int *compress_type, int *algorithms)
+handle_compression_and_vary(TSCont contp, TSHttpTxn txnp, bool server, HostConfiguration *hc, int *compress_type, int *algorithms)
 {
   // Check if content is compressible and add compression if client accepts it
   bool content_is_compressible;
   if (transformable(txnp, server, hc, compress_type, algorithms, &content_is_compressible)) {
     compress_transform_add(txnp, hc, *compress_type, *algorithms);
+
+    // The response may still go out as a bodyless 304 that the transform never sees.
+    TSCont etag_contp = TSContCreate(not_modified_etag_plugin, nullptr);
+
+    TSHttpTxnHookAdd(txnp, TS_HTTP_SEND_RESPONSE_HDR_HOOK, etag_contp);
+    TSHttpTxnHookAdd(txnp, TS_HTTP_TXN_CLOSE_HOOK, etag_contp);
   }
 
   // Add Vary: Accept-Encoding for all compressible content to ensure proper HTTP caching
   if (content_is_compressible) {
-    add_vary_header_for_compressible_content(txnp, server, hc);
+    if (server) {
+      add_vary_header_to_server_response(txnp);
+    } else {
+      TSHttpTxnHookAdd(txnp, TS_HTTP_SEND_RESPONSE_HDR_HOOK, contp);
+    }
   }
 }
 
@@ -867,7 +1094,9 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
         }
       }
 
-      handle_compression_and_vary(txnp, true, hc, &compress_type, &algorithms);
+      keep_cached_etag_weak(txnp);
+      weaken_unjudged_origin_not_modified(txnp, hc);
+      handle_compression_and_vary(contp, txnp, true, hc, &compress_type, &algorithms);
     }
     break;
 
@@ -893,7 +1122,7 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
     if (TS_ERROR != TSHttpTxnCacheLookupStatusGet(txnp, &obj_status) && (TS_CACHE_LOOKUP_HIT_FRESH == obj_status)) {
       if (hc != nullptr) {
         info("handling compression of cached object");
-        handle_compression_and_vary(txnp, false, hc, &compress_type, &algorithms);
+        handle_compression_and_vary(contp, txnp, false, hc, &compress_type, &algorithms);
       }
     } else {
       // Prepare for going to origin
@@ -901,6 +1130,10 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
       TSHttpTxnHookAdd(txnp, TS_HTTP_SEND_REQUEST_HDR_HOOK, contp);
     }
   } break;
+
+  case TS_EVENT_HTTP_SEND_RESPONSE_HDR:
+    add_vary_header_to_client_response(txnp);
+    break;
 
   case TS_EVENT_HTTP_TXN_CLOSE:
     // Release the ocnif lease, and destroy this continuation
@@ -1032,6 +1265,8 @@ TSPluginInit(int argc, const char *argv[])
     fatal("the compress plugin failed to register");
   }
 
+  Compress::init_compress_stats();
+
   info("TSPluginInit %s", argv[0]);
 
   if (!Compress::global_hidden_header_name) {
@@ -1060,6 +1295,7 @@ TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
 {
   CHECK_REMAP_API_COMPATIBILITY(api_info, errbuf, errbuf_size);
   info("The compress plugin is successfully initialized");
+  Compress::init_compress_stats();
   return TS_SUCCESS;
 }
 

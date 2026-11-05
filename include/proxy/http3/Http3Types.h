@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -62,6 +62,7 @@ enum class Http3FrameType : uint64_t {
   X_RESERVED_4  = 0x09,
   MAX_PUSH_ID   = 0x0D,
   X_MAX_DEFINED = 0x0D,
+  RESERVED      = 0x21,
   UNKNOWN       = 0x0E,
 };
 

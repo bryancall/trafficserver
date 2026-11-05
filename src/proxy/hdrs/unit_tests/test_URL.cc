@@ -18,7 +18,10 @@
    the License.
  */
 
+#include <cctype>
 #include <cstdio>
+#include <cstring>
+#include <memory>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -170,6 +173,68 @@ TEST_CASE("ParseRulesMostlyStrictURI", "[proxy][parseuri]")
   CHECK(url_is_mostly_compliant(i.uri, i.uri + strlen(i.uri)) == i.valid);
 }
 
+namespace
+{
+// The isspace()/isprint() pair that url_is_mostly_compliant replaced, kept as
+// the reference so this compares old behavior against new instead of restating
+// the new range test. Bytes are passed as unsigned char; the original passed a
+// plain char, which is undefined for the negative values every byte >= 0x80
+// produces. In the C locale, which ATS never leaves (nothing in the tree calls
+// setlocale), this accepts exactly 0x21..0x7E.
+bool
+url_mostly_compliant_reference(const char *start, const char *end)
+{
+  for (const char *p = start; p < end; ++p) {
+    unsigned char const c = static_cast<unsigned char>(*p);
+    if (std::isspace(c) || !std::isprint(c)) {
+      return false;
+    }
+  }
+  return true;
+}
+} // namespace
+
+TEST_CASE("MostlyCompliantVsScalar", "[proxy][parseuri]")
+{
+  // The auto-vectorized url_is_mostly_compliant must agree with the libc pair
+  // it replaced for every input. Exhaustively inject each of the 256 byte values
+  // at each position across lengths 1..40, which span a sub-vector target, a
+  // whole vector, and the scalar remainder for both 128- and 256-bit builds.
+  char buf[64];
+  int  mismatches = 0, first_len = 0, first_pos = 0, first_byte = 0;
+
+  for (int len = 1; len <= 40; ++len) {
+    for (int pos = 0; pos < len; ++pos) {
+      for (int b = 0; b < 256; ++b) {
+        memset(buf, 'a', len); // 'a' (0x61) is compliant
+        buf[pos]        = static_cast<char>(b);
+        bool const got  = url_is_mostly_compliant(buf, buf + len);
+        bool const want = url_mostly_compliant_reference(buf, buf + len);
+        if (got != want) {
+          if (mismatches == 0) {
+            first_len  = len;
+            first_pos  = pos;
+            first_byte = b;
+          }
+          ++mismatches;
+        }
+      }
+    }
+  }
+  CAPTURE(mismatches, first_len, first_pos, first_byte);
+  CHECK(mismatches == 0);
+
+  // Boundary extremes at every length: all-0x7E accepts, all-0x7F rejects.
+  for (int len = 0; len <= 40; ++len) {
+    memset(buf, 0x7E, len);
+    CHECK(url_is_mostly_compliant(buf, buf + len) == true);
+    if (len > 0) {
+      memset(buf, 0x7F, len);
+      CHECK(url_is_mostly_compliant(buf, buf + len) == false);
+    }
+  }
+}
+
 struct url_parse_test_case {
   const std::string input_uri;
   const std::string expected_printed_url;
@@ -319,6 +384,44 @@ std::vector<url_parse_test_case> url_parse_test_cases = {
     "https://www.example.com:8888/",
     VERIFY_HOST_CHARACTERS,
     "https://www.example.com:8888/",
+    IS_VALID,
+    IS_VALID
+  },
+  {
+    // Maximum value that fits in the 16-bit port field; preserved verbatim.
+    "https://www.example.com:65535/",
+    "https://www.example.com:65535/",
+    VERIFY_HOST_CHARACTERS,
+    "https://www.example.com:65535/",
+    IS_VALID,
+    IS_VALID
+  },
+  {
+    // One past the 16-bit boundary: the port is rejected and the URL is
+    // emitted with no explicit port so default-port logic applies.
+    "https://www.example.com:65536/",
+    "https://www.example.com/",
+    VERIFY_HOST_CHARACTERS,
+    "https://www.example.com/",
+    IS_VALID,
+    IS_VALID
+  },
+  {
+    // Five-digit value above the 16-bit range.
+    "https://www.example.com:99999/",
+    "https://www.example.com/",
+    VERIFY_HOST_CHARACTERS,
+    "https://www.example.com/",
+    IS_VALID,
+    IS_VALID
+  },
+  {
+    // Six-digit value whose low 16 bits coincide with a well-known port (80);
+    // must not be silently retained as if the user had asked for that port.
+    "https://www.example.com:131152/",
+    "https://www.example.com/",
+    VERIFY_HOST_CHARACTERS,
+    "https://www.example.com/",
     IS_VALID,
     IS_VALID
   },
@@ -569,6 +672,74 @@ TEST_CASE("UrlParse", "[proxy][parseurl]")
   test_parse(test_case, URL_PARSE_REGEX);
 }
 
+TEST_CASE("UrlParsePortStorage", "[proxy][parseurl]")
+{
+  // Validate the underlying URLImpl port storage rather than the printed form,
+  // so the rejection path cannot leave the parsed text behind even when other
+  // serialization paths only inspect m_ptr_port.
+  struct Case {
+    std::string input_uri;
+    int         expected_port;    // numeric m_port value
+    bool        expect_port_text; // true if m_ptr_port should be non-null
+  };
+
+  // clang-format off
+  static const std::vector<Case> cases = {
+    // In-range ports keep both the numeric value and the parsed text.
+    {"https://www.example.com:8080/",   8080,  true },
+    {"https://www.example.com:65535/",  65535, true },
+    // Out-of-range ports clear both.
+    {"https://www.example.com:65536/",  0,     false},
+    {"https://www.example.com:99999/",  0,     false},
+    {"https://www.example.com:131152/", 0,     false},
+  };
+  // clang-format on
+
+  auto c = GENERATE(from_range(cases));
+  CAPTURE(c.input_uri, c.expected_port, c.expect_port_text);
+
+  URL      url;
+  HdrHeap *heap = new_HdrHeap();
+  url.create(heap);
+  REQUIRE(url.parse(c.input_uri) == ParseResult::DONE);
+
+  CHECK(url.m_url_impl->m_port == c.expected_port);
+  if (c.expect_port_text) {
+    CHECK(url.m_url_impl->m_ptr_port != nullptr);
+    CHECK(url.m_url_impl->m_len_port > 0);
+  } else {
+    CHECK(url.m_url_impl->m_ptr_port == nullptr);
+    CHECK(url.m_url_impl->m_len_port == 0);
+  }
+
+  heap->destroy();
+}
+
+TEST_CASE("UrlPrintLowerCaseSchemeHostHandlesHighBitBytes", "[proxy][urlprint]")
+{
+  constexpr auto HIGH_ORDER_BIT = static_cast<char>(0x80);
+
+  std::string input_uri{"HTTP://High"};
+  input_uri.push_back(HIGH_ORDER_BIT);
+  input_uri.append(".Example/path");
+
+  std::string expected_url{"http://high"};
+  expected_url.push_back(HIGH_ORDER_BIT);
+  expected_url.append(".example/path");
+
+  URL      url;
+  HdrHeap *heap = new_HdrHeap();
+  url.create(heap);
+  REQUIRE(url.parse_no_host_check(input_uri) == ParseResult::DONE);
+
+  int   length      = 0;
+  char *printed_url = url.string_get_ref(&length, URLNormalize::LC_SCHEME_HOST);
+  REQUIRE(printed_url != nullptr);
+  CHECK(std::string_view{printed_url, static_cast<std::string_view::size_type>(length)} == expected_url);
+
+  heap->destroy();
+}
+
 struct get_hash_test_case {
   const std::string description;
   const std::string uri_1;
@@ -659,6 +830,36 @@ std::vector<get_hash_test_case> get_hash_test_cases = {
     !IGNORE_QUERY,
     HAS_EQUAL_HASH,
   },
+  {
+    "Uppercase host: equal hashes",
+    "http://ONE.EXAMPLE.COM/a/path?name=value",
+    "http://one.example.com/a/path?name=value",
+    !IGNORE_QUERY,
+    HAS_EQUAL_HASH,
+  },
+  {
+    "Mixed-case host: equal hashes",
+    "http://One.Example.Com/a/path?name=value",
+    "http://one.example.com/a/path?name=value",
+    !IGNORE_QUERY,
+    HAS_EQUAL_HASH,
+  },
+  {
+    "Uppercase scheme: equal hashes",
+    "HTTP://one.example.com/a/path?name=value",
+    "http://one.example.com/a/path?name=value",
+    !IGNORE_QUERY,
+    HAS_EQUAL_HASH,
+  },
+  {
+    // Long uppercase host crosses 16- and 32-byte SIMD body boundaries so
+    // the wider paths (when compiled in) are exercised by this fixture.
+    "Long uppercase host: equal hashes",
+    "http://A-VERY-LONG-HOST-NAME-FOR-SIMD.EXAMPLE.COM/a/path",
+    "http://a-very-long-host-name-for-simd.example.com/a/path",
+    !IGNORE_QUERY,
+    HAS_EQUAL_HASH,
+  },
 };
 
 /** Return the hash related to a URI.
@@ -744,4 +945,153 @@ TEST_CASE("UrlPathGet", "[url][path_get]")
       heap->destroy();
     }
   }
+}
+
+// ATS 9.2 hashed "path" ";" "params" as separate cache-key components, always
+// emitting the separator. The params component was removed from the parser, so
+// ";params" now lives inside the path and the separator is already there. That
+// makes the 9.2 key expressible through the current algorithm: it is the
+// current key of the same URL with exactly one ";" between path and query.
+namespace
+{
+/// A failing REQUIRE unwinds out of these helpers, so the heap is released by
+/// scope exit rather than by a call that the unwind would skip.
+struct HdrHeapDeleter {
+  void
+  operator()(HdrHeap *heap) const noexcept
+  {
+    heap->destroy();
+  }
+};
+
+using HdrHeapPtr = std::unique_ptr<HdrHeap, HdrHeapDeleter>;
+
+CryptoHash
+hash92(char const *text)
+{
+  HdrHeapPtr heap{new_HdrHeap()};
+  URL        url;
+
+  url.create(heap.get());
+  REQUIRE(url.parse(text, strlen(text)) == ParseResult::DONE);
+
+  CryptoHash hash;
+
+  url.hash_get92(&hash);
+
+  return hash;
+}
+
+CryptoHash
+hash_current(char const *text)
+{
+  HdrHeapPtr heap{new_HdrHeap()};
+  URL        url;
+
+  url.create(heap.get());
+  REQUIRE(url.parse(text, strlen(text)) == ParseResult::DONE);
+
+  CryptoHash hash;
+
+  url.hash_get(&hash);
+
+  return hash;
+}
+
+bool
+has_params(char const *text)
+{
+  HdrHeapPtr heap{new_HdrHeap()};
+  URL        url;
+
+  url.create(heap.get());
+  REQUIRE(url.parse(text, strlen(text)) == ParseResult::DONE);
+
+  return url.has_path_params();
+}
+} // namespace
+
+TEST_CASE("UrlHashGet92 reproduces the 9.2 cache key", "[url][hash_get92]")
+{
+  SECTION("a path without params gains the 9.2 separator")
+  {
+    CHECK(hash92("http://foo.test/path") == hash_current("http://foo.test/path;"));
+    CHECK(hash92("http://foo.test/path?q=1") == hash_current("http://foo.test/path;?q=1"));
+    // A ';' inside the query is not a params segment: 9.2 stopped the params
+    // component at '?', so the path still gained a separator of its own.
+    CHECK(hash92("http://foo.test/a?b;c") == hash_current("http://foo.test/a;?b;c"));
+  }
+
+  SECTION("a path carrying params already spells the 9.2 key")
+  {
+    CHECK(hash92("http://foo.test/a;b=1") == hash_current("http://foo.test/a;b=1"));
+    CHECK(hash92("http://foo.test/a;b;c") == hash_current("http://foo.test/a;b;c"));
+    CHECK(hash92("http://foo.test/a;b=1?q=1") == hash_current("http://foo.test/a;b=1?q=1"));
+  }
+
+  SECTION("the keys diverge only when the path has no params segment")
+  {
+    // This divergence is the whole reason the compatibility lookup exists.
+    CHECK(hash92("http://foo.test/path") != hash_current("http://foo.test/path"));
+    CHECK(hash92("http://foo.test/path?q=1") != hash_current("http://foo.test/path?q=1"));
+    // ... and when it converges there is nothing for a second lookup to find.
+    CHECK(hash92("http://foo.test/a;b=1") == hash_current("http://foo.test/a;b=1"));
+  }
+
+  SECTION("an escaped %3B is not a params segment")
+  {
+    // 9.2 split on the literal ';' only and hashed the path without unescaping,
+    // so "%3B" stayed in the path and the separator was still appended. The
+    // params check has to look at the raw path bytes, not the decoded ones.
+    CHECK(hash92("http://foo.test/a%3Bb=1") == hash_current("http://foo.test/a%3Bb=1;"));
+    CHECK(hash92("http://foo.test/a%3Bb=1?q=1") == hash_current("http://foo.test/a%3Bb=1;?q=1"));
+    CHECK(hash92("http://foo.test/a%3bb=1") == hash_current("http://foo.test/a%3bb=1;"));
+    // The escaped and literal forms were cached separately and must stay apart.
+    CHECK(hash92("http://foo.test/a%3Bb=1") != hash92("http://foo.test/a;b=1"));
+  }
+
+  SECTION("has_path_params identifies the converging case")
+  {
+    CHECK(!has_params("http://foo.test/path"));
+    CHECK(!has_params("http://foo.test/a?b;c"));
+    CHECK(!has_params("http://foo.test/a%3Bb=1"));
+    CHECK(has_params("http://foo.test/a;b=1"));
+    CHECK(has_params("http://foo.test/a;b=1?q=1"));
+  }
+}
+
+// URL getters must not construct std::string_view from a nullptr pointer
+// (which is UB). Parts that are not present in the URL should return an
+// empty string_view with data() == nullptr.
+TEST_CASE("UrlMissingParts", "[url][missing_parts]")
+{
+  URL      url;
+  HdrHeap *heap = new_HdrHeap();
+  url.create(heap);
+
+  // A freshly created URL with no parse has no components set.
+  auto scheme{url.scheme_get()};
+  auto user{url.user_get()};
+  auto password{url.password_get()};
+  auto host{url.host_get()};
+  auto path{url.path_get()};
+  auto query{url.query_get()};
+  auto fragment{url.fragment_get()};
+
+  CHECK(scheme.empty());
+  CHECK(scheme.data() == nullptr);
+  CHECK(user.empty());
+  CHECK(user.data() == nullptr);
+  CHECK(password.empty());
+  CHECK(password.data() == nullptr);
+  CHECK(host.empty());
+  CHECK(host.data() == nullptr);
+  CHECK(path.empty());
+  CHECK(path.data() == nullptr);
+  CHECK(query.empty());
+  CHECK(query.data() == nullptr);
+  CHECK(fragment.empty());
+  CHECK(fragment.data() == nullptr);
+
+  heap->destroy();
 }

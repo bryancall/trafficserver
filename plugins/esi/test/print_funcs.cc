@@ -34,15 +34,24 @@ static const int LINE_SIZE = 1024 * 1024;
 namespace
 {
 bool fakeDebugLogEnabled;
-}
+bool fakeErrorLogEnabled;
+} // namespace
 
 std::string gFakeDebugLog;
+std::string gFakeErrorLog;
 
 void
 enableFakeDebugLog()
 {
   fakeDebugLogEnabled = true;
   gFakeDebugLog.assign("");
+}
+
+void
+enableFakeErrorLog()
+{
+  fakeErrorLogEnabled = true;
+  gFakeErrorLog.assign("");
 }
 
 void
@@ -93,7 +102,7 @@ DbgCtl::_override_global_on()
 }
 
 void
-TSError(const char *fmt, ...)
+TSError(const char *fmt, ...) noexcept
 {
   char    buf[LINE_SIZE];
   va_list ap;
@@ -101,4 +110,7 @@ TSError(const char *fmt, ...)
   vsnprintf(buf, LINE_SIZE, fmt, ap);
   printf("Error: %s\n", buf);
   va_end(ap);
+  if (fakeErrorLogEnabled) {
+    gFakeErrorLog.append(buf);
+  }
 }

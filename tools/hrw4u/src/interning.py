@@ -41,7 +41,7 @@ class StringInterning:
     }
 
     MODIFIERS: Final[dict[str, str]] = {
-        mod: sys.intern(mod) for mod in ['AND', 'OR', 'NOT', 'NOCASE', 'PRE', 'SUF', 'EXT', 'MID', 'I', 'L', 'QSA']
+        mod: sys.intern(mod) for mod in ['AND', 'OR', 'NOT', 'NOCASE', 'PRE', 'SUF', 'EXT', 'MID', 'NORM', 'I', 'L', 'QSA']
     }
 
     LSP_STRINGS: Final[dict[str, str]] = {
@@ -76,11 +76,6 @@ class StringInterning:
         """Intern an LSP-related string, returning the interned version if available."""
         return cls.LSP_STRINGS.get(string, sys.intern(string))
 
-    @classmethod
-    def intern_any(cls, string: str) -> str:
-        """General-purpose string interning with fallback to sys.intern()."""
-        return sys.intern(string)
-
 
 def intern_keyword(keyword: str) -> str:
     """Intern language keywords."""
@@ -105,8 +100,3 @@ def intern_modifier(modifier: str) -> str:
 def intern_lsp_string(string: str) -> str:
     """Intern LSP-related strings."""
     return StringInterning.intern_lsp_string(string)
-
-
-def intern_any(string: str) -> str:
-    """General-purpose string interning."""
-    return StringInterning.intern_any(string)

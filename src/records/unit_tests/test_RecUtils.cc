@@ -24,6 +24,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "../P_RecUtils.h"
+#include "records/RecordsConfig.h"
+
+#include <string>
 
 TEST_CASE("recordRangeCheck via RecordValidityCheck", "[librecords][RecUtils]")
 {
@@ -198,4 +201,38 @@ TEST_CASE("recordRangeCheck via RecordValidityCheck", "[librecords][RecUtils]")
     REQUIRE(RecordValidityCheck("9223372036854775806", RECC_INT, "[0-9223372036854775807]"));   // INT64_MAX - 1
     REQUIRE(RecordValidityCheck("-9223372036854775807", RECC_INT, "[-9223372036854775808-0]")); // INT64_MIN + 1
   }
+}
+
+TEST_CASE("search_default_domains accepts documented values", "[librecords][RecUtils]")
+{
+  const auto *record = GetRecordElementByName("proxy.config.dns.search_default_domains");
+
+  REQUIRE(record != nullptr);
+  REQUIRE(record->check == RECC_INT);
+  REQUIRE(record->regex != nullptr);
+  REQUIRE(RecordValidityCheck("0", record->check, record->regex));
+  REQUIRE(RecordValidityCheck("1", record->check, record->regex));
+  REQUIRE(RecordValidityCheck("2", record->check, record->regex));
+  REQUIRE_FALSE(RecordValidityCheck("3", record->check, record->regex));
+}
+
+TEST_CASE("ram_cache.compress accepts every compression backend", "[librecords][RecUtils]")
+{
+  const auto *record = GetRecordElementByName("proxy.config.cache.ram_cache.compress");
+
+  REQUIRE(record != nullptr);
+  REQUIRE(record->check == RECC_INT);
+  REQUIRE(record->regex != nullptr);
+
+  // The validity range must cover every CACHE_COMPRESSION_* value, otherwise a
+  // documented backend is rejected at load time and silently falls back to the
+  // default of 0 (no compression). Kept as a literal rather than including
+  // iocore/cache/Cache.h, which would point a records test at the cache layer;
+  // extend it when a codec is added there.
+  constexpr int largest_compression_type = 5; // CACHE_COMPRESSION_ZSTD
+  for (int i = 0; i <= largest_compression_type; i++) {
+    INFO("CACHE_COMPRESSION_* value: " << i);
+    REQUIRE(RecordValidityCheck(std::to_string(i).c_str(), record->check, record->regex));
+  }
+  REQUIRE_FALSE(RecordValidityCheck(std::to_string(largest_compression_type + 1).c_str(), record->check, record->regex));
 }

@@ -2,7 +2,7 @@
 
   Traffic Server SDK API header file
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -20,7 +20,7 @@
   See the License for the specific language governing permissions and
   limitations under the License.
 
-  @section developers Developers
+  @par Developers
 
   Developers, when adding a new element to an enum, append it. DO NOT
   insert it.  Otherwise, binary compatibility of plugins will be broken!
@@ -85,7 +85,7 @@ TSstrndup(const char *p, int64_t n)
     @param mloc location of the handle to be released.
 
  */
-TSReturnCode TSHandleMLocRelease(TSMBuffer bufp, TSMLoc parent, TSMLoc mloc);
+TSReturnCode TSHandleMLocRelease(TSMBuffer bufp, TSMLoc parent, TSMLoc mloc) noexcept;
 
 /* --------------------------------------------------------------------------
    Install and plugin locations */
@@ -297,13 +297,13 @@ char *TSfgets(TSFile filep, char *buf, size_t length);
     immediate attention.
 
 */
-void TSStatus(const char *fmt, ...) TS_PRINTFLIKE(1, 2);    // Log information
-void TSNote(const char *fmt, ...) TS_PRINTFLIKE(1, 2);      // Log significant information
-void TSWarning(const char *fmt, ...) TS_PRINTFLIKE(1, 2);   // Log concerning information
-void TSError(const char *fmt, ...) TS_PRINTFLIKE(1, 2);     // Log operational failure, fail CI
-void TSFatal(const char *fmt, ...) TS_PRINTFLIKE(1, 2);     // Log recoverable crash, fail CI, exit & restart
-void TSAlert(const char *fmt, ...) TS_PRINTFLIKE(1, 2);     // Log recoverable crash, fail CI, exit & restart, Ops attention
-void TSEmergency(const char *fmt, ...) TS_PRINTFLIKE(1, 2); // Log unrecoverable crash, fail CI, exit, Ops attention
+void TSStatus(const char *fmt, ...) TS_PRINTFLIKE(1, 2);         // Log information
+void TSNote(const char *fmt, ...) TS_PRINTFLIKE(1, 2);           // Log significant information
+void TSWarning(const char *fmt, ...) TS_PRINTFLIKE(1, 2);        // Log concerning information
+void TSError(const char *fmt, ...) noexcept TS_PRINTFLIKE(1, 2); // Log operational failure, fail CI
+void TSFatal(const char *fmt, ...) TS_PRINTFLIKE(1, 2);          // Log recoverable crash, fail CI, exit & restart
+void TSAlert(const char *fmt, ...) TS_PRINTFLIKE(1, 2);          // Log recoverable crash, fail CI, exit & restart, Ops attention
+void TSEmergency(const char *fmt, ...) TS_PRINTFLIKE(1, 2);      // Log unrecoverable crash, fail CI, exit, Ops attention
 
 /* --------------------------------------------------------------------------
    Assertions */
@@ -331,7 +331,7 @@ TSMBuffer TSMBufferCreate(void);
     @param bufp marshal buffer to be destroyed.
 
  */
-TSReturnCode TSMBufferDestroy(TSMBuffer bufp);
+TSReturnCode TSMBufferDestroy(TSMBuffer bufp) noexcept;
 
 /* --------------------------------------------------------------------------
    URLs */
@@ -761,7 +761,7 @@ TSReturnCode TSUrlPercentEncode(TSMBuffer bufp, TSMLoc offset, char *dst, size_t
    @param str the string to decode (and possibly write to).
    @param str_len length of the input string (or 0).
    @param dst output buffer (can be the same as src).
-   @param dst_len size of the output buffer.
+   @param[in] dst_size size of the output buffer.
    @param length amount of data written to the destination buffer.
 
 */
@@ -817,7 +817,7 @@ TSReturnCode TSMimeHdrCreate(TSMBuffer bufp, TSMLoc *locp);
     @param offset location of the MIME header.
 
  */
-TSReturnCode TSMimeHdrDestroy(TSMBuffer bufp, TSMLoc offset);
+TSReturnCode TSMimeHdrDestroy(TSMBuffer bufp, TSMLoc offset) noexcept;
 
 /**
     Copies a specified MIME header to a specified marshal buffer,
@@ -1059,7 +1059,7 @@ TSReturnCode TSMimeFormatDate(time_t const value_time, char *const value_str, in
    HTTP headers */
 TSHttpParser TSHttpParserCreate(void);
 void         TSHttpParserClear(TSHttpParser parser);
-void         TSHttpParserDestroy(TSHttpParser parser);
+void         TSHttpParserDestroy(TSHttpParser parser) noexcept;
 
 /**
     Parses an HTTP request header. The HTTP header must have already
@@ -1102,7 +1102,7 @@ TSMLoc TSHttpHdrCreate(TSMBuffer bufp);
     call to TSHandleMLocRelease().
 
  */
-void TSHttpHdrDestroy(TSMBuffer bufp, TSMLoc offset);
+void TSHttpHdrDestroy(TSMBuffer bufp, TSMLoc offset) noexcept;
 
 TSReturnCode TSHttpHdrClone(TSMBuffer dest_bufp, TSMBuffer src_bufp, TSMLoc src_hdr, TSMLoc *locp);
 
@@ -1154,19 +1154,39 @@ const char  *TSHttpHdrReasonLookup(TSHttpStatus status);
    Threads */
 TSThread      TSThreadCreate(TSThreadFunc func, void *data);
 TSThread      TSThreadInit(void);
-void          TSThreadDestroy(TSThread thread);
-void          TSThreadWait(TSThread thread);
+void          TSThreadDestroy(TSThread thread) noexcept;
+void          TSThreadWait(TSThread thread) noexcept;
 TSThread      TSThreadSelf(void);
 TSEventThread TSEventThreadSelf(void);
 
 /* --------------------------------------------------------------------------
    Mutexes */
 TSMutex      TSMutexCreate(void);
-void         TSMutexDestroy(TSMutex mutexp);
-void         TSMutexLock(TSMutex mutexp);
-TSReturnCode TSMutexLockTry(TSMutex mutexp);
+void         TSMutexDestroy(TSMutex mutexp) noexcept;
+void         TSMutexLock(TSMutex mutexp) noexcept;
+TSReturnCode TSMutexLockTry(TSMutex mutexp) noexcept;
 
-void TSMutexUnlock(TSMutex mutexp);
+void TSMutexUnlock(TSMutex mutexp) noexcept;
+
+/** Scoped lock guard for a @c TSMutex.
+
+    Locks @a mutexp on construction and unlocks it when the guard leaves scope.
+ */
+class [[nodiscard]] TSMutexLockGuard
+{
+public:
+  explicit TSMutexLockGuard(TSMutex mutexp) : m_mutex(mutexp) { TSMutexLock(m_mutex); }
+
+  TSMutexLockGuard(const TSMutexLockGuard &)            = delete;
+  TSMutexLockGuard &operator=(const TSMutexLockGuard &) = delete;
+  TSMutexLockGuard(TSMutexLockGuard &&)                 = delete;
+  TSMutexLockGuard &operator=(TSMutexLockGuard &&)      = delete;
+
+  ~TSMutexLockGuard() { TSMutexUnlock(m_mutex); }
+
+private:
+  TSMutex m_mutex = nullptr;
+};
 
 /* --------------------------------------------------------------------------
    cachekey */
@@ -1211,7 +1231,7 @@ TSReturnCode TSCacheKeyPinnedSet(TSCacheKey key, time_t pin_in_cache);
     @param key to be destroyed.
 
  */
-TSReturnCode TSCacheKeyDestroy(TSCacheKey key);
+TSReturnCode TSCacheKeyDestroy(TSCacheKey key) noexcept;
 
 /* --------------------------------------------------------------------------
    cache url */
@@ -1227,6 +1247,101 @@ void         TSConfigRelease(unsigned int id, TSConfig configp);
 void        *TSConfigDataGet(TSConfig configp);
 
 TSReturnCode TSMgmtConfigFileAdd(const char *parent, const char *fileName);
+
+/* --------------------------------------------------------------------------
+   Config Registry - plugin config reload registration
+
+   See doc/developer-guide/api/functions/TSCfgRegister.en.rst for usage,
+   semantics, and examples. */
+
+/** Register a plugin config file with the reload framework.
+
+    Call from TSPluginInit() after TSPluginRegister(). All preconditions are
+    logged on failure; @a info must be non-null.
+
+    @param info  Registration parameters.
+    @return TS_SUCCESS if the config was registered; TS_ERROR on a precondition
+            failure or if the registration was dropped (duplicate key). On a
+            duplicate key the handler is never installed - probe first with
+            TSCfgIsRegistered() if the plugin may be loaded more than once.
+*/
+TSReturnCode TSCfgRegister(const TSCfgRegistrationInfo *info);
+
+/** Test whether a key is registered.
+
+    Plugins that may be loaded more than once (e.g. by an admin retry, or as
+    a remap plugin instance) can use this to skip a duplicate TSCfgRegister
+    call, which would otherwise be rejected with TS_ERROR.
+
+    @param key  Registry key.
+    @return     true if @a key is currently registered (core or plugin).
+*/
+bool TSCfgIsRegistered(std::string_view key);
+
+/** Attach a record so that changing its value re-runs the handler
+    registered for @a key. Call from TSPluginInit() after TSCfgRegister().
+
+    @return TS_SUCCESS on success; TS_ERROR if @a key is unknown.
+*/
+TSReturnCode TSCfgAttachReloadTrigger(std::string_view key, std::string_view record_name);
+
+/** Add a companion file dependency to a registered plugin config.
+    Call from TSPluginInit() after TSCfgRegister().
+
+    @return TS_SUCCESS on success; TS_ERROR on precondition fail.
+*/
+TSReturnCode TSCfgAddFileDependency(const TSCfgFileDependencyInfo *info);
+
+/** Transition the load context to IN_PROGRESS and optionally attach a
+    one-line progress @a msg. Null @a ctx or empty @a msg is a no-op.
+*/
+void TSCfgLoadCtxInProgress(TSCfgLoadCtx ctx, std::string_view msg);
+
+/** Report successful config load. Finalizes and invalidates @a ctx; do not use
+    it after this call. A later call on the same handle (double finalize, or any
+    accessor) is ignored and logged as misuse, not acted on. Null/unknown @a ctx
+    is a no-op; empty @a msg means no message.
+*/
+void TSCfgLoadCtxComplete(TSCfgLoadCtx ctx, std::string_view msg);
+
+/** Report failed config load. Finalizes and invalidates @a ctx with the same
+    post-finalize semantics as TSCfgLoadCtxComplete(). Null/unknown @a ctx is a
+    no-op; empty @a msg means no message.
+*/
+void TSCfgLoadCtxFail(TSCfgLoadCtx ctx, std::string_view msg);
+
+/** Log an intermediate message without changing state.
+    Preferred channel for progress/diagnostic messages between handler entry
+    and the eventual Complete/Fail call. Null @a ctx or empty @a msg is a no-op.
+*/
+void TSCfgLoadCtxAddLog(TSCfgLoadCtx ctx, TSCfgLogLevel level, std::string_view msg);
+
+/** Create a dependent subtask under @a ctx. The returned handle must be
+    completed/failed independently. Null @a ctx returns nullptr.
+*/
+TSCfgLoadCtx TSCfgLoadCtxAddSubtask(TSCfgLoadCtx ctx, std::string_view description);
+
+/** Resolved file path the framework expects this handler to read.
+    Returns the registration's @c config_path, or the current value of
+    @c filename_record if one was registered and is non-empty.
+    Valid until the completing call.
+*/
+std::string_view TSCfgLoadCtxGetFilename(TSCfgLoadCtx ctx);
+
+/** Reload token identifying the current reload cycle.
+    Valid until the completing call.
+*/
+std::string_view TSCfgLoadCtxGetReloadToken(TSCfgLoadCtx ctx);
+
+/** RPC-supplied YAML content for this load, or nullptr for file reloads.
+    Cast to YAML::Node*.
+*/
+TSYaml TSCfgLoadCtxGetSuppliedYaml(TSCfgLoadCtx ctx);
+
+/** RPC-supplied reload directives (the _reload key, extracted from the
+    supplied YAML by the framework), or nullptr if none were provided.
+*/
+TSYaml TSCfgLoadCtxGetReloadDirectives(TSCfgLoadCtx ctx);
 
 /* --------------------------------------------------------------------------
    Management */
@@ -1246,9 +1361,9 @@ TSHRTime TShrtime(void);
 /* --------------------------------------------------------------------------
    Continuations */
 TSCont                TSContCreate(TSEventFunc funcp, TSMutex mutexp);
-void                  TSContDestroy(TSCont contp);
-void                  TSContDataSet(TSCont contp, void *data);
-void                 *TSContDataGet(TSCont contp);
+void                  TSContDestroy(TSCont contp) noexcept;
+void                  TSContDataSet(TSCont contp, void *data) noexcept;
+void                 *TSContDataGet(TSCont contp) noexcept;
 TSAction              TSContScheduleOnPool(TSCont contp, TSHRTime timeout, TSThreadPool tp);
 TSAction              TSContScheduleOnThread(TSCont contp, TSHRTime timeout, TSEventThread ethread);
 std::vector<TSAction> TSContScheduleOnEntirePool(TSCont contp, TSHRTime timeout, TSThreadPool tp);
@@ -1318,7 +1433,7 @@ TSReturnCode TSSslSecretUpdate(const char *secret_name, int secret_name_length);
 
 /* Create a new SSL context based on the settings in records.yaml */
 TSSslContext TSSslServerContextCreate(TSSslX509 cert, const char *certname, const char *rsp_file);
-void         TSSslContextDestroy(TSSslContext ctx);
+void         TSSslContextDestroy(TSSslContext ctx) noexcept;
 TSReturnCode TSSslTicketKeyUpdate(char *ticketData, int ticketDataLen);
 TSAcceptor   TSAcceptorGet(TSVConn sslp);
 TSAcceptor   TSAcceptorGetbyID(int ID);
@@ -1422,9 +1537,10 @@ int TSHttpTxnServerSsnTransactionCount(TSHttpTxn txnp);
 
     @note The returned string is allocated and must be freed by the caller
     after use with @c TSfree.
-*/
-char *TSHttpTxnEffectiveUrlStringGet(TSHttpTxn txnp, int *length /**< String length return, may be @c nullptr. */
-);
+    @param[in] txnp Transaction whose effective URL to retrieve.
+    @param[out] length String length, or @c nullptr if not needed.
+ */
+char *TSHttpTxnEffectiveUrlStringGet(TSHttpTxn txnp, int *length);
 
 /** Get the effective URL for in the header (if any), with the scheme and host normalized to lower case letter.
     The effective URL is the URL taking in to account both the explicit
@@ -1519,9 +1635,10 @@ struct sockaddr const *TSHttpTxnServerAddrGet(TSHttpTxn txnp);
     If called no lookup is done, the address @a addr is used instead.
 
     @return @c TS_SUCCESS if the origin server address is set, @c TS_ERROR otherwise.
-*/
-TSReturnCode TSHttpTxnServerAddrSet(TSHttpTxn txnp, struct sockaddr const *addr /**< Address for origin server. */
-);
+    @param[in] txnp Transaction whose origin address to set.
+    @param[in] addr Address for the origin server.
+ */
+TSReturnCode TSHttpTxnServerAddrSet(TSHttpTxn txnp, struct sockaddr const *addr);
 
 /** Get the next hop address.
  *
@@ -1565,20 +1682,35 @@ TSReturnCode           TSHttpSsnClientFdGet(TSHttpSsn ssnp, int *fdp);
 /* TS-1008 END */
 
 /** Change packet firewall mark for the client side connection
- *
-    @note The change takes effect immediately
 
-    @return TS_SUCCESS if the client connection was modified
+    Sets the entire client-side packet firewall mark to @a mark; the whole mark is replaced. @a mark
+    is interpreted as a 32-bit unsigned bit pattern.
+
+    @note The firewall mark is only honored on platforms whose OS supports it, specifically Linux via
+    @c SO_MARK. On platforms without @c SO_MARK support the call still returns TS_SUCCESS when a
+    client connection is present, but setting the mark has no effect at the OS layer (it is a safe
+    no-op).
+
+    @note The change takes effect immediately on the live client connection
+
+    @return TS_SUCCESS if the client connection was modified, TS_ERROR if there is no client
+    connection to modify
 */
 TSReturnCode TSHttpTxnClientPacketMarkSet(TSHttpTxn txnp, int mark);
 
 /** Change packet firewall mark for the server side connection
- *
-    @note The change takes effect immediately, if no OS connection has been
-    made, then this sets the mark that will be used IF an OS connection
-    is established
 
-    @return TS_SUCCESS if the (future?) server connection was modified
+    Sets the entire server-side packet firewall mark to @a mark; the whole mark is replaced. @a mark
+    is interpreted as a 32-bit unsigned bit pattern.
+
+    @note The firewall mark is only honored on platforms whose OS supports it, specifically Linux via
+    @c SO_MARK. On platforms without @c SO_MARK support the call still returns TS_SUCCESS, but setting
+    the mark has no effect at the OS layer (it is a safe no-op).
+
+    @note If a live server connection exists, the mark is applied to it immediately; the mark is also
+    recorded on the transaction so that any subsequent server connection for this transaction uses it.
+
+    @return TS_SUCCESS always, including when no server connection has been established yet.
 */
 TSReturnCode TSHttpTxnServerPacketMarkSet(TSHttpTxn txnp, int mark);
 
@@ -1633,7 +1765,7 @@ char *TSHttpTxnErrorBodyGet(TSHttpTxn txnp, size_t *buflength, char **mimetype);
     You can get this strategy pointer by calling TSHttpTxnParentStrategyGet().
 
     @param txnp HTTP transaction whose parent strategy to set.
-    @param pointer to the given strategy.
+    @param[in] strategy Pointer to the given strategy.
 
  */
 void TSHttpTxnNextHopStrategySet(TSHttpTxn txnp, void const *strategy);
@@ -1657,7 +1789,7 @@ void const *TSHttpTxnNextHopStrategyGet(TSHttpTxn txnp);
       - parent proxying not enabled
       - no parent selection strategy (using parent.config)
 
-    @param txnp HTTP transaction whose next hop strategy to get.
+    @param[in] strategy Next hop strategy whose name to get.
 
  */
 char const *TSHttpNextHopStrategyNameGet(void const *strategy);
@@ -1816,7 +1948,8 @@ void TSHttpSsnDebugSet(TSHttpSsn ssnp, int on);
 /**
        Returns the transaction specific debugging flag for this client session.
 
-    @param txnp Client session to check.
+    @param[in] ssnp Client session to check.
+    @param[out] on Set to 1 if debugging is enabled, 0 otherwise.
     @return 1 if enabled, 0 otherwise.
 */
 int TSHttpSsnDebugGet(TSHttpSsn ssnp, int *on);
@@ -1939,7 +2072,7 @@ TSIOBufferWaterMark TSPluginVCIOBufferWaterMarkGet(TSHttpTxn txnp);
       coming from
     @param server_addr the address that the resulting connection will be seen as
       attempting to connect to when intercepted
-    @param vc will be set to point to the new TSVConn on success.
+    @return The new TSVConn on success.
 
  */
 TSVConn TSHttpConnectTransparent(struct sockaddr const *client_addr, struct sockaddr const *server_addr);
@@ -2020,7 +2153,7 @@ void TSFetchLaunch(TSFetchSM fetch_sm);
  *
  * @param fetch_sm: returned value of TSFetchCreate().
  */
-void TSFetchDestroy(TSFetchSM fetch_sm);
+void TSFetchDestroy(TSFetchSM fetch_sm) noexcept;
 
 /*
  * Set user-defined data in FetchSM
@@ -2055,7 +2188,7 @@ void         TSHttpAltInfoQualitySet(TSHttpAltInfo infop, float quality);
 
 /* --------------------------------------------------------------------------
    Actions */
-void TSActionCancel(TSAction actionp);
+void TSActionCancel(TSAction actionp) noexcept;
 int  TSActionDone(TSAction actionp);
 
 /* --------------------------------------------------------------------------
@@ -2066,9 +2199,9 @@ int   TSVConnClosedGet(TSVConn connp);
 
 TSVIO TSVConnRead(TSVConn connp, TSCont contp, TSIOBuffer bufp, int64_t nbytes);
 TSVIO TSVConnWrite(TSVConn connp, TSCont contp, TSIOBufferReader readerp, int64_t nbytes);
-void  TSVConnClose(TSVConn connp);
-void  TSVConnAbort(TSVConn connp, int error);
-void  TSVConnShutdown(TSVConn connp, int read, int write);
+void  TSVConnClose(TSVConn connp) noexcept;
+void  TSVConnAbort(TSVConn connp, int error) noexcept;
+void  TSVConnShutdown(TSVConn connp, int read, int write) noexcept;
 
 /* --------------------------------------------------------------------------
    Cache VConnections */
@@ -2152,19 +2285,39 @@ TSReturnCode TSPluginDescriptorAccept(TSCont contp);
 */
 TSReturnCode TSNetAcceptNamedProtocol(TSCont contp, const char *protocol);
 
-/**
-  Create a new port from the string specification used by the
-  proxy.config.http.server_ports configuration value.
+/** Create a port descriptor.
+ *
+ * Parse the string specification used by the
+ * @c proxy.config.http.server_ports configuration value. The returned handle
+ * must be released with TSPortDescriptorDestroy().
+ *
+ * @param[in] descriptor Port descriptor string to parse.
+ * @return A port descriptor handle, or @c nullptr if @a descriptor is invalid
+ * or cannot be used by TSPortDescriptorAccept().
  */
 TSPortDescriptor TSPortDescriptorParse(const char *descriptor);
 
-/**
-   Start listening on the given port descriptor. If a connection is
-   successfully accepted, the TS_EVENT_NET_ACCEPT is delivered to the
-   continuation. The event data will be a valid TSVConn bound to the accepted
-   connection.
+/** Start listening on a parsed port descriptor.
+ *
+ * If a connection is successfully accepted, @c TS_EVENT_NET_ACCEPT is
+ * delivered to @a contp. The event data will be a valid @c TSVConn bound to
+ * the accepted connection. The descriptor is not retained and can be
+ * destroyed immediately after this function returns.
+ *
+ * @param[in] descriptor Parsed port descriptor.
+ * @param[in] contp Continuation that accepts connections on the port.
+ * @return @c TS_SUCCESS if the port was opened, @c TS_ERROR otherwise.
  */
-TSReturnCode TSPortDescriptorAccept(TSPortDescriptor, TSCont);
+TSReturnCode TSPortDescriptorAccept(TSPortDescriptor descriptor, TSCont contp);
+
+/** Destroy a port descriptor.
+ *
+ * This does not stop a listener previously opened with
+ * TSPortDescriptorAccept(). Passing @c nullptr has no effect.
+ *
+ * @param[in] descriptor Port descriptor to destroy.
+ */
+void TSPortDescriptorDestroy(TSPortDescriptor descriptor);
 
 /* --------------------------------------------------------------------------
    DNS Lookups */
@@ -2309,7 +2462,7 @@ TSIOBuffer TSIOBufferCreate(void);
     improve performance.
 
     @param index size of the new TSIOBuffer to be created.
-    @param new TSIOBuffer of the specified size.
+    @return A new TSIOBuffer of the specified size.
 
  */
 TSIOBuffer TSIOBufferSizedCreate(TSIOBufferSizeIndex index);
@@ -2342,7 +2495,7 @@ int64_t TSIOBufferWaterMarkGet(TSIOBuffer bufp);
  */
 void TSIOBufferWaterMarkSet(TSIOBuffer bufp, int64_t water_mark);
 
-void            TSIOBufferDestroy(TSIOBuffer bufp);
+void            TSIOBufferDestroy(TSIOBuffer bufp) noexcept;
 TSIOBufferBlock TSIOBufferStart(TSIOBuffer bufp);
 int64_t         TSIOBufferCopy(TSIOBuffer bufp, TSIOBufferReader readerp, int64_t length, int64_t offset);
 
@@ -2369,10 +2522,10 @@ int64_t         TSIOBufferBlockWriteAvail(TSIOBufferBlock blockp);
 
 TSIOBufferReader TSIOBufferReaderAlloc(TSIOBuffer bufp);
 TSIOBufferReader TSIOBufferReaderClone(TSIOBufferReader readerp);
-void             TSIOBufferReaderFree(TSIOBufferReader readerp);
+void             TSIOBufferReaderFree(TSIOBufferReader readerp) noexcept;
 TSIOBufferBlock  TSIOBufferReaderStart(TSIOBufferReader readerp);
-void             TSIOBufferReaderConsume(TSIOBufferReader readerp, int64_t nbytes);
-int64_t          TSIOBufferReaderAvail(TSIOBufferReader readerp);
+void             TSIOBufferReaderConsume(TSIOBufferReader readerp, int64_t nbytes) noexcept;
+int64_t          TSIOBufferReaderAvail(TSIOBufferReader readerp) noexcept;
 int64_t          TSIOBufferReaderCopy(TSIOBufferReader readerp, void *buf, int64_t length);
 
 struct sockaddr const *TSNetVConnLocalAddrGet(TSVConn vc);
@@ -2417,6 +2570,13 @@ void      TSStatIntSet(int the_stat, TSMgmtInt value);
 /* TSReturnCode TSStatFloatSet(int the_stat, float value); */
 
 TSReturnCode TSStatFindName(const char *name, int *idp);
+
+/** Check whether @a the_stat is a valid statistic index.
+
+    The other TSStatInt* functions assert on an invalid index, so a plugin handling an
+    externally supplied index should validate it with this first.
+ */
+bool TSStatIdIsValid(int the_stat);
 
 /**
    Records.yaml file handling API.
@@ -2552,7 +2712,7 @@ TSReturnCode TSTextLogObjectWrite(TSTextLogObject the_object, const char *format
       flushed.
 
  */
-void TSTextLogObjectFlush(TSTextLogObject the_object);
+void TSTextLogObjectFlush(TSTextLogObject the_object) noexcept;
 
 /**
     Destroys a log object and releases the memory allocated to it.
@@ -2561,7 +2721,7 @@ void TSTextLogObjectFlush(TSTextLogObject the_object);
     @param  the_object custom log to be destroyed.
 
  */
-TSReturnCode TSTextLogObjectDestroy(TSTextLogObject the_object);
+TSReturnCode TSTextLogObjectDestroy(TSTextLogObject the_object) noexcept;
 
 /**
     Set log header.
@@ -2573,8 +2733,8 @@ void TSTextLogObjectHeaderSet(TSTextLogObject the_object, const char *header);
     Enable/disable rolling.
 
     @param rolling_enabled a valid proxy.config.log.rolling_enabled value.
-
- */
+    @param[in] the_object Text log object to configure.
+  */
 TSReturnCode TSTextLogObjectRollingEnabledSet(TSTextLogObject the_object, int rolling_enabled);
 
 /**
@@ -2686,7 +2846,7 @@ const char *TSVConnSslProtocolGet(TSVConn sslp);
    Return the current (if set) SSL Curve. This is still owned by the
    core, and must not be free'd.
 
-   @param txnp the transaction pointer
+   @param[in] sslp The TLS connection.
 
    @return the SSL Curve
 */
@@ -2768,6 +2928,25 @@ TSReturnCode TSHttpTxnCachedRespModifiableGet(TSHttpTxn txnp, TSMBuffer *bufp, T
 TSReturnCode TSHttpTxnCacheLookupStatusSet(TSHttpTxn txnp, int cachelookup);
 TSReturnCode TSHttpTxnCacheLookupUrlGet(TSHttpTxn txnp, TSMBuffer bufp, TSMLoc obj);
 TSReturnCode TSHttpTxnCacheLookupUrlSet(TSHttpTxn txnp, TSMBuffer bufp, TSMLoc obj);
+
+/**
+    Gets the effective cache key digest (cryptographic hash) that was
+    used for cache lookup or storage on this transaction.  The digest
+    is returned as raw bytes — 16 bytes for MD5 (default) or 32 bytes
+    for SHA-256 (FIPS mode).  A buffer of at least 32 bytes is
+    recommended to accommodate either configuration.
+
+    @param[in] txnp the transaction.
+    @param[out] buffer caller-provided buffer to receive the raw hash
+      bytes. If @c nullptr, only @a length is set (size query).
+    @param[in,out] length capacity of @a buffer in bytes on input; actual
+      digest size in bytes on output.
+
+    @return @c TS_SUCCESS if a cache key was computed for this
+      transaction, @c TS_ERROR if no cache lookup was performed or if
+      @a buffer is non-null and too small.
+ */
+TSReturnCode TSHttpTxnCacheKeyDigestGet(TSHttpTxn txnp, char *buffer, int *length);
 TSReturnCode TSHttpTxnPrivateSessionSet(TSHttpTxn txnp, int private_session);
 const char  *TSHttpTxnCacheDiskPathGet(TSHttpTxn txnp, int *length);
 int          TSHttpTxnBackgroundFillStarted(TSHttpTxn txnp);
@@ -2913,6 +3092,26 @@ void TSHttpTxnResponseActionGet(TSHttpTxn txnp, TSResponseAction *action);
  */
 TSIOBufferReader TSHttpTxnPostBufferReaderGet(TSHttpTxn txnp);
 
+/** Get the most recent connection error received from an HTTP/2 client.
+ *
+ * @param[in] ssnp The client session, including during @c TS_HTTP_SSN_CLOSE_HOOK.
+ * @param[out] error_class Zero for no error information, or one for a connection error.
+ * @param[out] error_code The HTTP/2 GOAWAY error code, including zero for @c NO_ERROR.
+ * @note Other client protocols return zero for both outputs. Stream errors are
+ *       available through @ref TSHttpTxnClientReceivedErrorGet.
+ */
+void TSHttpSsnClientReceivedErrorGet(TSHttpSsn ssnp, uint32_t *error_class, uint64_t *error_code);
+
+/** Get the most recent connection error sent to an HTTP/2 client.
+ *
+ * @param[in] ssnp The client session, including during @c TS_HTTP_SSN_CLOSE_HOOK.
+ * @param[out] error_class Zero for no error information, or one for a connection error.
+ * @param[out] error_code The HTTP/2 GOAWAY error code, including zero for @c NO_ERROR.
+ * @note Other client protocols return zero for both outputs. Stream errors are
+ *       available through @ref TSHttpTxnClientSentErrorGet.
+ */
+void TSHttpSsnClientSentErrorGet(TSHttpSsn ssnp, uint32_t *error_class, uint64_t *error_code);
+
 /**
  * @brief Get the client error received from the transaction
  *
@@ -2955,6 +3154,7 @@ void TSHttpTxnServerSentErrorGet(TSHttpTxn txnp, uint32_t *error_class, uint64_t
  *
  * @param url the URL string to preload.
  * @param url_len the length of the URL string.
+ * @param[in] txnp Transaction on whose session to initiate the push.
  */
 TSReturnCode TSHttpTxnServerPush(TSHttpTxn txnp, const char *url, int url_len);
 
@@ -3173,7 +3373,7 @@ TSReturnCode TSHttpTxnVerifiedAddrGet(TSHttpTxn txnp, const struct sockaddr **ad
 
    @param txnp the transaction pointer
    @param key the requested txn info.
-   @param TSMgmtInt a pointer to a integer where the return value is stored
+   @param[out] value a pointer to a integer where the return value is stored
 
    @return @c TS_SUCCESS if the requested info is supported, TS_ERROR otherwise
 
@@ -3184,9 +3384,10 @@ TSReturnCode TSHttpTxnInfoIntGet(TSHttpTxn txnp, TSHttpTxnInfoKey key, TSMgmtInt
 /**
    Return the particular ssn info requested.
 
-   @param ssnp the transaction pointer
+   @param[in] ssnp the session pointer
    @param key the requested ssn info.
-   @param TSMgmtInt a pointer to a integer where the return value is stored
+   @param[in] sub_key The protocol-specific selector, or zero for aggregate information.
+   @param[out] value a pointer to a integer where the return value is stored
 
    @return @c TS_SUCCESS if the requested info is supported, TS_ERROR otherwise
 

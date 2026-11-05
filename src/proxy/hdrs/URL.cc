@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -25,6 +25,7 @@
 #include <new>
 #include "tscore/ink_platform.h"
 #include "tscore/ink_memory.h"
+#include "tscore/ink_ascii_tolower.h"
 #include "proxy/hdrs/URL.h"
 #include "proxy/hdrs/MIME.h"
 #include "proxy/hdrs/HTTP.h"
@@ -76,8 +77,10 @@ int URL_WKSIDX_MMST;
 
 namespace
 {
-// Whether we should implement url_CryptoHash_get() using url_CryptoHash_get_fast(). Note that
-// url_CryptoHash_get_fast() does NOT produce the same result as url_CryptoHash_get_general().
+// Whether url_CryptoHash_get_92() should use url_CryptoHash_get_fast_92().
+// The fast implementation emits the 9.2 ";" path/params separator and is
+// therefore valid only for 9.2 keys; the canonical url_CryptoHash_get()
+// always uses url_CryptoHash_get_general().
 constexpr int url_hash_method = 0;
 
 // Buffer size for url_CryptoHash_get() and url_CryptoHash_get_92().
@@ -320,6 +323,13 @@ URLImpl::unmarshal(intptr_t offset)
 }
 
 void
+URLImpl::recompute_wks_idx()
+{
+  m_scheme_wks_idx =
+    m_ptr_scheme != nullptr ? static_cast<int16_t>(hdrtoken_tokenize(m_ptr_scheme, m_len_scheme, nullptr)) : int16_t{-1};
+}
+
+void
 URLImpl::rehome_strings(HdrHeap *new_heap)
 {
   m_ptr_scheme         = new_heap->localize({m_ptr_scheme, m_len_scheme}).data();
@@ -474,15 +484,23 @@ URLImpl::set_port(HdrHeap *heap, std::string_view value, bool copy_string)
   if (value.empty()) {
     value = {nullptr, 0};
   }
-  mime_str_u16_set(heap, value, &(this->m_ptr_port), &(this->m_len_port), copy_string);
 
   this->m_port = 0;
   for (auto digit : value) {
     if (!ParseRules::is_digit(digit)) {
       break;
     }
-    this->m_port = this->m_port * 10 + (digit - '0');
+    unsigned int next = this->m_port * 10 + (digit - '0');
+    if (next > 65535) {
+      // Reject out-of-range port: drop the parsed text as well so the URL is
+      // fully treated as if no port were given.
+      mime_str_u16_set(heap, {nullptr, 0}, &(this->m_ptr_port), &(this->m_len_port), copy_string);
+      this->m_port = 0;
+      return;
+    }
+    this->m_port = static_cast<uint16_t>(next);
   }
+  mime_str_u16_set(heap, value, &(this->m_ptr_port), &(this->m_len_port), copy_string);
 }
 
 /*-------------------------------------------------------------------------
@@ -683,6 +701,22 @@ url_string_get_buf(URLImpl *url, char *dstbuf, int dstbuf_size, int *length)
 /*-------------------------------------------------------------------------
   -------------------------------------------------------------------------*/
 
+namespace
+{
+/** Construct a string_view from a URL part pointer/length pair, guarding
+ *  against the nullptr case. Constructing std::string_view(nullptr, 0) is UB.
+ *  URL parts that are absent store a nullptr m_ptr_* and zero m_len_*.
+ */
+inline std::string_view
+make_part_view(const char *ptr, int len)
+{
+  if (ptr == nullptr) {
+    return {};
+  }
+  return {ptr, static_cast<std::string_view::size_type>(len)};
+}
+} // namespace
+
 std::string_view
 URLImpl::get_scheme() const noexcept
 {
@@ -690,7 +724,7 @@ URLImpl::get_scheme() const noexcept
     return {hdrtoken_index_to_wks(this->m_scheme_wks_idx),
             static_cast<std::string_view::size_type>(hdrtoken_index_to_length(this->m_scheme_wks_idx))};
   } else {
-    return {this->m_ptr_scheme, static_cast<std::string_view::size_type>(this->m_len_scheme)};
+    return make_part_view(this->m_ptr_scheme, this->m_len_scheme);
   }
 }
 
@@ -700,7 +734,7 @@ URLImpl::get_scheme() const noexcept
 std::string_view
 URLImpl::get_user() const noexcept
 {
-  return {this->m_ptr_user, static_cast<std::string_view::size_type>(this->m_len_user)};
+  return make_part_view(this->m_ptr_user, this->m_len_user);
 }
 
 /*-------------------------------------------------------------------------
@@ -709,7 +743,7 @@ URLImpl::get_user() const noexcept
 std::string_view
 URLImpl::get_password() const noexcept
 {
-  return {this->m_ptr_password, static_cast<std::string_view::size_type>(this->m_len_password)};
+  return make_part_view(this->m_ptr_password, this->m_len_password);
 }
 
 /*-------------------------------------------------------------------------
@@ -718,7 +752,7 @@ URLImpl::get_password() const noexcept
 std::string_view
 URLImpl::get_host() const noexcept
 {
-  return {this->m_ptr_host, static_cast<std::string_view::size_type>(this->m_len_host)};
+  return make_part_view(this->m_ptr_host, this->m_len_host);
 }
 
 /*-------------------------------------------------------------------------
@@ -736,7 +770,7 @@ URLImpl::get_port()
 std::string_view
 URLImpl::get_path() const noexcept
 {
-  return {this->m_ptr_path, static_cast<std::string_view::size_type>(this->m_len_path)};
+  return make_part_view(this->m_ptr_path, this->m_len_path);
 }
 
 /*-------------------------------------------------------------------------
@@ -745,7 +779,7 @@ URLImpl::get_path() const noexcept
 std::string_view
 URLImpl::get_query() const noexcept
 {
-  return {this->m_ptr_query, static_cast<std::string_view::size_type>(this->m_len_query)};
+  return make_part_view(this->m_ptr_query, this->m_len_query);
 }
 
 /*-------------------------------------------------------------------------
@@ -754,7 +788,7 @@ URLImpl::get_query() const noexcept
 std::string_view
 URLImpl::get_fragment() const noexcept
 {
-  return {this->m_ptr_fragment, static_cast<std::string_view::size_type>(this->m_len_fragment)};
+  return make_part_view(this->m_ptr_fragment, this->m_len_fragment);
 }
 
 /*-------------------------------------------------------------------------
@@ -1172,17 +1206,13 @@ url_is_strictly_compliant(const char *start, const char *end)
 bool
 url_is_mostly_compliant(const char *start, const char *end)
 {
+  // Accumulate invalid bytes without an early exit so the compiler can vectorize the scan.
+  unsigned char bad = 0;
   for (const char *i = start; i < end; ++i) {
-    if (isspace(*i)) {
-      Dbg(dbg_ctl_http, "Whitespace character [0x%.2X] found in URL", static_cast<unsigned char>(*i));
-      return false;
-    }
-    if (!isprint(*i)) {
-      Dbg(dbg_ctl_http, "Non-printable character [0x%.2X] found in URL", static_cast<unsigned char>(*i));
-      return false;
-    }
+    unsigned char const c  = static_cast<unsigned char>(*i);
+    bad                   |= static_cast<unsigned char>((c < 0x21) | (c > 0x7E));
   }
-  return true;
+  return bad == 0;
 }
 
 } // namespace UrlImpl
@@ -1684,27 +1714,24 @@ url_describe(HdrHeapObjImpl *raw, bool /* recurse ATS_UNUSED */)
  *                                                                     *
  ***********************************************************************/
 
-static inline void
-memcpy_tolower(char *d, const char *s, int n)
-{
-  while (n--) {
-    *d = ParseRules::ink_tolower(*s);
-    s++;
-    d++;
-  }
-}
-
-// fast path for CryptoHash, HTTP, no user/password/params/query,
-// no buffer overflow, no unescaping needed
+// Fast path for the 9.2 CryptoHash: HTTP, no user/password/params/query,
+// no buffer overflow, no unescaping needed.
+//
+// Emits the ";" path/params separator that 9.2 hashed between the path and
+// params components, so it is valid only for url_CryptoHash_get_92(): the
+// canonical url_CryptoHash_get_general() does not emit the separator, and
+// using this fast path there would make canonical keys collide with 9.2 keys.
+// The 9.2 caller must also ensure the path carries no literal ';' (see
+// has_path_params()), otherwise the separator would be duplicated.
 
 static inline void
-url_CryptoHash_get_fast(const URLImpl *url, CryptoContext &ctx, CryptoHash *hash, cache_generation_t generation)
+url_CryptoHash_get_fast_92(const URLImpl *url, CryptoContext &ctx, CryptoHash *hash, cache_generation_t generation)
 {
   char  buffer[BUFSIZE];
   char *p;
 
   p = buffer;
-  memcpy_tolower(p, url->m_ptr_scheme, url->m_len_scheme);
+  ts::ascii::tolower_copy(p, url->m_ptr_scheme, url->m_len_scheme);
   p    += url->m_len_scheme;
   *p++  = ':';
   *p++  = '/';
@@ -1713,7 +1740,7 @@ url_CryptoHash_get_fast(const URLImpl *url, CryptoContext &ctx, CryptoHash *hash
   *p++ = ':';
   // no password
   *p++ = '@';
-  memcpy_tolower(p, url->m_ptr_host, url->m_len_host);
+  ts::ascii::tolower_copy(p, url->m_ptr_host, url->m_len_host);
   p    += url->m_len_host;
   *p++  = '/';
   memcpy(p, url->m_ptr_path, url->m_len_path);
@@ -1771,7 +1798,7 @@ url_CryptoHash_get_general(const URLImpl *url, CryptoContext &ctx, CryptoHash &h
   strs[10] = nullptr;
   strs[11] = "?";
 
-  // Special case for the query paramters, allowing us to ignore them if requested
+  // Special case for the query parameters, allowing us to ignore them if requested
   if (!ignore_query) {
     strs[12] = url->m_ptr_query;
     ends[12] = strs[12] + url->m_len_query;
@@ -1838,19 +1865,8 @@ void
 url_CryptoHash_get(const URLImpl *url, CryptoHash *hash, bool ignore_query, cache_generation_t generation)
 {
   URLHashContext ctx;
-  if ((url_hash_method != 0) && (url->m_url_type == URLType::HTTP) &&
-      ((url->m_len_user + url->m_len_password + (ignore_query ? 0 : url->m_len_query)) == 0) &&
-      (10u + url->m_len_scheme + url->m_len_host + url->m_len_path < BUFSIZE) &&
-      (memchr(url->m_ptr_host, '%', url->m_len_host) == nullptr) && (memchr(url->m_ptr_path, '%', url->m_len_path) == nullptr)) {
-    url_CryptoHash_get_fast(url, ctx, hash, generation);
-#ifdef DEBUG
-    CryptoHash hash_general;
-    url_CryptoHash_get_general(url, ctx, hash_general, ignore_query, generation);
-    ink_assert(*hash == hash_general);
-#endif
-  } else {
-    url_CryptoHash_get_general(url, ctx, *hash, ignore_query, generation);
-  }
+  // No fast path here: the only one left emits the 9.2 ";" separator.
+  url_CryptoHash_get_general(url, ctx, *hash, ignore_query, generation);
 }
 
 static inline void
@@ -1884,8 +1900,16 @@ url_CryptoHash_get_general_92(const URLImpl *url, CryptoContext &ctx, CryptoHash
   ends[7] = strs[7] + 1;
   ends[8] = strs[8] + url->m_len_path;
 
-  strs[9]  = ";";
-  strs[10] = url->m_ptr_params;
+  // ATS 9.2 split "/path;params" into separate path and params components and
+  // hashed them as path + ";" + params. That parsing was removed, so ";params"
+  // now stays inside the path and already spells the same byte sequence. Adding
+  // the separator again would append a ";" that 9.2 never emitted, so only add
+  // it when the path does not carry one. The params component itself is always
+  // empty now; it is left out rather than read back as an empty string.
+  bool const path_has_params = url->has_path_params();
+
+  strs[9]  = path_has_params ? nullptr : ";";
+  strs[10] = nullptr;
   strs[11] = "?";
 
   // Special case for the query paramters, allowing us to ignore them if requested
@@ -1897,8 +1921,8 @@ url_CryptoHash_get_general_92(const URLImpl *url, CryptoContext &ctx, CryptoHash
     ends[12] = nullptr;
   }
 
-  ends[9]  = strs[9] + 1;
-  ends[10] = strs[10] + url->m_len_params;
+  ends[9]  = path_has_params ? nullptr : strs[9] + 1;
+  ends[10] = nullptr;
   ends[11] = strs[11] + 1;
 
   p = buffer;
@@ -1955,11 +1979,11 @@ void
 url_CryptoHash_get_92(const URLImpl *url, CryptoHash *hash, bool ignore_query, cache_generation_t generation)
 {
   URLHashContext ctx;
-  if ((url_hash_method != 0) && (url->m_url_type == URLType::HTTP) &&
+  if ((url_hash_method != 0) && (url->m_url_type == URLType::HTTP) && !url->has_path_params() &&
       ((url->m_len_user + url->m_len_password + url->m_len_params + (ignore_query ? 0 : url->m_len_query)) == 0) &&
       (10u + url->m_len_scheme + url->m_len_host + url->m_len_path < BUFSIZE) &&
       (memchr(url->m_ptr_host, '%', url->m_len_host) == nullptr) && (memchr(url->m_ptr_path, '%', url->m_len_path) == nullptr)) {
-    url_CryptoHash_get_fast(url, ctx, hash, generation);
+    url_CryptoHash_get_fast_92(url, ctx, hash, generation);
 #ifdef DEBUG
     CryptoHash hash_general;
     url_CryptoHash_get_general_92(url, ctx, hash_general, ignore_query, generation);

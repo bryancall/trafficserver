@@ -2,7 +2,7 @@
  *
  *  Interface for providing transfer progress
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -54,7 +54,7 @@ public:
   bool     is_cancelled() const override;
 
 private:
-  QUICStreamAdapter *_adapter;
+  QUICStreamAdapter *_adapter{nullptr};
 };
 
 class QUICTransferProgressProviderVIO : public QUICTransferProgressProvider

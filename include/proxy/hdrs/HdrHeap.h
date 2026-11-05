@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -148,7 +148,7 @@ private:
   HdrStrHeap(uint32_t total_size) : _total_size{total_size} {}
 
   uint32_t const _total_size;
-  uint32_t       _avail_size;
+  uint32_t       _avail_size{0};
 };
 
 inline bool

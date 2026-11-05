@@ -2,7 +2,7 @@
 
   Private RecMessage declarations
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -42,8 +42,6 @@ int         RecMessageFree(RecMessage *msg);
 RecMessage *RecMessageMarshal_Realloc(RecMessage *msg, const RecRecord *record);
 int         RecMessageUnmarshalFirst(RecMessage *msg, RecMessageItr *itr, RecRecord **record);
 int         RecMessageUnmarshalNext(RecMessage *msg, RecMessageItr *itr, RecRecord **record);
-
-int RecMessageRegisterRecvCb(RecMessageRecvCb recv_cb, void *cookie);
 
 RecMessage *RecMessageReadFromDisk(const char *fpath);
 int         RecMessageWriteToDisk(RecMessage *msg, const char *fpath);

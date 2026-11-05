@@ -2,7 +2,7 @@
 
   Implementation of Parent Proxy routing
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -128,7 +128,7 @@ ParentSelectionStrategy::markParentUp(ParentResult *result)
 
   pRec->failedAt = static_cast<time_t>(0);
   int old_count  = pRec->failCount.exchange(0, std::memory_order_relaxed);
-  // a retry succeeded, just reset retriers
+  // a retry succeeded, just reset retries
 
   if (old_count > 0) {
     Note("http parent proxy %s:%d restored with request %s", pRec->hostname, pRec->port, result->url);

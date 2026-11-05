@@ -30,15 +30,19 @@ set(TSUTIL_PUBLIC_HEADERS
     ${PROJECT_SOURCE_DIR}/include/tsutil/LocalBuffer.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/PostScript.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/Strerror.h
+    ${PROJECT_SOURCE_DIR}/include/tsutil/StringCompare.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/StringConvert.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/Regex.h
+    ${PROJECT_SOURCE_DIR}/include/tsutil/TsMutex.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/TsSharedMutex.h
+    ${PROJECT_SOURCE_DIR}/include/tsutil/ts_thread_safety.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/YamlCfg.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/ts_ip.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/ts_meta.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/ts_time_parser.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/ts_unit_parser.h
     ${PROJECT_SOURCE_DIR}/include/tsutil/ts_errata.h
+    ${PROJECT_SOURCE_DIR}/include/tsutil/UdiTable.h
 )
 add_library(
   tsutil
@@ -72,16 +76,32 @@ endif()
 if(BUILD_TESTING)
   add_executable(
     test_tsutil
+    unit_tests/test_AtomicSharedPtr.cc
     unit_tests/test_Bravo.cc
     unit_tests/test_LocalBuffer.cc
     unit_tests/test_Metrics.cc
     unit_tests/test_PostScript.cc
     unit_tests/test_Strerror.cc
+    unit_tests/test_StringCompare.cc
     unit_tests/test_StringConvert.cc
     unit_tests/test_Regex.cc
     unit_tests/test_ts_meta.cc
+    unit_tests/test_thread_safety.cc
     unit_tests/test_time_parser.cc
+    unit_tests/test_UdiTable.cc
   )
+
+  # The thread-safety test doubles as a compile-time check: build it with the
+  # analysis enabled and treat any finding as an error so a broken annotation
+  # chain fails the build. Scoped to the same lanes as the global analysis block
+  # in the top-level CMakeLists.txt (Clang, excluding FreeBSD); a no-op for GCC,
+  # where the macros expand to nothing.
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    set_source_files_properties(
+      unit_tests/test_thread_safety.cc
+      PROPERTIES COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wthread-safety;-Werror=thread-safety>"
+    )
+  endif()
 
   target_link_libraries(test_tsutil PRIVATE tsutil Catch2::Catch2WithMain)
 

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -24,17 +24,22 @@
 #include "proxy/http3/Http3StreamDataVIOAdaptor.h"
 #include "iocore/eventsystem/VIO.h"
 
-Http3StreamDataVIOAdaptor::Http3StreamDataVIOAdaptor(VIO *sink) : _sink_vio(sink), _buffer(new_MIOBuffer(BUFFER_SIZE_INDEX_4K)) {}
+Http3StreamDataVIOAdaptor::Http3StreamDataVIOAdaptor(VIO *sink) : _sink_vio(sink), _buffer(new_MIOBuffer(BUFFER_SIZE_INDEX_4K))
+{
+  this->_reader = this->_buffer->alloc_reader();
+}
 
 Http3StreamDataVIOAdaptor::~Http3StreamDataVIOAdaptor()
 {
+  this->_buffer->dealloc_reader(this->_reader);
   free_MIOBuffer(this->_buffer);
 }
 
-std::vector<Http3FrameType>
+std::vector<Http3FrameType> const &
 Http3StreamDataVIOAdaptor::interests()
 {
-  return {Http3FrameType::DATA};
+  static std::vector<Http3FrameType> const types = {Http3FrameType::DATA};
+  return types;
 }
 
 Http3ErrorUPtr
@@ -43,8 +48,13 @@ Http3StreamDataVIOAdaptor::handle_frame(std::shared_ptr<const Http3Frame> frame,
   ink_assert(frame->type() == Http3FrameType::DATA);
   const Http3DataFrame *dframe = dynamic_cast<const Http3DataFrame *>(frame.get());
 
-  // Need to wait for headers to be written
-  int64_t written           = this->_buffer->write(dframe->data());
+  // The frame's reader is bounded to this frame by size_limit, but the default
+  // length for MIOBuffer::write is INT64_MAX, which walks the raw block chain
+  // and copies whatever follows the frame in the stream read buffer. Pass
+  // read_avail(), which honours size_limit, to bound the copy to the payload.
+  IOBufferReader *reader  = dframe->data();
+  int64_t         written = this->_buffer->write(reader, reader->read_avail());
+
   this->_total_data_length += written;
 
   return Http3ErrorUPtr(nullptr);
@@ -53,21 +63,21 @@ Http3StreamDataVIOAdaptor::handle_frame(std::shared_ptr<const Http3Frame> frame,
 void
 Http3StreamDataVIOAdaptor::finalize()
 {
-  SCOPED_MUTEX_LOCK(lock, this->_sink_vio->mutex, this_ethread());
-  MIOBuffer      *writer = this->_sink_vio->get_writer();
-  IOBufferReader *reader = this->_buffer->alloc_reader();
-  IOBufferBlock  *block;
-  while (reader->read_avail() > 0 && (block = reader->get_current_block()) != nullptr) {
-    writer->append_block(block);
-    reader->consume(block->size());
+  if (this->_finalized) {
+    return;
   }
 
-  this->_buffer->dealloc_reader(reader);
-  this->_sink_vio->nbytes = this->_total_data_length;
+  SCOPED_MUTEX_LOCK(lock, this->_sink_vio->mutex, this_ethread());
+  MIOBuffer *writer    = this->_sink_vio->get_writer();
+  int64_t    delivered = writer->write(this->_reader, this->_reader->read_avail());
+  this->_reader->consume(delivered);
+  this->_sink_vio->ndone  += delivered;
+  this->_sink_vio->nbytes  = this->_sink_vio->ndone;
+  this->_finalized         = true;
 }
 
 bool
-Http3StreamDataVIOAdaptor::has_data()
+Http3StreamDataVIOAdaptor::has_data() const
 {
   return this->_total_data_length > 0;
 }

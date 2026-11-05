@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -34,14 +34,14 @@ class Http09Session;
 
 /**
  * @brief A simple multi-streamed application.
- * @detail Response to simple HTTP/0.9 GETs
+ * @details Response to simple HTTP/0.9 GETs
  * This will be removed when HTTP/0.9 over QUIC support is dropped
  *
  */
 class Http09App : public QUICApplication
 {
 public:
-  Http09App(NetVConnection *client_vc, QUICConnection *qc, IpAllow::ACL &&session_acl, const HttpSessionAccept::Options &options);
+  Http09App(NetVConnection *client_vc, QUICConnection *qc, IpAllow::ACL &&session_acl, HttpSessionAcceptBase const *acceptor);
   ~Http09App();
 
   void on_stream_open(QUICStream &stream) override;

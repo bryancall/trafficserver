@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -26,7 +26,12 @@
 Ptr<IOBufferBlock>
 QUICStreamAdapter::read(size_t len)
 {
-  auto ret = this->_read(len);
+  return this->_read(len);
+}
+
+void
+QUICStreamAdapter::consume(size_t len)
+{
+  this->_consume(len);
   this->_stream.on_read();
-  return ret;
 }

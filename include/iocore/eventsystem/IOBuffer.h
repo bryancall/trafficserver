@@ -2,7 +2,7 @@
 
   I/O classes
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -1036,19 +1036,22 @@ public:
   char *
   buf_end()
   {
-    return first_write_block()->buf_end();
+    IOBufferBlock *b = first_write_block();
+    return b ? b->buf_end() : nullptr;
   }
 
   char *
   start()
   {
-    return first_write_block()->start();
+    IOBufferBlock *b = first_write_block();
+    return b ? b->start() : nullptr;
   }
 
   char *
   end()
   {
-    return first_write_block()->end();
+    IOBufferBlock *b = first_write_block();
+    return b ? b->end() : nullptr;
   }
 
   /**

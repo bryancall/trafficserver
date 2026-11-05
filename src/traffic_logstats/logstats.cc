@@ -3,7 +3,7 @@
   This is a command line tool that reads an ATS log in the squid
   binary log format, and produces meaningful metrics per property.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -22,12 +22,15 @@
   limitations under the License.
  */
 
+#include <cstdio>
+
 #include "tscore/ink_platform.h"
 #include "tscore/ink_file.h"
 #include "tscore/Layout.h"
 #include "tscore/Version.h"
 #include "tscore/HashFNV.h"
 #include "tscore/ink_args.h"
+#include "tscore/Demangle.h"
 #include "tscore/MatcherUtils.h"
 #include "tscore/runroot.h"
 
@@ -450,6 +453,7 @@ public:
       case SquidLogCode::ERR_INVALID_REQ:
       case SquidLogCode::ERR_UNKNOWN:
       case SquidLogCode::ERR_READ_TIMEOUT:
+      case SquidLogCode::ERR_TUN_ACTIVE_TIMEOUT:
         ++(l->errors);
         break;
       default:
@@ -527,6 +531,7 @@ public:
       case SquidLogCode::ERR_INVALID_REQ:
       case SquidLogCode::ERR_UNKNOWN:
       case SquidLogCode::ERR_READ_TIMEOUT:
+      case SquidLogCode::ERR_TUN_ACTIVE_TIMEOUT:
         l->errors = 1;
         break;
       default:
@@ -603,7 +608,6 @@ OriginStats   totals;
 OriginStorage origins;
 OriginSet    *origin_set;
 UrlLru       *urls;
-int           parse_errors;
 
 // Command line arguments (parsing)
 struct CommandLineArgs {
@@ -1761,9 +1765,6 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
 
       case P_STATE_END:
         // Nothing to do really
-        if (flag) {
-          parse_errors++;
-        }
         break;
       }
     }
@@ -1806,7 +1807,7 @@ process_file(int in_fd, off_t offset, unsigned max_age)
           return 0;
         }
         // ensure that this is a valid logbuffer header
-        if (header->cookie && (LOG_SEGMENT_COOKIE == header->cookie)) {
+        if (LOG_SEGMENT_COOKIE == header->cookie) {
           offset = 0;
           break;
         }
@@ -1829,12 +1830,15 @@ process_file(int in_fd, off_t offset, unsigned max_age)
     }
 
     Dbg(dbg_ctl_logstats, "LogBuffer version %d, current = %d", header->version, LOG_SEGMENT_VERSION);
-    if (header->version != LOG_SEGMENT_VERSION) {
+    size_t header_size = log_buffer_header_size(header->version);
+    if (header_size == 0) {
+      Dbg(dbg_ctl_logstats, "Unsupported LogBuffer version %d (supported %d-%d)", header->version,
+          LOG_SEGMENT_VERSION_MIN_SUPPORTED, LOG_SEGMENT_VERSION);
       return 1;
     }
 
-    // read the rest of the header
-    unsigned second_read_size = sizeof(LogBufferHeader) - first_read_size;
+    // read the rest of the header (sized to the on-disk version, not sizeof)
+    unsigned second_read_size = header_size - first_read_size;
     nread                     = read(in_fd, &buffer[first_read_size], second_read_size);
     if (!nread || EOF == nread) {
       Dbg(dbg_ctl_logstats, "Second read of header failed (attempted %d bytes at offset %d, got nothing), errno=%d.",
@@ -1848,8 +1852,15 @@ process_file(int in_fd, off_t offset, unsigned max_age)
       return 1;
     }
 
-    buffer_bytes = header->byte_count - sizeof(LogBufferHeader);
-    if (buffer_bytes <= 0 || (unsigned int)buffer_bytes > (sizeof(buffer) - sizeof(LogBufferHeader))) {
+    // Guard the unsigned subtraction: a corrupt segment whose byte_count is
+    // smaller than its own header would otherwise wrap to a huge payload size.
+    if (header->byte_count < header_size) {
+      Dbg(dbg_ctl_logstats, "Header byte count [%d] < header size [%zu]", header->byte_count, header_size);
+      return 1;
+    }
+
+    buffer_bytes = header->byte_count - header_size;
+    if (buffer_bytes <= 0 || (unsigned int)buffer_bytes > (sizeof(buffer) - header_size)) {
       Dbg(dbg_ctl_logstats, "Buffer payload [%d] is wrong.", buffer_bytes);
       return 1;
     }
@@ -1858,7 +1869,7 @@ process_file(int in_fd, off_t offset, unsigned max_age)
     int       total_read           = 0;
     int       read_tries_remaining = MAX_READ_TRIES; // since the data will be old anyway, let's only try a few times.
     do {
-      nread = read(in_fd, &buffer[sizeof(LogBufferHeader) + total_read], buffer_bytes - total_read);
+      nread = read(in_fd, &buffer[header_size + total_read], buffer_bytes - total_read);
       if (EOF == nread || !nread) { // just bail on error
         Dbg(dbg_ctl_logstats, "Read failed while reading log buffer, wanted %d bytes, nread=%d, errno=%d",
             buffer_bytes - total_read, nread, errno);
@@ -2443,7 +2454,7 @@ open_main_log(ExitStatus &status)
 // main
 int
 main(int /* argc ATS_UNUSED */, const char *argv[])
-{
+try {
   ExitStatus   exit_status;
   int          res, cnt;
   int          main_fd;
@@ -2460,8 +2471,7 @@ main(int /* argc ATS_UNUSED */, const char *argv[])
   memset(&totals, 0, sizeof(totals));
   init_elapsed(&totals);
 
-  origin_set   = new OriginSet;
-  parse_errors = 0;
+  origin_set = new OriginSet;
 
   // Command line parsing
   cl.parse_arguments(argv);
@@ -2742,4 +2752,9 @@ main(int /* argc ATS_UNUSED */, const char *argv[])
     exit_status.append(" OK");
   }
   my_exit(exit_status);
+} catch (...) {
+  // EXIT_UNKNOWN, not 1: 1 is EXIT_WARNING here, and an unhandled exception is
+  // not a warning. Nagios-style wrappers read stdout, so the status goes there.
+  printf("unknown: traffic_logstats terminating on an unhandled %s\n", ts::describe_current_exception().c_str());
+  return EXIT_UNKNOWN;
 }

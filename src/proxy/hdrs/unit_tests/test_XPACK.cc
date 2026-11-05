@@ -29,7 +29,8 @@
 #include "proxy/hdrs/XPACK.h"
 #include "proxy/hdrs/HuffmanCodec.h"
 
-static constexpr int BUFSIZE_FOR_REGRESSION_TEST = 128;
+static constexpr int      BUFSIZE_FOR_REGRESSION_TEST = 128;
+static constexpr uint64_t MAX_FIELD_SIZE              = 32768;
 
 std::string
 get_long_string(int size)
@@ -65,7 +66,7 @@ TEST_CASE("XPACK_Integer", "[xpack]")
 
       REQUIRE(len > 0);
       REQUIRE(len == i.encoded_field_len);
-      REQUIRE(memcmp(buf, i.encoded_field, len) == 0);
+      REQUIRE(memcmp(buf, i.encoded_field, static_cast<size_t>(i.encoded_field_len)) == 0);
     }
   }
 
@@ -78,6 +79,24 @@ TEST_CASE("XPACK_Integer", "[xpack]")
       REQUIRE(len == i.encoded_field_len);
       REQUIRE(actual == i.raw_integer);
     }
+  }
+
+  SECTION("Decoding rejects integer overflow")
+  {
+    const uint8_t encoded_field[] = {0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01};
+    uint64_t      actual          = 0;
+    int64_t       len             = xpack_decode_integer(actual, encoded_field, encoded_field + sizeof(encoded_field), 5);
+
+    REQUIRE(len == XPACK_ERROR_COMPRESSION_ERROR);
+  }
+
+  SECTION("Decoding rejects overlong integer encodings")
+  {
+    const uint8_t encoded_field[] = {0x1f, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00};
+    uint64_t      actual          = 0;
+    int64_t       len             = xpack_decode_integer(actual, encoded_field, encoded_field + sizeof(encoded_field), 5);
+
+    REQUIRE(len == XPACK_ERROR_COMPRESSION_ERROR);
   }
 }
 
@@ -105,11 +124,14 @@ TEST_CASE("XPACK_String", "[xpack]")
     {(char *)"cw Times New Roman_σ=1", 23,
      (uint8_t *)"\x95"
                 "\x27\x85\x37\x9a\x92\xa1\x4d\x25\xf0\xa6\xd3\xd2\x3a\xa2\xff\xff\xf6\xff\xff\x44\x01", 22},
+    {(char *)"\xff\xff\xff\xff",        4,
+     (uint8_t *)"\x04"
+                "\xff\xff\xff\xff",                                                                     5 },
   };
 
   SECTION("Encoding")
   {
-    // FIXME Current encoder support only huffman conding.
+    // FIXME Current encoder support only huffman coding.
     for (unsigned int i = 2; i < sizeof(string_test_case) / sizeof(string_test_case[0]); i++) {
       uint8_t buf[BUFSIZE_FOR_REGRESSION_TEST] = {0};
       int64_t len = xpack_encode_string(buf, buf + BUFSIZE_FOR_REGRESSION_TEST, string_test_case[i].raw_string,
@@ -117,7 +139,7 @@ TEST_CASE("XPACK_String", "[xpack]")
 
       REQUIRE(len > 0);
       REQUIRE(len == string_test_case[i].encoded_field_len);
-      REQUIRE(memcmp(buf, string_test_case[i].encoded_field, len) == 0);
+      REQUIRE(memcmp(buf, string_test_case[i].encoded_field, static_cast<size_t>(string_test_case[i].encoded_field_len)) == 0);
     }
   }
 
@@ -127,11 +149,155 @@ TEST_CASE("XPACK_String", "[xpack]")
       Arena    arena;
       char    *actual     = nullptr;
       uint64_t actual_len = 0;
-      int      len        = xpack_decode_string(arena, &actual, actual_len, i.encoded_field, i.encoded_field + i.encoded_field_len);
+      int      len =
+        xpack_decode_string(arena, &actual, actual_len, i.encoded_field, i.encoded_field + i.encoded_field_len, MAX_FIELD_SIZE);
 
       REQUIRE(len == i.encoded_field_len);
       REQUIRE(actual_len == i.raw_string_len);
-      REQUIRE(memcmp(actual, i.raw_string, actual_len) == 0);
+      REQUIRE(memcmp(actual, i.raw_string, i.raw_string_len) == 0);
+    }
+  }
+
+  SECTION("failed huffman decoding releases the temporary area")
+  {
+    // 0x88 is the huffman flag plus a length of 8. An all-ones payload is not a
+    // decodable huffman sequence, so huffman_decode() fails after the temporary
+    // area has already been allocated out of the arena.
+    uint8_t bad_huffman[]   = "\x88\xff\xff\xff\xff\xff\xff\xff\xff";
+    int     bad_huffman_len = 9;
+
+    Arena arena;
+
+    // Arena::free() walks the block list with `while (b->next)`, so it never
+    // inspects the last block. Put the arena past its first block, otherwise
+    // nothing can be observed to rewind at all.
+    for (int i = 0; i < 40; ++i) {
+      arena.str_alloc(64);
+    }
+
+    // Arena has no water level accessor, so use the address str_alloc() hands
+    // back as the proxy for it.
+    char *baseline = arena.str_alloc(1);
+    arena.str_free(baseline);
+
+    for (int i = 0; i < 100; ++i) {
+      char    *actual     = nullptr;
+      uint64_t actual_len = 0;
+      int      len = xpack_decode_string(arena, &actual, actual_len, bad_huffman, bad_huffman + bad_huffman_len, MAX_FIELD_SIZE);
+
+      REQUIRE(len == XPACK_ERROR_COMPRESSION_ERROR);
+    }
+
+    // Had the failed decodes left their temporary areas outstanding, the water
+    // level would have advanced once per failure and this would not match.
+    // Compared as void * so a mismatch is reported as an address.
+    REQUIRE(static_cast<void *>(arena.str_alloc(1)) == static_cast<void *>(baseline));
+  }
+
+  SECTION("outputs are written only on success")
+  {
+    uint8_t bad_huffman[]   = "\x88\xff\xff\xff\xff\xff\xff\xff\xff";
+    int     bad_huffman_len = 9;
+    // The length prefix announces ten octets but only four follow.
+    uint8_t truncated[]   = {0x0a, 'c', 'u', 's', 't'};
+    int     truncated_len = 5;
+
+    Arena    arena;
+    char     sentinel   = '\0';
+    char    *actual     = &sentinel;
+    uint64_t actual_len = 42;
+
+    // Fails after the temporary area was allocated out of the arena ...
+    REQUIRE(xpack_decode_string(arena, &actual, actual_len, bad_huffman, bad_huffman + bad_huffman_len, MAX_FIELD_SIZE) ==
+            XPACK_ERROR_COMPRESSION_ERROR);
+    CHECK(static_cast<void *>(actual) == static_cast<void *>(&sentinel));
+    CHECK(actual_len == 42);
+
+    // ... and before anything was allocated.
+    REQUIRE(xpack_decode_string(arena, &actual, actual_len, truncated, truncated + truncated_len, MAX_FIELD_SIZE) ==
+            XPACK_ERROR_COMPRESSION_ERROR);
+    CHECK(static_cast<void *>(actual) == static_cast<void *>(&sentinel));
+    CHECK(actual_len == 42);
+  }
+
+  SECTION("max_string_len enforcement")
+  {
+    // "custom-key" (10 bytes), non-huffman encoded: length byte 0x0a + raw string
+    uint8_t encoded[]   = "\x0a"
+                          "custom-key";
+    int     encoded_len = 11;
+
+    SECTION("exact limit allows decoding")
+    {
+      Arena    arena;
+      char    *actual     = nullptr;
+      uint64_t actual_len = 0;
+      int      len        = xpack_decode_string(arena, &actual, actual_len, encoded, encoded + encoded_len, 10);
+
+      REQUIRE(len == encoded_len);
+      REQUIRE(actual_len == 10);
+      REQUIRE(memcmp(actual, "custom-key", 10) == 0);
+    }
+
+    SECTION("limit below string length rejects")
+    {
+      Arena    arena;
+      char    *actual     = nullptr;
+      uint64_t actual_len = 0;
+      int      len        = xpack_decode_string(arena, &actual, actual_len, encoded, encoded + encoded_len, 9);
+
+      REQUIRE(len == XPACK_ERROR_COMPRESSION_ERROR);
+    }
+
+    SECTION("zero limit rejects non-empty string")
+    {
+      Arena    arena;
+      char    *actual     = nullptr;
+      uint64_t actual_len = 0;
+      int      len        = xpack_decode_string(arena, &actual, actual_len, encoded, encoded + encoded_len, 0);
+
+      REQUIRE(len == XPACK_ERROR_COMPRESSION_ERROR);
+    }
+
+    SECTION("huffman-encoded string checked against limit")
+    {
+      // "custom-key" huffman-encoded: 0x88 (huffman flag + length 8) + 8 bytes
+      uint8_t huff_encoded[]   = "\x88\x25\xa8\x49\xe9\x5b\xa9\x7d\x7f";
+      int     huff_encoded_len = 9;
+
+      SECTION("limit above encoded length allows")
+      {
+        Arena    arena;
+        char    *actual     = nullptr;
+        uint64_t actual_len = 0;
+        int      len        = xpack_decode_string(arena, &actual, actual_len, huff_encoded, huff_encoded + huff_encoded_len, 8);
+
+        REQUIRE(len == huff_encoded_len);
+        REQUIRE(actual_len == 10);
+        REQUIRE(memcmp(actual, "custom-key", 10) == 0);
+      }
+
+      SECTION("limit below encoded length rejects")
+      {
+        Arena    arena;
+        char    *actual     = nullptr;
+        uint64_t actual_len = 0;
+        int      len        = xpack_decode_string(arena, &actual, actual_len, huff_encoded, huff_encoded + huff_encoded_len, 7);
+
+        REQUIRE(len == XPACK_ERROR_COMPRESSION_ERROR);
+      }
+    }
+
+    SECTION("empty string with any limit succeeds")
+    {
+      uint8_t  empty_encoded[] = "\x0";
+      Arena    arena;
+      char    *actual     = nullptr;
+      uint64_t actual_len = 0;
+      int      len        = xpack_decode_string(arena, &actual, actual_len, empty_encoded, empty_encoded + 1, 0);
+
+      REQUIRE(len == 1);
+      REQUIRE(actual_len == 0);
     }
   }
 
@@ -146,6 +312,20 @@ TEST_CASE("XPACK_String", "[xpack]")
     REQUIRE(dt.count() == 0);
     result = dt.lookup("", "");
     REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
+    REQUIRE(result.index == 0);
+    result = dt.lookup_relative("", "");
+    REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
+    REQUIRE(result.index == 0);
+
+    // There is no head entry to count a relative index back from.
+    const char *name      = nullptr;
+    size_t      name_len  = 0;
+    const char *value     = nullptr;
+    size_t      value_len = 0;
+
+    result = dt.lookup_relative(0, &name, &name_len, &value, &value_len);
+    REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
+    REQUIRE(result.index == 0);
   }
 
   SECTION("Dynamic Table")
@@ -173,6 +353,9 @@ TEST_CASE("XPACK_String", "[xpack]")
     REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
     result = dt.lookup(MAX_SIZE + 1, &name, &name_len, &value, &value_len);
     REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
+    result = dt.lookup_relative("missing", "value");
+    REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
+    REQUIRE(result.index == 0);
 
     // Insert one entry
     dt.insert_entry("name1", "value1");
@@ -188,6 +371,9 @@ TEST_CASE("XPACK_String", "[xpack]")
     REQUIRE(memcmp(value, "value1", value_len) == 0);
     result = dt.lookup(dt.largest_index() + 1, &name, &name_len, &value, &value_len);
     REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
+    result = dt.lookup_relative("missing", "value1");
+    REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
+    REQUIRE(result.index == 0);
 
     result = dt.lookup(MAX_SIZE - 1, &name, &name_len, &value, &value_len);
     REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
@@ -228,6 +414,17 @@ TEST_CASE("XPACK_String", "[xpack]")
     REQUIRE(memcmp(name, "name1", name_len) == 0);
     REQUIRE(value_len == strlen("value1"));
     REQUIRE(memcmp(value, "value1", value_len) == 0);
+    result = dt.lookup_relative(dt.count(), &name, &name_len, &value, &value_len);
+    REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
+    result = dt.lookup_relative("name2", "value2");
+    REQUIRE(result.match_type == XpackLookupResult::MatchType::EXACT);
+    REQUIRE(result.index == 0);
+    result = dt.lookup_relative("name1", "value1");
+    REQUIRE(result.match_type == XpackLookupResult::MatchType::EXACT);
+    REQUIRE(result.index == 1);
+    result = dt.lookup_relative("missing", "value2");
+    REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
+    REQUIRE(result.index == 0);
     result = dt.lookup(MAX_SIZE - 1, &name, &name_len, &value, &value_len);
     REQUIRE(result.match_type == XpackLookupResult::MatchType::NONE);
     result = dt.lookup(MAX_SIZE, &name, &name_len, &value, &value_len);
@@ -380,12 +577,17 @@ TEST_CASE("XPACK_String", "[xpack]")
     REQUIRE(dt.is_empty());
     REQUIRE(dt.count() == 0);
 
-    // Test to insert 10k random size entries
+    // Test to insert 10k random size entries. The sizes only have to vary, so
+    // weak randomness is sufficient here.
     for (int i = 0; i < 10000; i++) {
-      int         name_size  = rand() % 20000;
-      int         value_size = rand() % 20000;
-      std::string name       = get_long_string(name_size);
-      std::string value      = get_long_string(value_size);
+      // coverity[dont_call]
+      int name_size = rand() % 20000;
+      // coverity[dont_call]
+      int value_size = rand() % 20000;
+
+      std::string name  = get_long_string(name_size);
+      std::string value = get_long_string(value_size);
+
       dt.insert_entry(name, value);
     }
   }

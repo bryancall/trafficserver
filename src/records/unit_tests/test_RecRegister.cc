@@ -22,7 +22,12 @@
 #include "iocore/eventsystem/EventSystem.h"
 #include "iocore/eventsystem/RecProcess.h"
 #include "tscore/Layout.h"
+#include "tsutil/Metrics.h"
 #include "test_Diags.h"
+
+#include <atomic>
+#include <string>
+#include <thread>
 
 TEST_CASE("RecRegisterConfig - Type Dispatch", "[librecords][RecConfig]")
 {
@@ -86,4 +91,34 @@ TEST_CASE("RecRegisterStat - Type Dispatch", "[librecords][RecStat]")
     RecCounter value = RecGetRecordCounter("proxy.node.test.counter").value_or(0);
     REQUIRE(value == 500);
   }
+}
+
+TEST_CASE("RecLookupRecord - Concurrent metric registration", "[librecords][RecLookup]")
+{
+  constexpr char record_name[]  = "proxy.test.concurrent.string_value";
+  constexpr char record_value[] = "stable";
+
+  REQUIRE(RecRegisterConfigString(RECT_CONFIG, record_name, record_value, RECU_DYNAMIC, RECC_NULL, nullptr, REC_SOURCE_NULL) ==
+          REC_ERR_OKAY);
+
+  std::atomic<bool> finished{false};
+  std::thread       register_metrics([&]() {
+    for (int i = 0; i < 100000; ++i) {
+      // Any registration will do; the point is to grow the store while lookups run.
+      ts::Metrics::Counter::create("proxy.test.concurrent.reg." + std::to_string(i));
+    }
+    finished.store(true, std::memory_order_release);
+  });
+
+  bool all_lookups_succeeded = true;
+
+  do {
+    if (RecGetRecordStringAlloc(record_name) != record_value) {
+      all_lookups_succeeded = false;
+      break;
+    }
+  } while (!finished.load(std::memory_order_acquire));
+  register_metrics.join();
+
+  CHECK(all_lookups_succeeded);
 }

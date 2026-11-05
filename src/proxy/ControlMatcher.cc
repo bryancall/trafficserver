@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -31,6 +31,7 @@
 #include "swoc/bwf_ip.h"
 #include "swoc/swoc_file.h"
 
+#include "mgmt/config/ConfigContextDiags.h"
 #include "tscore/MatcherUtils.h"
 #include "tscore/Tokenizer.h"
 #include "proxy/ControlMatcher.h"
@@ -312,7 +313,7 @@ UrlMatcher<Data, MatchResult>::NewEntry(matcher_line *line_info)
   // Fill in the parameter info
   cur_d = data_array + num_el;
   error = cur_d->Init(line_info);
-  if (error.failed()) {
+  if (!error.failed()) {
     url_str[num_el]   = ats_strdup(pattern);
     url_value[num_el] = num_el;
     url_ht.emplace(url_str[num_el], url_value[num_el]);
@@ -423,9 +424,18 @@ RegexMatcher<Data, MatchResult>::NewEntry(matcher_line *line_info)
   ink_assert(line_info->dest_entry < MATCHER_MAX_TOKENS);
   ink_assert(pattern != nullptr);
 
-  // Create the compiled regular expression
-  regex_array[num_el].compile(pattern, error_msg, erroffset);
-  if (regex_array[num_el].empty()) {
+  // Create the compiled regular expression. Name the directive, file and line rather
+  // than just the module: cache.config, parent.config and splitdns.config share this
+  // code, and host_regex and url_regex match different subjects, so which directive it
+  // is determines the right rewrite for an unanchored pattern.
+  char const *directive = line_info->line[0][line_info->dest_entry];
+  std::string gate_label;
+
+  swoc::bwprint(gate_label, "{} {} at {}:{}", matcher_name, directive ? directive : "regex", file_name ? file_name : "unknown",
+                line_info->line_num);
+
+  // This slot can still hold a previous line's pattern, so ask compile() rather than empty().
+  if (!regex_array[num_el].compile(pattern, error_msg, erroffset, 0, gate_label)) {
     return Result::failure("%s regular expression error at line %d position %d : %s", matcher_name, line_info->line_num, erroffset,
                            error_msg.c_str());
   }
@@ -639,7 +649,8 @@ IpMatcher<Data, MatchResult>::Print() const
 }
 
 template <class Data, class MatchResult>
-ControlMatcher<Data, MatchResult>::ControlMatcher(const char *file_var, const char *name, const matcher_tags *tags, int flags_in)
+ControlMatcher<Data, MatchResult>::ControlMatcher(const char *file_var, const char *name, const matcher_tags *tags, int flags_in,
+                                                  ConfigContext ctx)
 {
   flags = flags_in;
   ink_assert(flags & (ALLOW_HOST_TABLE | ALLOW_REGEX_TABLE | ALLOW_URL_TABLE | ALLOW_IP_TABLE));
@@ -664,7 +675,7 @@ ControlMatcher<Data, MatchResult>::ControlMatcher(const char *file_var, const ch
   hrMatch   = nullptr;
 
   if (!(flags & DONT_BUILD_TABLE)) {
-    m_numEntries = this->BuildTable();
+    m_numEntries = this->BuildTable(ctx);
   } else {
     m_numEntries = 0;
   }
@@ -731,7 +742,7 @@ ControlMatcher<Data, MatchResult>::Match(RequestData *rdata, MatchResult *result
 //
 template <class Data, class MatchResult>
 int
-ControlMatcher<Data, MatchResult>::BuildTableFromString(char *file_buf)
+ControlMatcher<Data, MatchResult>::BuildTableFromString(char *file_buf, ConfigContext ctx)
 {
   // Table build locals
   Tokenizer      bufTok("\n");
@@ -776,7 +787,7 @@ ControlMatcher<Data, MatchResult>::BuildTableFromString(char *file_buf)
         if (config_tags != &socks_server_tags) {
           Result error =
             Result::failure("%s discarding %s entry at line %d : %s", matcher_name, config_file_path, line_num, errptr);
-          Error("%s", error.message());
+          CfgLoadLog(ctx, DL_Error, "%s", error.message());
         }
         ats_free(current);
       } else {
@@ -874,7 +885,7 @@ ControlMatcher<Data, MatchResult>::BuildTableFromString(char *file_buf)
 
     // Check to see if there was an error in creating the NewEntry
     if (error.failed()) {
-      Error("%s", error.message());
+      CfgLoadLog(ctx, DL_Error, "%s", error.message());
     }
 
     // Deallocate the parsing structure
@@ -893,22 +904,23 @@ ControlMatcher<Data, MatchResult>::BuildTableFromString(char *file_buf)
 
 template <class Data, class MatchResult>
 int
-ControlMatcher<Data, MatchResult>::BuildTable()
+ControlMatcher<Data, MatchResult>::BuildTable(ConfigContext ctx)
 {
   std::error_code ec;
   std::string     content{swoc::file::load(swoc::file::path{config_file_path}, ec)};
+
   if (ec) {
     switch (ec.value()) {
     case ENOENT:
-      Warning("ControlMatcher - Cannot open config file: %s - %s", config_file_path, strerror(ec.value()));
+      CfgLoadLog(ctx, DL_Warning, "ControlMatcher - Cannot open config file: %s - %s", config_file_path, strerror(ec.value()));
       break;
     default:
-      Error("ControlMatcher - %s failed to load: %s", config_file_path, strerror(ec.value()));
+      CfgLoadFail(ctx, "ControlMatcher - %s failed to load: %s", config_file_path, strerror(ec.value()));
       return 1;
     }
   }
 
-  return BuildTableFromString(content.data());
+  return BuildTableFromString(content.data(), ctx);
 }
 
 /****************************************************************

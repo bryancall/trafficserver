@@ -81,38 +81,6 @@ std::array<AddWriterBranchTest, 32> add_writer_branch_test_cases = {
    }
 };
 
-static void
-init_disk(CacheDisk &disk)
-{
-  disk.path                = static_cast<char *>(ats_malloc(1));
-  disk.path[0]             = '\0';
-  disk.disk_stripes        = static_cast<DiskStripe **>(ats_malloc(sizeof(DiskStripe *)));
-  disk.disk_stripes[0]     = nullptr;
-  disk.header              = static_cast<DiskHeader *>(ats_malloc(sizeof(DiskHeader)));
-  disk.header->num_volumes = 0;
-}
-
-/* Catch test helper to provide a StripeSM with a valid file descriptor.
- *
- * The file will be deleted automatically when the application ends normally.
- * If the StripeSM already has a valid file descriptor, that file will NOT be
- * closed.
- *
- * @param stripe: A StripeSM object with no valid file descriptor.
- * @return The std::FILE* stream if successful, otherwise the Catch test will
- *   be failed at the point of error.
- */
-static std::FILE *
-attach_tmpfile_to_stripe(StripeSM &stripe)
-{
-  auto *file{std::tmpfile()};
-  REQUIRE(file != nullptr);
-  int fd{fileno(file)};
-  REQUIRE(fd != -1);
-  stripe.fd = fd;
-  return file;
-}
-
 // We can't return a stripe from this function because the copy
 // and move constructors are deleted.
 static std::FILE *
@@ -396,4 +364,120 @@ TEST_CASE("aggWrite behavior with f.evacuator set")
   }
 
   delete[] source;
+}
+
+TEST_CASE("get_evac_bucket returns a mutable reference")
+{
+  CacheDisk disk;
+  init_disk(disk);
+  StripeSM stripe{&disk, 10, 0};
+
+  EvacuationBlock b1;
+  b1.init                 = 0;
+  b1.readers              = 0;
+  b1.earliest_evacuator   = nullptr;
+  b1.evac_frags.link.next = nullptr;
+
+  EvacuationBlock b2;
+  b2.init                 = 0;
+  b2.readers              = 0;
+  b2.earliest_evacuator   = nullptr;
+  b2.evac_frags.link.next = nullptr;
+
+  REQUIRE(stripe.evac_bucket_valid(0));
+  REQUIRE(stripe.get_evac_bucket(0).empty());
+
+  stripe.get_evac_bucket(0).push(&b1);
+  CHECK_FALSE(stripe.get_evac_bucket(0).empty());
+  CHECK(stripe.get_evac_bucket(0).head == &b1);
+
+  stripe.get_evac_bucket(0).push(&b2);
+  CHECK(stripe.get_evac_bucket(0).head == &b2);
+  CHECK(stripe.get_evac_bucket(0).head->link.next == &b1);
+}
+
+// Exposes the protected data_blocks so the test can size the stripe without a real disk.
+struct HitEvacuateWindowStripe : StripeSM {
+  using StripeSM::StripeSM;
+
+  void
+  set_data_blocks(off_t n)
+  {
+    data_blocks = n;
+  }
+};
+
+static bool
+in_hit_evacuate_window(StripeSM const &stripe, off_t offset)
+{
+  Dir dir;
+
+  dir_clear(&dir);
+  dir_set_offset(&dir, offset + 1); // within_hit_evacuate_window() subtracts 1
+  return stripe.within_hit_evacuate_window(&dir);
+}
+
+TEST_CASE("hit evacuation window is the configured share of the stripe ahead of the write cursor")
+{
+  CacheDisk disk;
+  init_disk(disk);
+  HitEvacuateWindowStripe stripe{&disk, 10, 0};
+  StripeHeaderFooter      header{};
+  int const               saved_percent = cache_config_hit_evacuate_percent;
+
+  stripe.directory.header = &header;
+  stripe.start            = 0;
+
+  off_t const store_blocks = 1000000;
+  off_t const dir_blocks   = store_blocks * (STORE_BLOCK_SIZE / CACHE_BLOCK_SIZE);
+  auto        cursor_at    = [&](off_t block) { header.write_pos = block * CACHE_BLOCK_SIZE - AGG_SIZE; };
+  auto        percent      = [&](int tenths) { return dir_blocks * tenths / 1000; };
+
+  stripe.set_data_blocks(store_blocks);
+  cache_config_hit_evacuate_percent = 10;
+  stripe.recompute_hit_evacuate_window();
+  CHECK(stripe.hit_evacuate_window == dir_blocks / 10);
+
+  SECTION("cursor in the middle of the stripe")
+  {
+    off_t const w = percent(200);
+
+    cursor_at(w);
+    CHECK(in_hit_evacuate_window(stripe, w));
+    CHECK(in_hit_evacuate_window(stripe, w + percent(90)));
+    CHECK_FALSE(in_hit_evacuate_window(stripe, w + percent(110)));
+    CHECK_FALSE(in_hit_evacuate_window(stripe, w - percent(50)));
+    CHECK_FALSE(in_hit_evacuate_window(stripe, w - percent(59)));
+  }
+
+  SECTION("window wraps past the end of the stripe")
+  {
+    off_t const w = percent(970);
+
+    cursor_at(w);
+    CHECK(in_hit_evacuate_window(stripe, w + percent(20)));
+    CHECK(in_hit_evacuate_window(stripe, w + percent(50) - dir_blocks));
+    CHECK_FALSE(in_hit_evacuate_window(stripe, w + percent(110) - dir_blocks));
+    CHECK_FALSE(in_hit_evacuate_window(stripe, w - percent(50)));
+  }
+
+  SECTION("window of a multi-TiB stripe does not overflow")
+  {
+    off_t const big_store_blocks = off_t{10} * 1024 * 1024 * 1024 * 1024 / STORE_BLOCK_SIZE;
+
+    stripe.set_data_blocks(big_store_blocks);
+    stripe.recompute_hit_evacuate_window();
+    CHECK(stripe.hit_evacuate_window == big_store_blocks * (STORE_BLOCK_SIZE / CACHE_BLOCK_SIZE) / 10);
+    CHECK(stripe.hit_evacuate_window > INT32_MAX);
+  }
+
+  SECTION("0 percent disables hit evacuation")
+  {
+    cache_config_hit_evacuate_percent = 0;
+    stripe.recompute_hit_evacuate_window();
+    cursor_at(percent(200));
+    CHECK_FALSE(in_hit_evacuate_window(stripe, percent(200) + 1));
+  }
+
+  cache_config_hit_evacuate_percent = saved_percent;
 }
