@@ -230,6 +230,12 @@ HttpCacheSM::state_cache_open_write(int event, void *data)
     break;
 
   case CACHE_EVENT_OPEN_WRITE_FAILED: {
+    if (fail_write_at_once) {
+      Dbg(dbg_ctl_http_cache, "[%" PRId64 "] [state_cache_open_write] cache open write failure, not retrying", master_sm->sm_id);
+      err_code = reinterpret_cast<intptr_t>(data);
+      master_sm->handleEvent(event, &captive_action);
+      break;
+    }
     if (is_read_retry_write_fail_action(master_sm->t_state.txn_conf->cache_open_write_fail_action)) {
       // fall back to open_read_tries
       // Note that when READ_RETRY actions are configured, max_cache_open_write_retries

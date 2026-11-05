@@ -17,8 +17,9 @@
 # With defer_write_on_miss on, every miss goes to the origin before taking the
 # cache write lock. A cacheable response is then stored and the next request
 # hits; a no-store response is not stored; a miss that loses the lock after
-# its response arrived serves that response uncached, and the URL is stored
-# by the next miss instead. The sessions run one after another.
+# its response arrived serves that response uncached instead of the 502 its
+# open write fail action asks for on a miss, and the URL is stored by the next
+# miss instead. The sessions run one after another.
 
 meta:
   version: "1.0"
@@ -42,6 +43,7 @@ urtest:
       proxy.config.diags.debug.enabled: 1
       proxy.config.diags.debug.tags: 'http_trans|http_cache'
       proxy.config.http.cache.defer_write_on_miss: 1
+      proxy.config.http.cache.open_write_fail_action: 1
     remap_config:
       - from: "http://example.com/"
         to: "http://127.0.0.1:{SERVER_HTTP_PORT}/"
@@ -49,7 +51,7 @@ urtest:
           - name: header_rewrite.so
             args: ['cache-write-lock-fail-write.conf']
 
-    # Deferred: both /cacheable misses are one (the second is a hit), both
+    # Deferred: the /cacheable miss (the second request is a hit), both
     # /nostore requests, and both /lost misses. The first /lost miss is denied
     # the lock by the X-Fail-Cache-Write rule.
     metric_checks:
@@ -61,6 +63,16 @@ urtest:
       - metric: proxy.process.http.cache_hit_fresh
         value: 2
         delay: 0
+
+    log_validation:
+      traffic_out:
+        contains:
+          - expression: "deferring the cache write until the response arrives"
+            description: "Verify a miss went to the origin without the write lock"
+          - expression: "deferred cache write, response is cacheable"
+            description: "Verify the write lock was taken after a cacheable response arrived"
+          - expression: "deferred cache write, response is not cacheable"
+            description: "Verify no write lock was taken for the no-store response"
 
 sessions:
 - transactions:

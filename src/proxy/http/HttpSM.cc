@@ -5618,6 +5618,7 @@ HttpSM::do_cache_prepare_action(HttpCacheSM *c_sm, CacheHTTPInfo *object_read_in
   // migrated object. Create a new canonical-key object for compatibility reads.
   CacheHTTPInfo *write_object_read_info = CompatCacheKey::write_info(compatibility_cache_lookup, object_read_info);
 
+  c_sm->set_fail_write_at_once(t_state.transact_return_point == HttpTransact::handle_deferred_cache_write_complete);
   pending_action =
     c_sm->open_write(&key, s_url, &t_state.hdr_info.cache_request, write_object_read_info,
                      static_cast<time_t>((t_state.cache_control.pin_in_cache_for < 0) ? 0 : t_state.cache_control.pin_in_cache_for),

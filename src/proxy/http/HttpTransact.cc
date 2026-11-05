@@ -3512,9 +3512,8 @@ HttpTransact::handle_cache_write_lock_go_to_origin_continue(State *s)
 
 ///////////////////////////////////////////////////////////////////////////////
 // Name       : handle_deferred_cache_write_complete
-// Description: Called after cache write opens for deferred cache write.
-//              We already have the server response headers, so we continue
-//              with cache write handling.
+// Description: Called once a deferred miss has tried for the cache write lock
+//              with the response headers already in hand.
 //
 // Possible Next States From Here:
 // - handle_cache_operation_on_forward_server_response (if cache write succeeded)
@@ -3537,17 +3536,10 @@ HttpTransact::handle_deferred_cache_write_complete(State *s)
     return;
 
   case CacheWriteLock_t::FAIL:
-    // The response is already here, so serve it rather than apply the open write fail action.
-    TxnDbg(dbg_ctl_http_trans, "[hdcwc] cache write lock failed, continuing without cache");
-    Metrics::Counter::increment(http_rsb.cache_open_write_fail_count);
-    s->cache_info.action       = CacheAction_t::NO_ACTION;
-    s->cache_info.write_status = CacheWriteStatus_t::LOCK_MISS;
-    break;
-
   case CacheWriteLock_t::READ_RETRY:
-    // Fail actions 5 and 6 answer a lost lock with a read retry, which found nothing. The retry
-    // reset the lookup result; plugins reading it after this point expect the miss it was.
-    TxnDbg(dbg_ctl_http_trans, "[hdcwc] cache write lock failed and the read retry missed, continuing without cache");
+    // The response is already here, so serve it rather than apply the open write fail action.
+    // The late lock is not retried, so a read retry is not expected; it is treated the same.
+    TxnDbg(dbg_ctl_http_trans, "[hdcwc] cache write lock failed, continuing without cache");
     Metrics::Counter::increment(http_rsb.cache_open_write_fail_count);
     s->cache_lookup_result     = CacheLookupResult_t::MISS;
     s->cache_info.action       = CacheAction_t::NO_ACTION;
@@ -3654,7 +3646,8 @@ HttpTransact::HandleCacheOpenReadMiss(State *s)
     s->cache_info.action = CacheAction_t::NO_ACTION;
   } else if (should_defer_cache_write(s)) {
     // Go to the origin without the write lock and take it only if the response
-    // turns out to be cacheable. Concurrent misses on this key are not collapsed.
+    // turns out to be cacheable. Concurrent misses on this key are not collapsed until one of
+    // them takes the lock.
     s->cache_open_write_deferred = true;
     s->cache_info.action         = CacheAction_t::NO_ACTION;
     Metrics::Counter::increment(http_rsb.cache_open_write_deferred);
@@ -5126,7 +5119,9 @@ HttpTransact::handle_no_cache_operation_on_forward_server_response(State *s)
   TxnDbg(dbg_ctl_http_trans, "(hncoofsr)");
   TxnDbg(dbg_ctl_http_seq, "Entering handle_no_cache_operation_on_forward_server_response");
 
-  if (s->cache_open_write_deferred && s->txn_conf->cache_http) {
+  // A 505 is retried at a lower HTTP version below, and the retry's response decides instead.
+  if (s->cache_open_write_deferred && s->txn_conf->cache_http &&
+      s->hdr_info.server_response.status_get() != HTTPStatus::HTTPVER_NOT_SUPPORTED) {
     // The flag is cleared first so that a lost lock lands back here without deferring again.
     s->cache_open_write_deferred = false;
     bool cacheable               = is_response_cacheable(s, &s->hdr_info.client_request, &s->hdr_info.server_response);

@@ -649,7 +649,7 @@ static constexpr RecordElement RecordsConfig[] =
   //       #  defer_write_on_miss:
   //       #  0 - a miss takes the cache write lock before going to the origin
   //       #  1 - a miss goes to the origin first and takes the lock only for a cacheable response;
-  //       #      concurrent misses on a cacheable URL are then not collapsed
+  //       #      concurrent misses on a cacheable URL are then not collapsed until one takes the lock
   {RECT_CONFIG, "proxy.config.http.cache.defer_write_on_miss", RECD_INT, "1", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
   ,
   //       #  when_to_revalidate has 4 options:

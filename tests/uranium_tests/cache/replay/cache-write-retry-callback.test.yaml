@@ -51,6 +51,8 @@ urtest:
     records_config:
       proxy.config.diags.debug.enabled: 1
       proxy.config.diags.debug.tags: 'http_cache|http_trans'
+      # The contender has to wait on the write lock before the origin.
+      proxy.config.http.cache.defer_write_on_miss: 0
       # READ_RETRY: retry the cache read when the write lock is lost.
       proxy.config.http.cache.open_write_fail_action: 5
       proxy.config.http.cache.max_open_write_retries: 1

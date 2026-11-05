@@ -3947,13 +3947,13 @@ Dynamic Content & Content Negotiation
    :reloadable:
    :overridable:
 
-    When set to ``1``, the default, a cache miss goes to the origin without first taking the cache write
-    lock, and takes the lock only once the response headers show that the response is
-    cacheable.
+    When set to ``1``, the default, a cache miss goes to the origin without first taking the
+    cache write lock, and takes the lock only once the response headers show that the response
+    is cacheable. A miss that then loses the lock serves the response it already has, without
+    waiting and without applying :ts:cv:`proxy.config.http.cache.open_write_fail_action`.
 
     When set to ``0``, every miss takes the write lock before contacting the origin so that
-    concurrent requests for the same URL wait for one origin fetch. Set ``0`` where many
-    clients ask for the same cacheable URL at once and the origin cannot take the burst. For a URL whose responses
+    concurrent requests for the same URL wait for one origin fetch. For a URL whose responses
     cannot be stored that wait buys nothing: the losers of the lock and the requests reading
     behind the writer sleep on retry timers
     (:ts:cv:`proxy.config.http.cache.open_read_retry_time`,
@@ -3961,11 +3961,15 @@ Dynamic Content & Content Negotiation
     up or their retries run out, so under load requests for uncacheable content take turns.
 
     The cost of ``1`` is that concurrent misses for a cacheable URL are not collapsed onto one
-    origin fetch: each one fetches from the origin until the first response is in the cache.
-    A miss that takes the lock late and loses it serves the response it already has rather
-    than apply :ts:cv:`proxy.config.http.cache.open_write_fail_action`. The metric
-    ``proxy.process.http.cache_open_write_deferred`` counts the misses that went to the origin
-    without the lock.
+    origin fetch: each one fetches from the origin until one of them has taken the write lock. On a
+    miss, :ts:cv:`proxy.config.http.cache.open_write_fail_action` then does nothing; it still
+    applies to the revalidation of a stale object. A miss that arrives once a writer holds the lock
+    is still subject to the open read retries and reads behind it. Set ``0`` where many clients ask
+    for the same cacheable URL at once and the origin cannot take the burst. An override takes
+    effect when set at or before remap, as :file:`remap.config` with ``conf_remap.so`` does.
+
+    The metric ``proxy.process.http.cache_open_write_deferred`` counts the misses that skipped
+    the write lock before the origin.
 
 .. ts:cv:: CONFIG proxy.config.http.cache.open_write_fail_action INT 0
    :reloadable:
@@ -3974,7 +3978,8 @@ Dynamic Content & Content Negotiation
     This setting indicates the action taken on failing to obtain the cache open write lock on either a cache miss or a cache
     hit stale. This typically happens when there is more than one request to the same cache object simultaneously. During such
     a scenario, all but one (which goes to the origin) request is served either a stale copy or an error depending on this
-    setting.
+    setting. On a cache miss this applies only when :ts:cv:`proxy.config.http.cache.defer_write_on_miss` is ``0``; with
+    its default of ``1`` a miss does not take the lock before the origin, so the miss values below do nothing.
 
    ===== ======================================================================
    Value Description

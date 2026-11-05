@@ -103,6 +103,14 @@ public:
   HttpSM *master_sm      = nullptr;
   Action *pending_action = nullptr;
 
+  // A caller that already holds the origin response serves it whether or not it gets the
+  // write lock, so a lost lock is reported at once instead of waiting out the retries.
+  void
+  set_fail_write_at_once(bool value)
+  {
+    fail_write_at_once = value;
+  }
+
   // Function to set readwhilewrite_inprogress flag
   void
   set_readwhilewrite_inprogress(bool value)
@@ -297,9 +305,10 @@ private:
   time_t                 read_pin_in_cache = 0;
 
   // Open write parameters
-  bool       retry_write      = true;
-  int        open_write_tries = 0;
-  ink_hrtime open_write_start = 0; // overrides open_write_tries
+  bool       retry_write        = true;
+  bool       fail_write_at_once = false;
+  int        open_write_tries   = 0;
+  ink_hrtime open_write_start   = 0; // overrides open_write_tries
 
   // Common parameters
   URL         *lookup_url = nullptr;
