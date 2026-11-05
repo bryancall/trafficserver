@@ -288,6 +288,9 @@ sessions:
         data: xxx
     proxy-response:
       status: 304
+      # The replay client accepts a 200 where a 304 is expected, so the body tells them apart.
+      content:
+        verify: {value: xxx, not: contains}
 
   - client-request:
       delay: 100ms
@@ -313,6 +316,8 @@ sessions:
         data: xxx
     proxy-response:
       status: 200
+      content:
+        verify: {value: xxx, as: equal}
 
   - client-request:
       delay: 100ms
@@ -342,6 +347,9 @@ sessions:
         data: xxx
     proxy-response:
       status: 304
+      # The replay client accepts a 200 where a 304 is expected, so the body tells them apart.
+      content:
+        verify: {value: xxx, not: contains}
 
   - client-request:
       delay: 100ms
@@ -447,3 +455,6 @@ sessions:
         data: xxx
     proxy-response:
       status: 304
+      # The replay client accepts a 200 where a 304 is expected, so the body tells them apart.
+      content:
+        verify: {value: xxx, not: contains}
