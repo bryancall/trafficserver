@@ -3943,16 +3943,17 @@ Dynamic Content & Content Negotiation
     This config is ignored when :ts:cv:`proxy.config.http.cache.open_write_fail_action` is
     set to ``5`` or ``6``.
 
-.. ts:cv:: CONFIG proxy.config.http.cache.defer_write_on_miss INT 0
+.. ts:cv:: CONFIG proxy.config.http.cache.defer_write_on_miss INT 1
    :reloadable:
    :overridable:
 
-    When set to ``1``, a cache miss goes to the origin without first taking the cache write
+    When set to ``1``, the default, a cache miss goes to the origin without first taking the cache write
     lock, and takes the lock only once the response headers show that the response is
     cacheable.
 
     When set to ``0``, every miss takes the write lock before contacting the origin so that
-    concurrent requests for the same URL wait for one origin fetch. For a URL whose responses
+    concurrent requests for the same URL wait for one origin fetch. Set ``0`` where many
+    clients ask for the same cacheable URL at once and the origin cannot take the burst. For a URL whose responses
     cannot be stored that wait buys nothing: the losers of the lock and the requests reading
     behind the writer sleep on retry timers
     (:ts:cv:`proxy.config.http.cache.open_read_retry_time`,

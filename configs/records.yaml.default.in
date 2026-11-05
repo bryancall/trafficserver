@@ -87,7 +87,7 @@ records:
       when_to_revalidate: 0
 
 # https://docs.trafficserver.apache.org/en/latest/admin-guide/files/records.yaml.en.html#proxy-config-http-cache-defer-write-on-miss
-      defer_write_on_miss: 0
+      defer_write_on_miss: 1
 
 ##############################################################################
 # Origin server connect attempts. Docs:

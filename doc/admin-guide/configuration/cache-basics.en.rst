@@ -883,19 +883,19 @@ allowed to go to origin without artificial delay. When enabled, you will try
 Uncacheable Objects
 -------------------
 
-Every cache miss takes a write lock on the object before it contacts the origin,
-so that the requests behind it can wait for one fetch instead of each making
-their own. When the origin's response cannot be stored, that wait buys nothing:
-the first request gives the lock up once the response headers arrive, and until
-then the requests behind it sleep on the retry timers above and on
+With :ts:cv:`proxy.config.http.cache.defer_write_on_miss` set to ``0``, every
+cache miss takes a write lock on the object before it contacts the origin, so
+that the requests behind it can wait for one fetch instead of each making their
+own. When the origin's response cannot be stored, that wait buys nothing: the
+first request gives the lock up once the response headers arrive, and until then
+the requests behind it sleep on the retry timers above and on
 :ts:cv:`proxy.config.cache.read_while_writer_retry.delay`. Under load, requests
 for an uncacheable object effectively take turns.
 
-:ts:cv:`proxy.config.http.cache.defer_write_on_miss` sends every miss to the
-origin first and takes the write lock only for a response that can be stored.
-Uncacheable objects then cost what they cost with the cache off, and concurrent
-misses on a cacheable object each go to the origin until the first response is
-stored.
+The default, ``1``, sends every miss to the origin first and takes the write
+lock only for a response that can be stored. Uncacheable objects then cost what
+they cost with the cache off. The price is that concurrent misses on a cacheable
+object each go to the origin until one of them has taken the write lock.
 
 Open Write Fail Action
 ----------------------

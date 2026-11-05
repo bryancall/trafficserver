@@ -643,7 +643,7 @@ struct OverridableHttpConfigParams {
   MgmtByte cache_open_write_fail_action = 0;
 
   // Every miss goes to the origin before taking the cache write lock.
-  MgmtByte cache_defer_write_on_miss = 0;
+  MgmtByte cache_defer_write_on_miss = 1;
 
   ////////////////////////
   // Check Post request //
