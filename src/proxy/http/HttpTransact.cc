@@ -3536,31 +3536,33 @@ HttpTransact::handle_deferred_cache_write_complete(State *s)
     return;
 
   case CacheWriteLock_t::FAIL:
-  case CacheWriteLock_t::READ_RETRY:
     // The response is already here, so serve it rather than apply the open write fail action.
-    // The late lock is not retried, so a read retry is not expected; it is treated the same.
+    // The cached-response path answers the client's preconditions, which the origin did not
+    // see, and drops the write once the lock state shows it was lost.
     TxnDbg(dbg_ctl_http_trans, "[hdcwc] cache write lock failed, continuing without cache");
     Metrics::Counter::increment(http_rsb.cache_open_write_fail_count);
-    s->cache_lookup_result     = CacheLookupResult_t::MISS;
-    s->cache_info.action       = CacheAction_t::NO_ACTION;
     s->cache_info.write_status = CacheWriteStatus_t::LOCK_MISS;
-    break;
+    s->cache_info.action       = CacheAction_t::WRITE;
+    handle_cache_operation_on_forward_server_response(s);
+    ink_release_assert(s->cache_info.action != CacheAction_t::WRITE);
+    return;
 
+  case CacheWriteLock_t::READ_RETRY:
   case CacheWriteLock_t::INIT:
   default:
+    // The late lock is never retried, so it can only have been taken or lost.
     ink_release_assert(0);
     break;
   }
-
-  handle_no_cache_operation_on_forward_server_response(s);
 }
 
 /** Whether a miss should fetch from the origin before taking the cache write lock.
 
     A transaction that already holds the lock, as a followed redirect can, keeps using it. A
-    remap or plugin that sets its own open write fail action or open read retries wants misses
-    to wait on one another, which needs the lock first, so the global setting gives way to it.
-    A defer setting that differs from the global one was set the same way and is followed.
+    remap or plugin that sets its own miss fail action or open read retries wants misses to wait
+    on one another, which needs the lock first, so the global setting gives way to it. A defer
+    setting that differs from the global one was set the same way and is followed. One equal to
+    the global value cannot be told apart from it, so it does not outrank the other two.
  */
 bool
 HttpTransact::should_defer_cache_write(State *s)
@@ -3576,8 +3578,8 @@ HttpTransact::should_defer_cache_write(State *s)
   if (!txn.cache_defer_write_on_miss) {
     return false;
   }
-  bool const own_fail_action =
-    txn.cache_open_write_fail_action != global.cache_open_write_fail_action && txn.cache_open_write_fail_action != 0;
+  bool const own_fail_action = txn.cache_open_write_fail_action != global.cache_open_write_fail_action &&
+                               is_miss_write_fail_action(txn.cache_open_write_fail_action);
   bool const own_read_retries =
     txn.max_cache_open_read_retries != global.max_cache_open_read_retries && txn.max_cache_open_read_retries > 0;
   return !own_fail_action && !own_read_retries;
@@ -4917,7 +4919,8 @@ HttpTransact::handle_cache_operation_on_forward_server_response(State *s)
       }
 
     } else if (s->cache_info.action == CacheAction_t::WRITE) {
-      if (!cacheable) {
+      // A deferred miss that lost its late write lock comes here with nothing to write.
+      if (!cacheable || s->cache_info.write_lock_state == CacheWriteLock_t::FAIL) {
         s->cache_info.action = CacheAction_t::NO_ACTION;
       } else if (s->method == HTTP_WKSIDX_HEAD) {
         s->cache_info.action = CacheAction_t::NO_ACTION;
@@ -5137,7 +5140,8 @@ HttpTransact::handle_no_cache_operation_on_forward_server_response(State *s)
   TxnDbg(dbg_ctl_http_trans, "(hncoofsr)");
   TxnDbg(dbg_ctl_http_seq, "Entering handle_no_cache_operation_on_forward_server_response");
 
-  // A 505 is retried at a lower HTTP version below, and the retry's response decides instead.
+  // A 505 that can be downgraded is retried at a lower HTTP version below, and the retry's
+  // response decides instead.
   if (s->cache_open_write_deferred && s->txn_conf->cache_http &&
       s->hdr_info.server_response.status_get() != HTTPStatus::HTTPVER_NOT_SUPPORTED) {
     // The flag is cleared first so that a lost lock lands back here without deferring again.
@@ -5150,11 +5154,11 @@ HttpTransact::handle_no_cache_operation_on_forward_server_response(State *s)
       s->cache_info.write_lock_state = CacheWriteLock_t::INIT;
       TRANSACT_RETURN(StateMachineAction_t::CACHE_ISSUE_WRITE, handle_deferred_cache_write_complete);
     }
-    // The client's preconditions were not sent to the origin, so they are answered here, on the
-    // path a miss that held the lock takes; it drops the write for an uncacheable response.
+    // The client's preconditions may not have been sent to the origin, so they are answered on
+    // the path a miss that held the lock takes; it drops the write for an uncacheable response.
     s->cache_info.action = CacheAction_t::WRITE;
     handle_cache_operation_on_forward_server_response(s);
-    ink_assert(s->cache_info.action != CacheAction_t::WRITE);
+    ink_release_assert(s->cache_info.action != CacheAction_t::WRITE);
     return;
   }
 

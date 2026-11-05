@@ -3924,6 +3924,7 @@ Dynamic Content & Content Negotiation
    :overridable:
 
     The number of times to attempt fetching an object from cache if there was an equivalent request in flight.
+    How this interacts with :ts:cv:`proxy.config.http.cache.defer_write_on_miss` is described under that setting.
 
 .. ts:cv:: CONFIG proxy.config.http.cache.max_open_write_retries INT 1
    :reloadable:
@@ -3961,18 +3962,27 @@ Dynamic Content & Content Negotiation
     up or their retries run out, so under load requests for uncacheable content take turns.
 
     The cost of ``1`` is that concurrent misses for a cacheable URL are not collapsed onto one
-    origin fetch: each one fetches from the origin until one of them has taken the write lock. On a
-    miss, a global :ts:cv:`proxy.config.http.cache.open_write_fail_action` then does nothing; it
-    still applies to the revalidation of a stale object. A miss that arrives once a writer holds the lock
-    is still subject to the open read retries and reads behind it. Set ``0`` where many clients ask
-    for the same cacheable URL at once and the origin cannot take the burst.
+    origin fetch: each one fetches from the origin until one of them has taken the write lock.
+    A global :ts:cv:`proxy.config.http.cache.open_write_fail_action` then no longer holds a miss
+    back, and :program:`traffic_server` logs a warning when it is set to a value that acts on a
+    miss; it still applies to the revalidation of a stale object. A miss that arrives once a
+    writer holds the lock is still subject to the open read retries and reads behind it. Set
+    ``0`` where many clients ask for the same cacheable URL at once and the origin cannot take
+    the burst.
 
-    A remap or plugin that sets its own nonzero
-    :ts:cv:`proxy.config.http.cache.open_write_fail_action` or positive
-    :ts:cv:`proxy.config.http.cache.max_open_read_retries`, different from the global value, asks
-    for misses to wait on one another, so its misses take the write lock first as with ``0``. A
-    value of this setting that differs from the global one is followed as set. An override takes
-    effect when set at or before remap, as :file:`remap.config` with ``conf_remap.so`` does.
+    A remap or plugin can restore the lock-first behavior for its own requests. Its misses take
+    the write lock before the origin, as with ``0``, when it sets either of these to a value
+    different from the global one:
+
+    * :ts:cv:`proxy.config.http.cache.open_write_fail_action` to ``1``, ``3``, ``4``, ``5`` or
+      ``6``, the values that act on a miss;
+    * :ts:cv:`proxy.config.http.cache.max_open_read_retries` to a positive value.
+
+    A value of this setting that differs from the global one is followed as set, whatever the
+    other two are. A value equal to the global one cannot be told apart from it, so it does not
+    keep deferral on against the two settings above. An override counts when it is set by
+    ``TS_HTTP_POST_REMAP_HOOK``, as :file:`remap.config` with ``conf_remap.so`` does; one set
+    at ``TS_HTTP_SEND_REQUEST_HDR_HOOK`` or later is too late.
 
     The metric ``proxy.process.http.cache_open_write_deferred`` counts the misses that skipped
     the write lock before the origin.
@@ -3985,8 +3995,9 @@ Dynamic Content & Content Negotiation
     hit stale. This typically happens when there is more than one request to the same cache object simultaneously. During such
     a scenario, all but one (which goes to the origin) request is served either a stale copy or an error depending on this
     setting. With :ts:cv:`proxy.config.http.cache.defer_write_on_miss` at its default of ``1``, a miss does not take the
-    lock before the origin, so the miss values below do nothing unless this setting is overridden for the remap, as
-    described there.
+    lock before the origin, so the miss values below do not hold it back. A remap or plugin that sets one of them for its
+    own requests makes its misses take the lock first; the rules are under
+    :ts:cv:`proxy.config.http.cache.defer_write_on_miss`.
 
    ===== ======================================================================
    Value Description
@@ -4005,7 +4016,9 @@ Dynamic Content & Content Negotiation
    ``4`` Return a ``502`` error on either a cache miss or on a revalidation.
    ``5`` Retry Cache Read on a Cache Write Lock failure. This option together
          with :ts:cv:`proxy.config.cache.enable_read_while_writer` configuration
-         allows to collapse concurrent requests without a need for any plugin.
+         allows to collapse concurrent requests without a need for any plugin,
+         when misses take the lock first (see
+         :ts:cv:`proxy.config.http.cache.defer_write_on_miss`).
          Make sure to configure the :ref:`admin-config-read-while-writer` feature
          correctly. With this option, CACHE_LOOKUP_COMPLETE HOOK is deferred for
          read retries so that plugins see only the final cache lookup result.

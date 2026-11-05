@@ -19,7 +19,10 @@
 # hits; a no-store response is not stored; a miss that loses the lock after
 # its response arrived serves that response uncached instead of the 502 its
 # open write fail action asks for on a miss, and the URL is stored by the next
-# miss instead. The sessions run one after another.
+# miss instead. The client's preconditions are not sent to the origin for these
+# misses, so they are answered from the origin's response, both for a no-store
+# response and for a miss that lost the lock. The sessions run one after
+# another.
 
 meta:
   version: "1.0"
@@ -50,15 +53,18 @@ urtest:
         plugins:
           - name: header_rewrite.so
             args: ['cache-write-lock-fail-write.conf']
+      - from: "http://plain.example.com/"
+        to: "http://127.0.0.1:{SERVER_HTTP_PORT}/"
 
     # Deferred: the /cacheable miss (the second request is a hit), both
-    # /nostore requests, and both /lost misses. The first /lost miss is denied
+    # /nostore requests, both /lost misses, /lost-inm, and the six
+    # precondition requests. /lost-inm and the first /lost miss are denied
     # the lock by the X-Fail-Cache-Write rule.
     metric_checks:
       - metric: proxy.process.http.cache_open_write_deferred
-        value: 5
+        value: 12
       - metric: proxy.process.http.cache_open_write_fail_count
-        value: 1
+        value: 2
         delay: 0
       - metric: proxy.process.http.cache_hit_fresh
         value: 2
@@ -247,3 +253,193 @@ sessions:
       headers:
         fields:
         - [X-Response, {value: second, as: equal}]
+
+# A no-store response to a deferred miss, with each kind of client precondition.
+- transactions:
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /pre-inm-match
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, plain.example.com]
+        - [uuid, pre-inm-match]
+        - [If-None-Match, '"v1"']
+    proxy-request:
+      headers:
+        fields:
+        - [If-None-Match, {as: absent}]
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, "3"]
+        - [Cache-Control, "no-store"]
+        - [ETag, '"v1"']
+        - [Last-Modified, "Wed, 01 Jan 2025 00:00:00 GMT"]
+      content:
+        encoding: plain
+        data: xxx
+    proxy-response:
+      status: 304
+
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /pre-inm-other
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, plain.example.com]
+        - [uuid, pre-inm-other]
+        - [If-None-Match, '"other"']
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, "3"]
+        - [Cache-Control, "no-store"]
+        - [ETag, '"v1"']
+        - [Last-Modified, "Wed, 01 Jan 2025 00:00:00 GMT"]
+      content:
+        encoding: plain
+        data: xxx
+    proxy-response:
+      status: 200
+
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /pre-ims
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, plain.example.com]
+        - [uuid, pre-ims]
+        - [If-Modified-Since, 'Thu, 01 May 2025 00:00:00 GMT']
+    proxy-request:
+      headers:
+        fields:
+        - [If-Modified-Since, {as: absent}]
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, "3"]
+        - [Cache-Control, "no-store"]
+        - [ETag, '"v1"']
+        - [Last-Modified, "Wed, 01 Jan 2025 00:00:00 GMT"]
+      content:
+        encoding: plain
+        data: xxx
+    proxy-response:
+      status: 304
+
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /pre-if-match
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, plain.example.com]
+        - [uuid, pre-if-match]
+        - [If-Match, '"other"']
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, "3"]
+        - [Cache-Control, "no-store"]
+        - [ETag, '"v1"']
+        - [Last-Modified, "Wed, 01 Jan 2025 00:00:00 GMT"]
+      content:
+        encoding: plain
+        data: xxx
+    proxy-response:
+      status: 412
+
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /pre-ius
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, plain.example.com]
+        - [uuid, pre-ius]
+        - [If-Unmodified-Since, 'Tue, 01 Oct 2024 00:00:00 GMT']
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, "3"]
+        - [Cache-Control, "no-store"]
+        - [ETag, '"v1"']
+        - [Last-Modified, "Wed, 01 Jan 2025 00:00:00 GMT"]
+      content:
+        encoding: plain
+        data: xxx
+    proxy-response:
+      status: 412
+
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /pre-404
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, plain.example.com]
+        - [uuid, pre-404]
+        - [If-None-Match, '"v1"']
+    server-response:
+      status: 404
+      reason: Not Found
+      headers:
+        fields:
+        - [Content-Length, "3"]
+        - [Cache-Control, "no-store"]
+        - [ETag, '"v1"']
+        - [Last-Modified, "Wed, 01 Jan 2025 00:00:00 GMT"]
+      content:
+        encoding: plain
+        data: xxx
+    proxy-response:
+      status: 404
+
+# A cacheable response to a deferred miss that is denied the late write lock.
+- transactions:
+  - client-request:
+      method: GET
+      url: /lost-inm
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [X-Fail-Cache-Write, "1"]
+        - [If-None-Match, '"v1"']
+        - [uuid, lost-inm]
+    proxy-request:
+      headers:
+        fields:
+        - [If-None-Match, {as: absent}]
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, "3"]
+        - [Cache-Control, "max-age=300"]
+        - [ETag, '"v1"']
+      content:
+        encoding: plain
+        data: xxx
+    proxy-response:
+      status: 304

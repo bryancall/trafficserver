@@ -435,6 +435,18 @@ is_read_retry_write_fail_action(MgmtByte action)
          action == static_cast<MgmtByte>(CacheOpenWriteFailAction_t::READ_RETRY_STALE_ON_REVALIDATE);
 }
 
+/** Whether a cache_open_write_fail_action does anything when a cache miss loses the write lock.
+ *
+ * @param[in] action A proxy.config.http.cache.open_write_fail_action value.
+ * @return Whether the action answers a miss with an error or a read retry.
+ */
+inline bool
+is_miss_write_fail_action(MgmtByte action)
+{
+  return action != static_cast<MgmtByte>(CacheOpenWriteFailAction_t::DEFAULT) &&
+         action != static_cast<MgmtByte>(CacheOpenWriteFailAction_t::STALE_ON_REVALIDATE);
+}
+
 extern HttpStatsBlock http_rsb;
 
 /////////////////////////////////////////////////////////////

@@ -856,10 +856,13 @@ this request is allowed through.
 
 .. important::
 
-    These settings are inappropriate when objects are uncacheable. In those
-    cases, requests for an object effectively become serialized. The subsequent
-    requests would await at least ``open_read_retry_time`` milliseconds before
-    being proxied to the origin.
+    These settings are inappropriate when objects are uncacheable and misses
+    take the write lock first, as they do with
+    :ts:cv:`proxy.config.http.cache.defer_write_on_miss` set to ``0`` or with
+    these settings overridden for a remap. In those cases, requests for an
+    object effectively become serialized. The subsequent requests would await
+    at least ``open_read_retry_time`` milliseconds before being proxied to the
+    origin.
 
 It is advisable that this setting be used in conjunction with `Read While Writer`_
 for big (those that take longer than (``max_open_read_retries`` x
@@ -881,7 +884,10 @@ allowed to go to origin without artificial delay. When enabled, you will try
 ``max_open_read_retries`` times, each with an ``open_read_retry_time`` timeout.
 With :ts:cv:`proxy.config.http.cache.defer_write_on_miss` at its default of
 ``1``, a miss takes the write lock only once a cacheable response has arrived,
-so these retries wait only on a writer that is already storing the object.
+so global retries wait only on a writer that is already storing the object. A
+remap or plugin that sets its own positive ``max_open_read_retries`` makes its
+misses take the write lock first, so they wait on one another as described
+above.
 
 Uncacheable Objects
 -------------------
@@ -897,7 +903,9 @@ for an uncacheable object effectively take turns.
 
 The default, ``1``, sends every miss to the origin first and takes the write
 lock only for a response that can be stored. Requests for uncacheable objects
-then skip the write lock and its waits; only the cache lookup remains. The price
+then skip the write lock and its waits; only the cache lookup remains, except on
+a remap or plugin that restores the lock-first behavior (see
+:ts:cv:`proxy.config.http.cache.defer_write_on_miss`). The price
 is that concurrent misses on a cacheable object each go to the origin until one
 of them has taken the write lock.
 
@@ -908,6 +916,8 @@ In addition to the open read retry settings TS supports a new setting
 :ts:cv:`proxy.config.http.cache.open_write_fail_action` that allows to further
 reduce multiple concurrent requests hitting the origin for the same object by
 either returning a stale copy, in case of hit-stale or an error in case of cache
-miss for all but one of the requests. The cache miss actions apply only with
-:ts:cv:`proxy.config.http.cache.defer_write_on_miss` set to ``0``, or where a
-remap sets its own fail action.
+miss for all but one of the requests. The cache miss actions apply only where
+misses take the write lock first: with
+:ts:cv:`proxy.config.http.cache.defer_write_on_miss` set to ``0``, or on a remap
+or plugin that sets its own miss action or read retries, as described under that
+setting.
