@@ -859,7 +859,7 @@ this request is allowed through.
     These settings are inappropriate when objects are uncacheable and misses
     take the write lock first, as they do with
     :ts:cv:`proxy.config.http.cache.defer_write_on_miss` set to ``0`` or with
-    these settings overridden for a remap. In those cases, requests for an
+    ``max_open_read_retries`` overridden for a remap. In those cases, requests for an
     object effectively become serialized. The subsequent requests would await
     at least ``open_read_retry_time`` milliseconds before being proxied to the
     origin.
@@ -885,8 +885,8 @@ allowed to go to origin without artificial delay. When enabled, you will try
 With :ts:cv:`proxy.config.http.cache.defer_write_on_miss` at its default of
 ``1``, a miss takes the write lock only once a cacheable response has arrived,
 so global retries wait only on a writer that is already storing the object. A
-remap or plugin that sets its own positive ``max_open_read_retries`` makes its
-misses take the write lock first, so they wait on one another as described
+remap or plugin that sets its own positive ``max_open_read_retries``, different
+from the global one, makes its misses take the write lock first, so they wait on one another as described
 above.
 
 Uncacheable Objects

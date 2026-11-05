@@ -3516,8 +3516,8 @@ HttpTransact::handle_cache_write_lock_go_to_origin_continue(State *s)
 //              with the response headers already in hand.
 //
 // Possible Next States From Here:
-// - handle_cache_operation_on_forward_server_response (if cache write succeeded)
-// - handle_no_cache_operation_on_forward_server_response (if cache write failed)
+// - handle_cache_operation_on_forward_server_response, which writes the response if the
+//   lock was taken and only answers the client's preconditions if it was lost
 //
 ///////////////////////////////////////////////////////////////////////////////
 void
@@ -3537,8 +3537,8 @@ HttpTransact::handle_deferred_cache_write_complete(State *s)
 
   case CacheWriteLock_t::FAIL:
     // The response is already here, so serve it rather than apply the open write fail action.
-    // The cached-response path answers the client's preconditions, which the origin did not
-    // see, and drops the write once the lock state shows it was lost.
+    // The cached-response path answers the client's preconditions, which may not have been
+    // sent to the origin, and drops the write once the lock state shows it was lost.
     TxnDbg(dbg_ctl_http_trans, "[hdcwc] cache write lock failed, continuing without cache");
     Metrics::Counter::increment(http_rsb.cache_open_write_fail_count);
     s->cache_info.write_status = CacheWriteStatus_t::LOCK_MISS;
@@ -3559,8 +3559,8 @@ HttpTransact::handle_deferred_cache_write_complete(State *s)
 /** Whether a miss should fetch from the origin before taking the cache write lock.
 
     A transaction that already holds the lock, as a followed redirect can, keeps using it. A
-    remap or plugin that sets its own miss fail action or open read retries wants misses to wait
-    on one another, which needs the lock first, so the global setting gives way to it. A defer
+    remap or plugin that sets its own miss fail action or positive open read retries wants misses
+    to wait on one another, which needs the lock first, so the global setting gives way to it. A defer
     setting that differs from the global one was set the same way and is followed. One equal to
     the global value cannot be told apart from it, so it does not outrank the other two.
  */
@@ -5140,8 +5140,8 @@ HttpTransact::handle_no_cache_operation_on_forward_server_response(State *s)
   TxnDbg(dbg_ctl_http_trans, "(hncoofsr)");
   TxnDbg(dbg_ctl_http_seq, "Entering handle_no_cache_operation_on_forward_server_response");
 
-  // A 505 that can be downgraded is retried at a lower HTTP version below, and the retry's
-  // response decides instead.
+  // A 505 is left out: one that can be downgraded is retried at a lower HTTP version below and
+  // the retry's response decides, and one that cannot has nothing worth storing.
   if (s->cache_open_write_deferred && s->txn_conf->cache_http &&
       s->hdr_info.server_response.status_get() != HTTPStatus::HTTPVER_NOT_SUPPORTED) {
     // The flag is cleared first so that a lost lock lands back here without deferring again.

@@ -17,8 +17,10 @@
 # defer_write_on_miss is on unless configured off. With nothing set, a miss
 # goes to the origin before taking the cache write lock, a cacheable response
 # is still stored and served from cache, and a no-store response is not. A
-# remap that sets its own open write fail action or open read retries takes
-# the lock first instead, and still stores the response.
+# remap that sets its own miss fail action or open read retries takes the lock
+# first instead, and still stores the response. A remap that sets fail action
+# 2, which only serves stale on revalidation, still defers. With the global
+# fail action left at 0 there is no warning about it.
 
 meta:
   version: "1.0"
@@ -52,19 +54,30 @@ urtest:
         plugins:
           - name: conf_remap.so
             args: ['proxy.config.http.cache.max_open_read_retries=2']
+      - from: "http://stale-only.example.com/"
+        to: "http://127.0.0.1:{SERVER_HTTP_PORT}/"
+        plugins:
+          - name: conf_remap.so
+            args: ['proxy.config.http.cache.open_write_fail_action=2']
 
-    # Deferred: the /cacheable miss and both /nostore requests on example.com.
-    # The misses on the two overriding remaps are not, and the second request
-    # on each of the three cacheable URLs is a hit.
+    # Deferred: the /cacheable miss and both /nostore requests on example.com,
+    # and the /stale-only miss. The misses on the two overriding remaps are
+    # not, and the second request on each of the four cacheable URLs is a hit.
     metric_checks:
       - metric: proxy.process.http.cache_open_write_deferred
-        value: 3
+        value: 4
       - metric: proxy.process.http.cache_open_write_fail_count
         value: 0
         delay: 0
       - metric: proxy.process.http.cache_hit_fresh
-        value: 3
+        value: 4
         delay: 0
+
+    log_validation:
+      diags_log:
+        excludes:
+          - expression: "does not hold back a cache miss"
+            description: "Verify no fail action warning with the global fail action at 0"
 
 sessions:
 - transactions:
@@ -248,6 +261,53 @@ sessions:
         fields:
         - [Host, read-retries.example.com]
         - [uuid, read-retries-second]
+    server-response:
+      status: 400
+      reason: Bad Request
+      headers:
+        fields:
+        - [Content-Length, "0"]
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Response, {value: first, as: equal}]
+
+- transactions:
+  - client-request:
+      method: GET
+      url: /stale-only
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, stale-only.example.com]
+        - [uuid, stale-only-first]
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, "3"]
+        - [Cache-Control, "max-age=300"]
+        - [X-Response, first]
+      content:
+        encoding: plain
+        data: xxx
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Response, {value: first, as: equal}]
+
+  - client-request:
+      delay: 500ms
+      method: GET
+      url: /stale-only
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, stale-only.example.com]
+        - [uuid, stale-only-second]
     server-response:
       status: 400
       reason: Bad Request

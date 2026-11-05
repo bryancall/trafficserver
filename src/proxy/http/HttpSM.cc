@@ -2657,6 +2657,11 @@ HttpSM::state_cache_open_write(int event, void *data)
       t_state.cache_info.write_lock_state  = HttpTransact::CacheWriteLock_t::FAIL;
       break;
     }
+    // A deferred miss already has its response and serves it, so no fail action applies.
+    if (t_state.transact_return_point == HttpTransact::handle_deferred_cache_write_complete) {
+      t_state.cache_info.write_lock_state = HttpTransact::CacheWriteLock_t::FAIL;
+      break;
+    }
     if (t_state.txn_conf->cache_open_write_fail_action == static_cast<MgmtByte>(CacheOpenWriteFailAction_t::DEFAULT)) {
       t_state.cache_info.write_lock_state = HttpTransact::CacheWriteLock_t::FAIL;
       break;

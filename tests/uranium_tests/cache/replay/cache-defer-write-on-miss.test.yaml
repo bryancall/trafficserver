@@ -71,6 +71,10 @@ urtest:
         delay: 0
 
     log_validation:
+      diags_log:
+        contains:
+          - expression: "open_write_fail_action 1 does not hold back a cache miss"
+            description: "Verify the warning for a global miss fail action under deferral"
       traffic_out:
         contains:
           - expression: "deferring the cache write until the response arrives"

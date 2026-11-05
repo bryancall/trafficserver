@@ -3963,7 +3963,7 @@ Dynamic Content & Content Negotiation
 
     The cost of ``1`` is that concurrent misses for a cacheable URL are not collapsed onto one
     origin fetch: each one fetches from the origin until one of them has taken the write lock.
-    A global :ts:cv:`proxy.config.http.cache.open_write_fail_action` then no longer holds a miss
+    A global :ts:cv:`proxy.config.http.cache.open_write_fail_action` does not hold such a miss
     back, and :program:`traffic_server` logs a warning when it is set to a value that acts on a
     miss; it still applies to the revalidation of a stale object. A miss that arrives once a
     writer holds the lock is still subject to the open read retries and reads behind it. Set
@@ -3980,9 +3980,9 @@ Dynamic Content & Content Negotiation
 
     A value of this setting that differs from the global one is followed as set, whatever the
     other two are. A value equal to the global one cannot be told apart from it, so it does not
-    keep deferral on against the two settings above. An override counts when it is set by
-    ``TS_HTTP_POST_REMAP_HOOK``, as :file:`remap.config` with ``conf_remap.so`` does; one set
-    at ``TS_HTTP_SEND_REQUEST_HDR_HOOK`` or later is too late.
+    keep deferral on against the two settings above. An override set in :file:`remap.config`
+    with ``conf_remap.so`` or at ``TS_HTTP_POST_REMAP_HOOK`` counts; one set at
+    ``TS_HTTP_SEND_REQUEST_HDR_HOOK`` or later is too late.
 
     The metric ``proxy.process.http.cache_open_write_deferred`` counts the misses that skipped
     the write lock before the origin.

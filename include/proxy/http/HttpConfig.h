@@ -443,8 +443,10 @@ is_read_retry_write_fail_action(MgmtByte action)
 inline bool
 is_miss_write_fail_action(MgmtByte action)
 {
-  return action != static_cast<MgmtByte>(CacheOpenWriteFailAction_t::DEFAULT) &&
-         action != static_cast<MgmtByte>(CacheOpenWriteFailAction_t::STALE_ON_REVALIDATE);
+  return action == static_cast<MgmtByte>(CacheOpenWriteFailAction_t::ERROR_ON_MISS) ||
+         action == static_cast<MgmtByte>(CacheOpenWriteFailAction_t::ERROR_ON_MISS_STALE_ON_REVALIDATE) ||
+         action == static_cast<MgmtByte>(CacheOpenWriteFailAction_t::ERROR_ON_MISS_OR_REVALIDATE) ||
+         is_read_retry_write_fail_action(action);
 }
 
 extern HttpStatsBlock http_rsb;

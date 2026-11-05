@@ -1518,9 +1518,8 @@ HttpConfig::reconfigure()
   }
   params->oride.cache_defer_write_on_miss = m_master.oride.cache_defer_write_on_miss;
   if (params->oride.cache_defer_write_on_miss && is_miss_write_fail_action(params->oride.cache_open_write_fail_action)) {
-    Warning("proxy.config.http.cache.open_write_fail_action %d applies to a cache miss only when "
-            "proxy.config.http.cache.defer_write_on_miss is 0, because a deferred miss does not take the write lock "
-            "before the origin",
+    Warning("proxy.config.http.cache.open_write_fail_action %d does not hold back a cache miss that "
+            "proxy.config.http.cache.defer_write_on_miss sends to the origin before taking the write lock",
             params->oride.cache_open_write_fail_action);
   }
 
