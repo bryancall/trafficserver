@@ -38,6 +38,34 @@ caches by hostname, which includes browsers and curl, are unaffected. Sessions
 issued by a previous release may not resume after the upgrade and complete a
 full handshake instead. See :ref:`admin-mtls` for details.
 
+Cache Write Lock on a Miss
+--------------------------
+
+:ts:cv:`proxy.config.http.cache.defer_write_on_miss` is new and on by default. A
+cache miss now goes to the origin before taking the cache write lock, and takes
+it only once the response headers show the response can be stored. Requests for
+an uncacheable object no longer queue behind one another on the open read retry
+and read-while-writer timers.
+
+The cost is that concurrent misses for a cacheable object each go to the origin
+until one of them holds the lock. Operators who rely on request collapsing for
+misses should note the following:
+
+* A global :ts:cv:`proxy.config.http.cache.open_write_fail_action` that acts on a
+  miss (``1``, ``3``, ``4``, ``5`` or ``6``) no longer holds misses back, and
+  :program:`traffic_server` logs a warning at startup when one is set. It still
+  applies to revalidation.
+* A remap that sets its own miss fail action, or a positive
+  :ts:cv:`proxy.config.http.cache.max_open_read_retries`, keeps the earlier
+  behavior for its requests.
+* A slice plugin block request that arrives while its prefetch is still at the
+  origin makes its own origin fetch instead of reading behind it.
+* The xdebug ``X-Cache-Info`` header is absent on a miss for an uncacheable
+  object, since no cache read or write is open.
+
+Set :ts:cv:`proxy.config.http.cache.defer_write_on_miss` to ``0``, globally or
+per remap, to restore the previous behavior.
+
 API Changes
 -----------
 
