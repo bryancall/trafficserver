@@ -102,6 +102,9 @@ def configure_ats(ats_factory: ATSFactory, *, _origin: OriginServer) -> ATS:
     ats.records.update(
         {
             "proxy.config.diags.debug.enabled": 1,
+            # A client block that misses while its prefetch is at the origin reads behind the
+            # prefetch only when the prefetch took the write lock first.
+            "proxy.config.http.cache.defer_write_on_miss": 0,
             "proxy.config.diags.debug.tags": "slice|cache_range_requests|xdebug",
             "proxy.config.http.allow_half_open": 0,
             "proxy.config.log.max_secs_per_buffer": 1,

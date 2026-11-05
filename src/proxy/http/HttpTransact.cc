@@ -5150,6 +5150,12 @@ HttpTransact::handle_no_cache_operation_on_forward_server_response(State *s)
       s->cache_info.write_lock_state = CacheWriteLock_t::INIT;
       TRANSACT_RETURN(StateMachineAction_t::CACHE_ISSUE_WRITE, handle_deferred_cache_write_complete);
     }
+    // The client's preconditions were not sent to the origin, so they are answered here, on the
+    // path a miss that held the lock takes; it drops the write for an uncacheable response.
+    s->cache_info.action = CacheAction_t::WRITE;
+    handle_cache_operation_on_forward_server_response(s);
+    ink_assert(s->cache_info.action != CacheAction_t::WRITE);
+    return;
   }
 
   bool        keep_alive = s->current.server->keep_alive == HTTPKeepAlive::KEEPALIVE;

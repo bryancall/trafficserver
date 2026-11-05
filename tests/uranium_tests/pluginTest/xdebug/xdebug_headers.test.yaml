@@ -29,6 +29,9 @@ urtest:
     records_config:
       proxy.config.url_remap.remap_required: 0
       proxy.config.diags.debug.enabled: 0
+      # X-Cache-Info names the volume of the cache write a miss opens. These
+      # responses are uncacheable, so only a miss that takes the lock first opens one.
+      proxy.config.http.cache.defer_write_on_miss: 0
     remap_config:
       - "map http://one http://127.0.0.1:{SERVER_HTTP_PORT}"
       - "map http://two http://127.0.0.1:{SERVER_HTTP_PORT}/two"
