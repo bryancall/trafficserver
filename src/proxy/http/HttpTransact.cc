@@ -3557,12 +3557,30 @@ HttpTransact::handle_deferred_cache_write_complete(State *s)
 
 /** Whether a miss should fetch from the origin before taking the cache write lock.
 
-    A transaction that already holds the lock, as a followed redirect can, keeps using it.
+    A transaction that already holds the lock, as a followed redirect can, keeps using it. A
+    remap or plugin that sets its own open write fail action or open read retries wants misses
+    to wait on one another, which needs the lock first, so the global setting gives way to it.
+    A defer setting that differs from the global one was set the same way and is followed.
  */
 bool
 HttpTransact::should_defer_cache_write(State *s)
 {
-  return s->cache_info.write_lock_state != CacheWriteLock_t::SUCCESS && s->txn_conf->cache_defer_write_on_miss;
+  if (s->cache_info.write_lock_state == CacheWriteLock_t::SUCCESS) {
+    return false;
+  }
+  OverridableHttpConfigParams const &global = s->http_config_param->oride;
+  OverridableHttpConfigParams const &txn    = *s->txn_conf;
+  if (txn.cache_defer_write_on_miss != global.cache_defer_write_on_miss) {
+    return txn.cache_defer_write_on_miss;
+  }
+  if (!txn.cache_defer_write_on_miss) {
+    return false;
+  }
+  bool const own_fail_action =
+    txn.cache_open_write_fail_action != global.cache_open_write_fail_action && txn.cache_open_write_fail_action != 0;
+  bool const own_read_retries =
+    txn.max_cache_open_read_retries != global.max_cache_open_read_retries && txn.max_cache_open_read_retries > 0;
+  return !own_fail_action && !own_read_retries;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -909,4 +909,5 @@ In addition to the open read retry settings TS supports a new setting
 reduce multiple concurrent requests hitting the origin for the same object by
 either returning a stale copy, in case of hit-stale or an error in case of cache
 miss for all but one of the requests. The cache miss actions apply only with
-:ts:cv:`proxy.config.http.cache.defer_write_on_miss` set to ``0``.
+:ts:cv:`proxy.config.http.cache.defer_write_on_miss` set to ``0``, or where a
+remap sets its own fail action.

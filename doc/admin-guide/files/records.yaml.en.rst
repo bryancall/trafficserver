@@ -3962,10 +3962,16 @@ Dynamic Content & Content Negotiation
 
     The cost of ``1`` is that concurrent misses for a cacheable URL are not collapsed onto one
     origin fetch: each one fetches from the origin until one of them has taken the write lock. On a
-    miss, :ts:cv:`proxy.config.http.cache.open_write_fail_action` then does nothing; it still
-    applies to the revalidation of a stale object. A miss that arrives once a writer holds the lock
+    miss, a global :ts:cv:`proxy.config.http.cache.open_write_fail_action` then does nothing; it
+    still applies to the revalidation of a stale object. A miss that arrives once a writer holds the lock
     is still subject to the open read retries and reads behind it. Set ``0`` where many clients ask
-    for the same cacheable URL at once and the origin cannot take the burst. An override takes
+    for the same cacheable URL at once and the origin cannot take the burst.
+
+    A remap or plugin that sets its own nonzero
+    :ts:cv:`proxy.config.http.cache.open_write_fail_action` or positive
+    :ts:cv:`proxy.config.http.cache.max_open_read_retries`, different from the global value, asks
+    for misses to wait on one another, so its misses take the write lock first as with ``0``. A
+    value of this setting that differs from the global one is followed as set. An override takes
     effect when set at or before remap, as :file:`remap.config` with ``conf_remap.so`` does.
 
     The metric ``proxy.process.http.cache_open_write_deferred`` counts the misses that skipped
@@ -3978,8 +3984,9 @@ Dynamic Content & Content Negotiation
     This setting indicates the action taken on failing to obtain the cache open write lock on either a cache miss or a cache
     hit stale. This typically happens when there is more than one request to the same cache object simultaneously. During such
     a scenario, all but one (which goes to the origin) request is served either a stale copy or an error depending on this
-    setting. On a cache miss this applies only when :ts:cv:`proxy.config.http.cache.defer_write_on_miss` is ``0``; with
-    its default of ``1`` a miss does not take the lock before the origin, so the miss values below do nothing.
+    setting. With :ts:cv:`proxy.config.http.cache.defer_write_on_miss` at its default of ``1``, a miss does not take the
+    lock before the origin, so the miss values below do nothing unless this setting is overridden for the remap, as
+    described there.
 
    ===== ======================================================================
    Value Description

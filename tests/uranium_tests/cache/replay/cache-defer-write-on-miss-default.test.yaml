@@ -16,7 +16,9 @@
 
 # defer_write_on_miss is on unless configured off. With nothing set, a miss
 # goes to the origin before taking the cache write lock, a cacheable response
-# is still stored and served from cache, and a no-store response is not.
+# is still stored and served from cache, and a no-store response is not. A
+# remap that sets its own open write fail action or open read retries takes
+# the lock first instead, and still stores the response.
 
 meta:
   version: "1.0"
@@ -40,9 +42,20 @@ urtest:
     remap_config:
       - from: "http://example.com/"
         to: "http://127.0.0.1:{SERVER_HTTP_PORT}/"
+      - from: "http://fail-action.example.com/"
+        to: "http://127.0.0.1:{SERVER_HTTP_PORT}/"
+        plugins:
+          - name: conf_remap.so
+            args: ['proxy.config.http.cache.open_write_fail_action=1']
+      - from: "http://read-retries.example.com/"
+        to: "http://127.0.0.1:{SERVER_HTTP_PORT}/"
+        plugins:
+          - name: conf_remap.so
+            args: ['proxy.config.http.cache.max_open_read_retries=2']
 
-    # Deferred: the /cacheable miss and both /nostore requests. The second
-    # /cacheable request is a hit.
+    # Deferred: the /cacheable miss and both /nostore requests on example.com.
+    # The misses on the two overriding remaps are not, and the second request
+    # on each of the three cacheable URLs is a hit.
     metric_checks:
       - metric: proxy.process.http.cache_open_write_deferred
         value: 3
@@ -50,7 +63,7 @@ urtest:
         value: 0
         delay: 0
       - metric: proxy.process.http.cache_hit_fresh
-        value: 1
+        value: 3
         delay: 0
 
 sessions:
@@ -152,3 +165,97 @@ sessions:
       headers:
         fields:
         - [X-Response, {value: second, as: equal}]
+
+- transactions:
+  - client-request:
+      method: GET
+      url: /fail-action
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, fail-action.example.com]
+        - [uuid, fail-action-first]
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, "3"]
+        - [Cache-Control, "max-age=300"]
+        - [X-Response, first]
+      content:
+        encoding: plain
+        data: xxx
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Response, {value: first, as: equal}]
+
+  - client-request:
+      delay: 500ms
+      method: GET
+      url: /fail-action
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, fail-action.example.com]
+        - [uuid, fail-action-second]
+    server-response:
+      status: 400
+      reason: Bad Request
+      headers:
+        fields:
+        - [Content-Length, "0"]
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Response, {value: first, as: equal}]
+
+- transactions:
+  - client-request:
+      method: GET
+      url: /read-retries
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, read-retries.example.com]
+        - [uuid, read-retries-first]
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, "3"]
+        - [Cache-Control, "max-age=300"]
+        - [X-Response, first]
+      content:
+        encoding: plain
+        data: xxx
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Response, {value: first, as: equal}]
+
+  - client-request:
+      delay: 500ms
+      method: GET
+      url: /read-retries
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, read-retries.example.com]
+        - [uuid, read-retries-second]
+    server-response:
+      status: 400
+      reason: Bad Request
+      headers:
+        fields:
+        - [Content-Length, "0"]
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Response, {value: first, as: equal}]
