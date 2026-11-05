@@ -53,15 +53,22 @@ misses should note the following:
 
 * A global :ts:cv:`proxy.config.http.cache.open_write_fail_action` that acts on a
   miss (``1``, ``3``, ``4``, ``5`` or ``6``) no longer holds misses back, and
-  :program:`traffic_server` logs a warning at startup when one is set. It still
-  applies to revalidation.
-* A remap that sets its own miss fail action, or a positive
-  :ts:cv:`proxy.config.http.cache.max_open_read_retries`, keeps the earlier
-  behavior for its requests.
-* A slice plugin block request that arrives while its prefetch is still at the
-  origin makes its own origin fetch instead of reading behind it.
-* The xdebug ``X-Cache-Info`` header is absent on a miss for an uncacheable
-  object, since no cache read or write is open.
+  :program:`traffic_server` logs a warning at startup and on reload when one is
+  set. It still applies to revalidation.
+* A global positive :ts:cv:`proxy.config.http.cache.max_open_read_retries` no
+  longer holds a miss back either, until another request for the object holds
+  the write lock. No warning is logged for it.
+* :ts:cv:`proxy.config.http.cache.max_open_write_retries` and
+  :ts:cv:`proxy.config.http.cache.max_open_write_retry_timeout` do not apply to a
+  deferred miss: if it loses the write lock it serves its response without
+  retrying.
+* A remap or plugin that sets its own miss fail action, or a positive
+  :ts:cv:`proxy.config.http.cache.max_open_read_retries`, to a value different
+  from the global one keeps the earlier behavior for its requests.
+* A slice plugin block request that arrives before its prefetch's response
+  headers make its own origin fetch instead of reading behind the prefetch.
+* The xdebug ``X-Cache-Info`` header is absent on a miss that opens neither a
+  cache read nor a cache write, such as a miss for an uncacheable object.
 
 Set :ts:cv:`proxy.config.http.cache.defer_write_on_miss` to ``0``, globally or
 per remap, to restore the previous behavior.

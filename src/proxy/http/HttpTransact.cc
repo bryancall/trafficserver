@@ -3662,7 +3662,8 @@ HttpTransact::HandleCacheOpenReadMiss(State *s)
     // re-preparing a write as if this were a redirect or a new cache miss.
     TxnDbg(dbg_ctl_http_trans, "Reusing existing cache write lock while retrying origin selection");
   } else if (s->cache_open_write_deferred) {
-    // The DNS lookup brought this miss back here; the decision below was made on the first pass.
+    // A later pass, such as after the DNS lookup, brought this miss back here; the decision below
+    // was made on the first pass.
     s->cache_info.action = CacheAction_t::NO_ACTION;
   } else if (should_defer_cache_write(s)) {
     // Go to the origin without the write lock and take it only if the response
