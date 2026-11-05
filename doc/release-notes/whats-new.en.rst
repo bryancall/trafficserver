@@ -39,6 +39,10 @@ ranges.
 Configuration
 -------------
 
+* Added :ts:cv:`proxy.config.http.cache.defer_write_on_miss`. When enabled, the
+  default, a cache miss goes to the origin before taking the cache write lock and
+  takes the lock only for a response that can be stored, so concurrent requests
+  for an uncacheable object no longer wait on one another. See :ref:`upgrading`.
 * Added :ts:cv:`proxy.config.http.reject_head_with_content` to control whether a
   ``HEAD`` request carrying ``Content-Length`` or ``Transfer-Encoding`` is
   refused. Enabled by default.
