@@ -39,7 +39,11 @@ class BaseMetaInfo;
   LogFile
   -------------------------------------------------------------------------*/
 
-class LogFile : public LogBufferSink, public RefCountObjInHeap
+// final tells GCC that a Ptr<LogFile> holds exactly a LogFile. Without it,
+// GCC 16 at -O2 and -O3 speculatively inlines ~LogFieldAliasTable into the
+// delete in Log.cc's flush thread, on a branch that never runs, and fails the
+// build on a false -Wfree-nonheap-object.
+class LogFile final : public LogBufferSink, public RefCountObjInHeap
 {
 public:
   LogFile(const char *name, const char *header, LogFileFormat format, uint64_t signature, size_t ascii_buffer_size = 4 * 9216,
