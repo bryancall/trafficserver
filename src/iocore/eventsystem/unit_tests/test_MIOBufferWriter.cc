@@ -24,6 +24,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 
 struct IOBufferBlock {
   std::int64_t write_avail();
@@ -195,7 +196,13 @@ TEST_CASE("MIOBufferWriter", "[MIOBW]")
 void
 _ink_assert(const char * /* a ATS_UNUSED */, const char * /* f ATS_UNUSED */, int /* l ATS_UNUSED */)
 {
-  // Coverity is confused and thinks this _ink_assert is the one used in traffic_server
-  // coverity[UNCAUGHT_EXCEPT:FALSE]
+  // Coverity analyzes every program as one, so it picks this definition for
+  // ink_assert() calls in traffic_server and reports each caller there as
+  // letting InkAssertExcept escape. Its build never runs the tests, so give it
+  // a definition that does not throw.
+#if defined(__COVERITY__)
+  std::abort();
+#else
   throw InkAssertExcept();
+#endif
 }
