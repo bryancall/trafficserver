@@ -196,10 +196,11 @@ TEST_CASE("MIOBufferWriter", "[MIOBW]")
 void
 _ink_assert(const char * /* a ATS_UNUSED */, const char * /* f ATS_UNUSED */, int /* l ATS_UNUSED */)
 {
-  // Coverity analyzes every program as one, so it picks this definition for
-  // ink_assert() calls in traffic_server and reports each caller there as
-  // letting InkAssertExcept escape. Its build never runs the tests, so give it
-  // a definition that does not throw.
+  // Throwing lets REQUIRE_THROWS_AS check that MIOBufferWriter asserts.
+  // Coverity analyzes every program as one and picks this definition for
+  // ink_assert() in traffic_server too, then reports each destructor or
+  // entry point that can reach an assert as letting InkAssertExcept escape.
+  // Coverity compiles this test but never runs it, so it gets an abort.
 #if defined(__COVERITY__)
   std::abort();
 #else
