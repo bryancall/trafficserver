@@ -189,12 +189,6 @@ ts_lua_client_handler(TSCont contp, ts_lua_http_transform_ctx *transform_ctx, TS
       } else {
         lua_pushinteger(L, 0); /* second param, data not finish */
       }
-    } else {
-      lua_pushlightuserdata(L, transform_ctx);
-      lua_rawget(L, LUA_GLOBALSINDEX); /* push function */
-
-      lua_pushlstring(L, "", 0);
-      lua_pushinteger(L, 1); /* second param, data finished */
     }
 
   launch:
