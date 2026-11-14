@@ -25,6 +25,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstring>
+#include <fcntl.h>
 #include <unistd.h>
 
 TEST_CASE("ink_file_fd_writestring returns the number of bytes written", "[ink_file]")
@@ -45,7 +46,7 @@ TEST_CASE("ink_file_fd_writestring returns the number of bytes written", "[ink_f
   close(fds[1]);
 }
 
-TEST_CASE("ink_file_fd_writestring writes nothing for an empty or null string", "[ink_file]")
+TEST_CASE("ink_file_fd_writestring returns 0 for an empty or null string", "[ink_file]")
 {
   int fds[2];
   REQUIRE(pipe(fds) == 0);
@@ -59,12 +60,12 @@ TEST_CASE("ink_file_fd_writestring writes nothing for an empty or null string", 
 
 TEST_CASE("ink_file_fd_writestring returns -1 when the write fails", "[ink_file]")
 {
-  int fds[2];
-  REQUIRE(pipe(fds) == 0);
+  // Opened read-only, so write() fails. Pipes will not do: on FreeBSD
+  // both ends are writable.
+  int fd = open("/dev/null", O_RDONLY);
+  REQUIRE(fd >= 0);
 
-  // The read end of a pipe is not open for writing.
-  CHECK(ink_file_fd_writestring(fds[0], "text") == -1);
+  CHECK(ink_file_fd_writestring(fd, "text") == -1);
 
-  close(fds[0]);
-  close(fds[1]);
+  close(fd);
 }
