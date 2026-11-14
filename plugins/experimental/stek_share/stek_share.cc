@@ -506,9 +506,10 @@ stek_updater(void * /* arg ATS_UNUSED */)
         std::shared_lock sm_lock(stek_share_server.sm_mutex);
         auto             sm = dynamic_cast<STEKShareSM *>(stek_share_server.sm_instance.get());
 
-        // Check whether we received a new key.
+        // Check whether we received a new key. reset() clears the state machine before it waits for raft_mutex, so a reload
+        // or shutdown can leave it null here even though we hold that lock.
         // TODO: retry updating STEK when failed
-        if (sm->received_stek(&curr_stek)) {
+        if (sm != nullptr && sm->received_stek(&curr_stek)) {
           Dbg(dbg_ctl, "Received new STEK: %s",
               hex_str(std::string(reinterpret_cast<char *>(&curr_stek), SSL_TICKET_KEY_SIZE)).c_str());
 
